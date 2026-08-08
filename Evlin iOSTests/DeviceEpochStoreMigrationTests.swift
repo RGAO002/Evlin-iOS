@@ -166,6 +166,34 @@ final class DeviceEpochStoreMigrationTests: XCTestCase {
         ))
     }
 
+    func testV1CallbackIsRejectedEvenWhenLegacyProvenanceMatches() throws {
+        let defaults = makeDefaults()
+        defer { clear(defaults) }
+        let io = MigrationFileIO()
+        let store = makeStore(io: io, defaults: defaults)
+        let active = generation(suffix: "active", offset: 10, armedAt: 10)
+
+        try store.transaction(expectedOwner: owner) { state in
+            state.legacy = LegacyCompatibilityMonitorState(
+                ownerChildDeviceID: self.owner,
+                lifecycleVersion: 2,
+                active: active,
+                pending: nil,
+                retiringActivityNames: [],
+                breadcrumbActivityNames: [],
+                scalarActiveActivityName: active.activityName,
+                isStopped: false,
+                phase: .activeV1,
+                stopAcknowledgedAt: nil
+            )
+        }
+
+        XCTAssertFalse(LegacyMeteringActivity.isAuthorized(
+            generation: active,
+            store: store
+        ))
+    }
+
     private func makeStore(io: MigrationFileIO, defaults: UserDefaults) -> DeviceEpochStore {
         DeviceEpochStore(
             fileURL: URL(fileURLWithPath: "/tmp/evlin-device-epoch-store-migration.json"),

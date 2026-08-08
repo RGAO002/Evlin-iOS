@@ -122,6 +122,14 @@ struct CommandDeliveryDiagnosticsView: View {
                 }
             }
             meteringMonitorProbeSection
+            Section {
+                blockedApplicationsReadbackRows
+            } header: {
+                Text("Blocked Applications Readback")
+            } footer: {
+                Text("Live read of ManagedSettingsStore.application.blockedApplications — what iOS is actually holding, not what we recorded. Use to tell a lost write apart from a write iOS accepted but does not enforce.")
+                    .font(.system(size: 11))
+            }
             AppLimitOneMinuteProbeView()
 #endif
             pickerSeparationSection
@@ -208,6 +216,23 @@ struct CommandDeliveryDiagnosticsView: View {
     /// settled on a real authorized device before building on it. Uses an isolated
     /// named store so the shield test never touches the real lock.
     @ViewBuilder
+    private var blockedApplicationsReadbackRows: some View {
+        let held = ManagedSettingsStore().application.blockedApplications
+        if let held, !held.isEmpty {
+            ForEach(Array(held).indices, id: \.self) { index in
+                let app = Array(held)[index]
+                Text(app.bundleIdentifier ?? "(token-only entry)")
+                    .font(.system(size: 12, design: .monospaced))
+            }
+            Text("count=\(held.count)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else {
+            Text(held == nil ? "nil (no denylist set)" : "empty set")
+                .font(.system(size: 12, design: .monospaced))
+        }
+    }
+
     private var pickerSeparationSection: some View {
         Section {
             Button("Open picker (includeEntireCategory = false)") {

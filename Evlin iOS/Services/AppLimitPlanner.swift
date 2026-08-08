@@ -208,6 +208,7 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
                     provenance.predecessorIgnoredWhilePausedMinutes = ignored
                     provenance.pausedAt = nil
                     provenance.monitorStartPending = true
+                    provenance.physicalEventsConsumedAt = nil
                     provenance.startedAt = resumedAt
                     provenance.armID = armID
                     provenance.activityName = Self.v2ActivityName(armID: armID)
@@ -721,6 +722,51 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
             intervalStart: startComponents,
             intervalEnd: endComponents,
             repeats: window.repeats
+        )
+    }
+
+    /// V2 arms anchor their interval at the ARM moment, not the window's
+    /// nominal start. The events use `includesPastActivity: false`, and since
+    /// the 26.5.2-era daemon a `false` event attached MID-interval never fires
+    /// for the remainder of that interval day (observed 2026-08-05..07 across
+    /// two devices: production arms silent all day; an identical probe with
+    /// `past: true` fired in 50s; the earned ladder — arm-anchored since
+    /// 07-25 — kept firing throughout). Anchoring makes the attach moment BE
+    /// the interval start, which is the one shape both Apple's documentation
+    /// and the earned ladder's real-world evidence agree fires immediately.
+    ///
+    /// Non-repeating: this interval covers the REMAINDER of today's window
+    /// only. The daily budget reset re-arms through the owner-recovery paths
+    /// (foreground, poll, silent wake), which mint a fresh anchored interval
+    /// for the new day. Until that re-arm the limit is unmonitored, which can
+    /// only UNDER-count — the safe direction.
+    static func v2ArmSchedule(
+        for window: AppLimitWindow,
+        armedAt: Date
+    ) -> DeviceActivitySchedule {
+        let tz = window.timezone.flatMap(TimeZone.init(identifier:)) ?? .current
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = tz
+        let nowParts = calendar.dateComponents([.hour, .minute], from: armedAt)
+        let nowMinute = (nowParts.hour ?? 0) * 60 + (nowParts.minute ?? 0)
+        // Clamp inside the window; if the window has under a minute left,
+        // fall back to the nominal window (worst case: today stays silent,
+        // exactly what the old shape did all day).
+        let startMinute = min(max(window.startMinute, nowMinute), window.endMinute - 1)
+        var startComponents = DateComponents(
+            hour: startMinute / 60,
+            minute: startMinute % 60
+        )
+        var endComponents = DateComponents(
+            hour: window.endMinute / 60,
+            minute: window.endMinute % 60
+        )
+        startComponents.timeZone = tz
+        endComponents.timeZone = tz
+        return DeviceActivitySchedule(
+            intervalStart: startComponents,
+            intervalEnd: endComponents,
+            repeats: false
         )
     }
 

@@ -72,6 +72,7 @@ enum OnboardingStep: Equatable {
     case childAllowNotifications // mockup 10: "Allow notifications"
     case childLockableHub        // mockup 12: "Choose what Evlin can lock"
     case childSafetyLock         // mockup 14 (MOVED to kid): set the Screen Time passcode ON the kid's phone
+    case childFinalSetup         // tracking selection + Evlin Parent PIN
 }
 
 struct OnboardingCoordinator: View {
@@ -671,7 +672,23 @@ struct OnboardingCoordinator: View {
                         // appear, so injecting from the step's own onAppear
                         // would race its .task.
                         parentInviteModel.api = .live(client: apiClient)
-                        parentInviteModel.onJoined = { step = .parentConnected }
+                        parentInviteModel.onJoined = { identity in
+                            AppControlsIdentityGuard.adopt(
+                                childDeviceID: identity.childDeviceID
+                            )
+                            familyID = identity.familyID
+                            pairedChildDeviceID = identity.childDeviceID
+                            childDeviceID = identity.childDeviceID
+                            UserDefaults.standard.set(
+                                identity.familyID.uuidString,
+                                forKey: "evlin.familyID"
+                            )
+                            UserDefaults.standard.set(
+                                identity.childDeviceID.uuidString,
+                                forKey: "evlin.childDeviceID"
+                            )
+                            step = .parentConnected
+                        }
                         step = .parentInviteV2
                     },
                     onJoinCode: { code in await joinCoParentFamily(code) },
@@ -855,6 +872,7 @@ struct OnboardingCoordinator: View {
                     autoInvite: singleDeviceInviteCode.map { .legacySixDigit($0) },
                     onJoined: { result in
                         adoptKidJoinResult(result)
+                        startKidJoinMeteringBootstrap(for: result.childDeviceID)
                         singleDeviceInviteCode = nil
                         step = .childConnected
                     },
@@ -892,17 +910,31 @@ struct OnboardingCoordinator: View {
             case .childSafetyLock:
                 // MOVED from the parent chain: the Screen Time passcode is set ON the
                 // kid's phone (it's what stops the kid disabling Evlin), so it's the
-                // last kid step before "All set!". Reuses the passcode screen with
-                // kid theming/copy. Parent just waits for the kid's All-set signal.
+                // safety step before final tracking and PIN setup. Reuses the
+                // passcode screen with kid theming/copy.
                 ParentSetPasscodeV2Step(
                     kidName: kidName,
-                    onContinue: { step = .childReady },
+                    onContinue: { step = .childFinalSetup },
                     onBack: { step = .childLockableHub },
                     role: .child,
                     phase: "5 · Safety",
                     stepIndex: 10,
                     dotsCurrent: 9,
                     total: 11   // childTotal (private to ChildV2PlaceholderSteps.swift)
+                )
+
+            case .childFinalSetup:
+                ChildFinalSetupStep(
+                    childDeviceID: childDeviceID,
+                    familyID: familyID,
+                    kidName: kidName,
+                    onEnter: {},
+                    onSingleDeviceContinue: singleDevice ? {
+                        SingleDeviceSession.shared.stage = .done
+                        appMode = "parent"
+                        onboardingComplete = true
+                    } : nil,
+                    onBack: { step = .childSafetyLock }
                 )
             }
         }
@@ -993,6 +1025,7 @@ struct OnboardingCoordinator: View {
                 clientInstallIDOverride: singleDevice ? SingleDeviceSession.shared.clientInstallIDOverride : nil
             )
             familyID = r.family_id
+            AppControlsIdentityGuard.adopt(childDeviceID: r.child_device_id)
             childDeviceID = r.child_device_id
             childPairingCode = r.pairing_code
 
@@ -1046,19 +1079,29 @@ struct OnboardingCoordinator: View {
             "device_model_id": info.device_model_id,
             "device_name": UIDevice.current.name,
         ]
-        if let existing = UserDefaults.standard.string(forKey: DeviceIdentity.childKey) {
+        // UserDefaults dies with an app deletion — reading only it meant a
+        // reinstalled device joined with NO identity and the backend could
+        // never offer restore (resolution 2026-08-05 21:48: keychain field
+        // empty, restore withheld). The Keychain mirror is the copy that
+        // survives; fall back to it exactly as its name promises.
+        if let existing = UserDefaults.standard.string(forKey: DeviceIdentity.childKey)
+            ?? DeviceIdentity.shared.mirroredValue(forKey: DeviceIdentity.childKey) {
             snapshot["keychain_device_uuid"] = existing
         }
         return snapshot
     }
 
-    /// Persist the identity the join produced, writing the same UserDefaults
-    /// keys `createKidFamily` does so every existing reader keeps working.
-    ///
-    /// The heavy lifting — tearing down a previous identity's monitors before
-    /// this one is armed — belongs to the adoption executor and runs off the
-    /// durable record, not here.
+    /// Persist the join's identity immediately. A completed pairing must
+    /// survive process termination even while its retained App Controls
+    /// selection is still being re-published under the new device row.
     private func adoptKidJoinResult(_ result: PairingCommitResult) {
+        ParentPINSyncCoordinator.prepareForAdoption(
+            deviceID: result.childDeviceID
+        )
+        // The retained App Controls selection is only meaningful if it was
+        // captured under THIS child-device identity; otherwise its tokens are
+        // from a previous life and arm monitors that never fire.
+        AppControlsIdentityGuard.adopt(childDeviceID: result.childDeviceID)
         familyID = result.familyID
         childDeviceID = result.childDeviceID
         UserDefaults.standard.set(result.familyID.uuidString, forKey: "evlin.familyID")
@@ -1066,9 +1109,81 @@ struct OnboardingCoordinator: View {
                                   forKey: DeviceIdentity.childKey)
         UserDefaults.standard.set(result.childProfileID.uuidString,
                                   forKey: "evlin.childProfileID")
-        // Mirror into the Keychain immediately: a reinstall before the next
-        // background capture would otherwise lose the identity just adopted.
         DeviceIdentity.shared.capture()
+    }
+
+    /// Pairing creates a new backend device identity while preserving this
+    /// hardware's local App Controls selection. Make that selection useful
+    /// immediately: mirror the new metering owner, publish the retained blob
+    /// under the new device ID, then fetch the policy that may already be at
+    /// zero. This deliberately runs before the user advances beyond the
+    /// connected screen, rather than waiting for the normal K-home poll loop.
+    @MainActor
+    private func startKidJoinMeteringBootstrap(for childDeviceID: UUID) {
+        let appGroupDefaults = UserDefaults(
+            suiteName: EarnedTimeStore.appGroupSuiteName
+        )
+        let bootstrap = KidJoinMeteringBootstrap(
+            prepareIdentity: { deviceID in
+                EarnedBudgetArming.mirrorChildIdentity(
+                    deviceID,
+                    appGroupDefaults: appGroupDefaults,
+                    epochStore: .shared
+                )
+                appGroupDefaults?.set(
+                    APIClient.currentBaseURL,
+                    forKey: MeteringProductionComposition.baseURLKey
+                )
+            },
+            convergeAppLimitIdentity: { deviceID in
+                AppLimitPairingIdentityConvergence.run(
+                    ownerChildDeviceID: deviceID
+                )
+            },
+            publishSelection: {
+                await AppControlsBackendSync.publishDefaultLockGroupIfNeeded(
+                    for: childDeviceID
+                )
+            },
+            publishMatchedCatalog: {
+                await AppControlsBackendSync.republishMatchedCatalogIfNeeded(
+                    for: childDeviceID,
+                    forceSnapshot: true
+                )
+            },
+            recoverMetering: { [apiClient] in
+                guard let baseURL = URL(string: apiClient.baseURL) else {
+                    MeteringFlightRecorder.emitFailure(
+                        site: "pairing.metering_bootstrap",
+                        verdict: "invalid_base_url"
+                    )
+                    return
+                }
+                do {
+                    let state = try await BigKidAPIClient(
+                        baseURL: baseURL,
+                        childId: childDeviceID
+                    ).fetchState()
+                    try await MeteringProductionComposition.recoverFromSharedConfiguration(
+                        role: .app,
+                        runtime: state.earnedTimeRuntime,
+                        usageCountingAllowed: state.effectiveUsageCountingAllowed
+                    )
+                } catch {
+                    // Pairing remains usable on a transient network failure; the
+                    // normal child-state poll retries this recovery immediately
+                    // after onboarding completes.
+                    MeteringFlightRecorder.emitError(
+                        site: "pairing.metering_bootstrap",
+                        error: error
+                    )
+                }
+            },
+            startCommandOwner: { [apiClient] deviceID in
+                CommandPoller.shared.start(deviceID: deviceID, apiClient: apiClient)
+            }
+        )
+        Task { await bootstrap.run(for: childDeviceID) }
     }
 
     /// Plan 5 — the co-parent join path. POSTs the entered invite code to

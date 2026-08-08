@@ -3,6 +3,48 @@ import XCTest
 @testable import Evlin_iOS
 
 final class AppLimitCallbackNoEffectsTests: XCTestCase {
+    func testDurableEffectFailureDoesNotConsumeOneShotCallback() throws {
+        enum InjectedFailure: Error { case journalUnavailable }
+
+        let fixture = try AppLimitCallbackFixture(budgetMinutes: 20)
+        XCTAssertThrowsError(
+            try fixture.validator.process(
+                activityName: fixture.provenance.activityName,
+                eventName: fixture.measurementEventName(5),
+                canonicalUsageDate: fixture.usageDate,
+                observedAt: fixture.observedAt(minutes: 5),
+                usageCountingAllowed: true
+            ) { _ in
+                throw InjectedFailure.journalUnavailable
+            }
+        )
+        XCTAssertEqual(
+            try fixture.store.read().slots[fixture.rule.id]?
+                .armProvenance?.lastRawThresholdMinutes,
+            0,
+            "a failed durable enqueue must leave the one-shot callback retryable"
+        )
+
+        var durableEffects = 0
+        let retry = try fixture.validator.process(
+            activityName: fixture.provenance.activityName,
+            eventName: fixture.measurementEventName(5),
+            canonicalUsageDate: fixture.usageDate,
+            observedAt: fixture.observedAt(minutes: 6),
+            usageCountingAllowed: true
+        ) { _ in
+            durableEffects += 1
+        }
+
+        XCTAssertAccepted(retry, kind: .measurement)
+        XCTAssertEqual(durableEffects, 1)
+        XCTAssertEqual(
+            try fixture.store.read().slots[fixture.rule.id]?
+                .armProvenance?.lastRawThresholdMinutes,
+            5
+        )
+    }
+
     func testAcceptedCallbackInvokesEffectExactlyOnceAndDuplicateInvokesNone() throws {
         let fixture = try AppLimitCallbackFixture(budgetMinutes: 20)
         var effects = AppLimitCallbackEffectSpy()

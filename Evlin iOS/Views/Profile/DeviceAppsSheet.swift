@@ -22,6 +22,10 @@ struct DeviceAppsSheet: View {
     @AppStorage("evlin.familyID") private var pairedFamilyID: String = ""
 
     @State private var apps: [DeviceAppItem] = []
+    /// Refreshes real usage while this detail page is visible. It is stopped
+    /// while a parent is editing a limit so a background response cannot
+    /// replace an optimistic value mid-interaction.
+    @State private var refreshTask: Task<Void, Never>? = nil
 
     /// First-visit App Limits spotlight tour (device cap → per-app toggles →
     /// midnight reset). Starts only once apps have loaded so every anchor
@@ -67,6 +71,8 @@ struct DeviceAppsSheet: View {
     @State private var capSaving = false
     /// Cascade confirm: when non-nil, show the confirm sheet.
     @State private var pendingCascade: EarnedCascadeDecision.Result? = nil
+    /// The cap the parent asked for while a cascade confirm is pending.
+    @State private var pendingCascadeCap: Int?
 
     /// Family id for parent API calls — sourced the same way ProfileView's
     /// lock-all does (`UserDefaults` "evlin.familyID"). `nil` until paired.
@@ -192,6 +198,9 @@ struct DeviceAppsSheet: View {
                         .tourTarget("device.reset")
                         .id("device.reset")
                 }
+                .refreshable {
+                    await reloadApps()
+                }
                 .onReceive(NotificationCenter.default.publisher(for: .evlinTourStepChanged)) { note in
                     guard let target = note.userInfo?["target"] as? String,
                           target.hasPrefix("device.") else { return }
@@ -229,103 +238,14 @@ struct DeviceAppsSheet: View {
             }
         }
         .onAppear {
-            if let fixtureApps {
-                apps = fixtureApps
-                return
-            }
-            guard apps.isEmpty, let cid = childDeviceID else { return }
-            isLoading = true
-
-            // B9: load earned-time policy (cap options + pool) alongside the catalog.
-            // Uses child.id as the profile UUID when available.
-            if let childProfileID = UUID(uuidString: childId) {
-                Task {
-                    if let policy = try? await apiClient.fetchEarnedPolicy(childProfileID: childProfileID) {
-                        poolMinutes = policy.pool_minutes
-                        policyAppOptions = policy.allowed_app_options
-                        // Find the cap entry for this specific device. The EFFECTIVE
-                        // per-app cap mirrors the backend (R7 / _validate_budget_vs_cap):
-                        // an explicit device cap if set, ELSE the daily pool. Without
-                        // this fallback `deviceCapMinutes` was nil for a pool-only device,
-                        // so `defaultPill` became min(60, 60)=60 and turning on a limit
-                        // POSTed budget=60 — which the backend 422s once the pool drops
-                        // below 60 ("app_limit_exceeds_device_cap").
-                        if let devEntry = policy.devices?.first(where: { $0.child_device_id == cid }) {
-                            deviceCapMinutes = devEntry.device_cap_minutes ?? policy.pool_minutes
-                            capOptions = EarnedCapOptions.compute(
-                                policyCapOptions: devEntry.allowed_cap_options,
-                                poolMinutes: policy.pool_minutes ?? Int.max)
-                        } else {
-                            deviceCapMinutes = policy.daily_cap_minutes ?? policy.pool_minutes
-                            capOptions = []
-                        }
-                    }
-                }
-            }
-
             Task {
-                do {
-                    let targets = try await apiClient.fetchLazyTagCatalogTargets(childDeviceID: cid)
-                    let appTargets = targets.filter { $0.type == .app }
-                    // 1) Render immediately: prettified names + any backend artwork.
-                    //    Default the pill to min(60, cap) — B9; leave the limit OFF — the real
-                    //    rules merge below flips on the apps that actually have one.
-                    let defaultPill = EarnedAppOptions.defaultPill(deviceCap: deviceCapMinutes ?? 60)
-                    let catalogApps = appTargets.map { t in
-                        DeviceAppItem(
-                            id: t.aliasKey.uuidString,
-                            name: NameWithIcon.displayName(t.displayName),   // fixes casing (ig→Instagram, etc.)
-                            iconSystemName: "app.fill",
-                            brandColor: Color.evPrimary,
-                            bgColor: Color.evPrimaryContainer,
-                            enabled: false,
-                            usedMin: 0,
-                            limitMin: defaultPill,
-                            artworkURL: t.artworkURL,
-                            bundleID: t.bundleID
-                        )
-                    }
-                    // 2) Load real per-app limits and merge by bundle_id (apps with
-                    //    a rule → on + that budget + ruleID; without → limit off).
-                    var merged = catalogApps
-                    if let famID = familyID {
-                        let rules = (try? await apiClient.listAppLimits(
-                            familyID: famID, childDeviceID: cid)) ?? []
-                        let summaries = rules.map {
-                            AppLimitRuleSummary(
-                                ruleID: $0.rule_id,
-                                bundleID: $0.bundle_id,
-                                dailyBudgetMinutes: $0.daily_budget_minutes,
-                                orderingToken: $0.ordering_token,
-                                usedMinutes: $0.used_minutes ?? 0)
-                        }
-                        merged = DeviceAppLimitMerge.apply(rules: summaries, to: catalogApps)
-                    }
-                    apps = merged
-                    for app in merged {
-                        appLimitEditQueue.seed(
-                            key: app.id,
-                            state: .init(
-                                ruleID: app.ruleID,
-                                orderingToken: app.orderingToken))
-                    }
-                    isLoading = false
-                    // 3) Backfill real icons: when the backend gave no artwork URL,
-                    //    resolve the App Store icon by name (cached) and patch it in.
-                    for t in appTargets where t.artworkURL == nil {
-                        let pretty = NameWithIcon.displayName(t.displayName)
-                        if let url = await AppArtworkResolver.shared.artwork(forName: pretty),
-                           let bundle = t.bundleID {
-                            // Layer 1: write ONLY the side dictionary — never `apps` —
-                            // so this backfill can't re-render/re-identify app rows.
-                            artworkByBundleID[bundle] = url
-                        }
-                    }
-                } catch {
-                    loadFailed = true
-                    isLoading = false
-                }
+                await loadAppsIfNeeded()
             }
+            startAutoRefresh()
+        }
+        .onDisappear {
+            refreshTask?.cancel()
+            refreshTask = nil
         }
         // B9: cascade-confirm sheet.
         .sheet(item: Binding(
@@ -337,12 +257,19 @@ struct DeviceAppsSheet: View {
                 summary: "Lowering this device's limit may reduce app limits.",
                 onApply: { effective in
                     pendingCascade = nil
-                    // Re-call putDeviceCap with confirm_cascade (handled in saveDeviceCap).
-                    if let cap = deviceCapMinutes {
+                    // Re-send the REQUESTED cap, not `deviceCapMinutes`: the
+                    // optimistic value is rolled back when the backend answers
+                    // `needs_confirmation`, so reading it here would re-submit
+                    // the OLD cap and the confirm button would do nothing.
+                    if let cap = pendingCascadeCap ?? deviceCapMinutes {
+                        pendingCascadeCap = nil
                         saveDeviceCap(cap, confirmedCascade: true, effective: effective)
                     }
                 },
-                onCancel: { pendingCascade = nil }
+                onCancel: {
+                    pendingCascade = nil
+                    pendingCascadeCap = nil
+                }
             )
         }
         // Device daily total — a slider, matching the Daily Screen Time rule so
@@ -357,6 +284,110 @@ struct DeviceAppsSheet: View {
                 ) { newCap in
                     saveDeviceCap(newCap, confirmedCascade: false)
                 }
+            }
+        }
+    }
+
+    @MainActor
+    private func loadAppsIfNeeded() async {
+        guard apps.isEmpty else { return }
+        await reloadApps()
+    }
+
+    @MainActor
+    private func reloadApps() async {
+        guard !isLoading else { return }
+        if let fixtureApps {
+            apps = fixtureApps
+            return
+        }
+        guard let cid = childDeviceID else { return }
+        isLoading = true
+        loadFailed = false
+
+        // Load policy before the catalog so the first rendered pill already
+        // respects the current device cap.
+        if let childProfileID = UUID(uuidString: childId),
+           let policy = try? await apiClient.fetchEarnedPolicy(childProfileID: childProfileID) {
+            poolMinutes = policy.pool_minutes
+            policyAppOptions = policy.allowed_app_options
+            if let devEntry = policy.devices?.first(where: { $0.child_device_id == cid }) {
+                deviceCapMinutes = devEntry.device_cap_minutes ?? policy.pool_minutes
+                capOptions = EarnedCapOptions.compute(
+                    policyCapOptions: devEntry.allowed_cap_options,
+                    poolMinutes: policy.pool_minutes ?? Int.max)
+            } else {
+                deviceCapMinutes = policy.daily_cap_minutes ?? policy.pool_minutes
+                capOptions = []
+            }
+        }
+
+        do {
+            let targets = try await apiClient.fetchLazyTagCatalogTargets(childDeviceID: cid)
+            let appTargets = targets.filter { $0.type == .app }
+            let defaultPill = EarnedAppOptions.defaultPill(deviceCap: deviceCapMinutes ?? 60)
+            let catalogApps = appTargets.map { target in
+                DeviceAppItem(
+                    id: target.aliasKey.uuidString,
+                    name: NameWithIcon.displayName(target.displayName),
+                    iconSystemName: "app.fill",
+                    brandColor: Color.evPrimary,
+                    bgColor: Color.evPrimaryContainer,
+                    enabled: false,
+                    usedMin: 0,
+                    limitMin: defaultPill,
+                    artworkURL: target.artworkURL,
+                    bundleID: target.bundleID
+                )
+            }
+            var merged = catalogApps
+            if let famID = familyID {
+                let rules = (try? await apiClient.listAppLimits(
+                    familyID: famID,
+                    childDeviceID: cid
+                )) ?? []
+                let summaries = rules.map {
+                    AppLimitRuleSummary(
+                        ruleID: $0.rule_id,
+                        bundleID: $0.bundle_id,
+                        dailyBudgetMinutes: $0.daily_budget_minutes,
+                        orderingToken: $0.ordering_token,
+                        usedMinutes: $0.used_minutes ?? 0
+                    )
+                }
+                merged = DeviceAppLimitMerge.apply(rules: summaries, to: catalogApps)
+            }
+            apps = merged
+            for app in merged {
+                appLimitEditQueue.seed(
+                    key: app.id,
+                    state: .init(ruleID: app.ruleID, orderingToken: app.orderingToken)
+                )
+            }
+            isLoading = false
+
+            for target in appTargets where target.artworkURL == nil {
+                let pretty = NameWithIcon.displayName(target.displayName)
+                if let url = await AppArtworkResolver.shared.artwork(forName: pretty),
+                   let bundle = target.bundleID {
+                    artworkByBundleID[bundle] = url
+                }
+            }
+        } catch {
+            loadFailed = true
+            isLoading = false
+        }
+    }
+
+    @MainActor
+    private func startAutoRefresh() {
+        guard fixtureApps == nil, refreshTask == nil else { return }
+        refreshTask = Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                guard !Task.isCancelled else { return }
+                guard editingLimitFor == nil, !capSaving, !isLoading else { continue }
+                await reloadApps()
             }
         }
     }
@@ -410,6 +441,17 @@ struct DeviceAppsSheet: View {
                     .foregroundStyle(Color.evPrimary)
             }
             Spacer()
+            Button {
+                Task { await reloadApps() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color.evPrimary)
+                    .frame(width: 40, height: 40)
+            }
+            .buttonStyle(.plain)
+            .disabled(isLoading)
+            .accessibilityLabel("Refresh app limits")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -786,6 +828,7 @@ struct DeviceAppsSheet: View {
                 affectedApps: affectedApps)
             if decision.needsConfirmation {
                 pendingCascade = decision
+                pendingCascadeCap = newCap
                 return   // DO NOT call putDeviceCap — wait for confirmation
             }
         }
@@ -796,19 +839,50 @@ struct DeviceAppsSheet: View {
         Task {
             defer { capSaving = false }
             do {
-                _ = try await apiClient.putDeviceCap(
+                let response = try await apiClient.putDeviceCap(
                     childProfileID: childProfileID,
                     childDeviceID: cid,
                     capMinutes: newCap,
                     effective: effective,
-                    confirmCascade: true)
-                // On success the cap is already applied optimistically.
+                    confirmCascade: confirmedCascade)
+                // The backend runs its OWN cascade check against the real
+                // app-limit rows. The local gate above only sees `apps`, which
+                // is the App Controls selection — a rule can be active while
+                // absent (or stale) there, and then the backend answers
+                // `needs_confirmation`: a DRY RUN that writes nothing. Treating
+                // that as success left the sheet showing the new cap and
+                // promising the limits were adjusted while the database kept
+                // the old cap and the untouched rule (2026-08-07: 130 → 55
+                // refused three times, silently).
+                if response.needsConfirmation {
+                    deviceCapMinutes = previousCap
+                    pendingCascadeCap = newCap
+                    pendingCascade = EarnedCascadeDecision.Result(
+                        needsConfirmation: true,
+                        affectedDevices: [],
+                        affectedApps: (response.affected_app_limits ?? []).map {
+                            EarnedCascadeDecision.AffectedApp(
+                                bundleID: $0.bundle_id,
+                                name: appDisplayName(forBundleID: $0.bundle_id),
+                                currentBudgetMinutes: $0.current_budget_minutes,
+                                newBudgetMinutes: $0.new_budget_minutes)
+                        },
+                        defaultAction: .applyNow)
+                }
+                // Otherwise the cap is already applied optimistically.
             } catch {
                 // Revert on failure.
                 deviceCapMinutes = previousCap
                 setActionError("Couldn't save the cap — try again.")
             }
         }
+    }
+
+    /// Friendly name for a bundle id the backend flagged, falling back to the
+    /// bundle id itself when the row is not in the local App Controls list —
+    /// exactly the case the local gate misses.
+    private func appDisplayName(forBundleID bundleID: String) -> String {
+        apps.first { ($0.bundleID ?? $0.id) == bundleID }?.name ?? bundleID
     }
 }
 

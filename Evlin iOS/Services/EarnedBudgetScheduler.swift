@@ -62,13 +62,13 @@ final class EarnedBudgetScheduler {
         )
     }
 
-    /// Once a v2 route is in handoff, the legacy monitor is a protected prior
-    /// lane. Re-arming it would replace the physical counter underneath the
-    /// epoch protocol and recreate the threshold-churn bug.
+    /// V1 earned ladders are retired. Existing activity names remain readable
+    /// only so cleanup can stop them; no foreground path may create another.
     nonisolated static func canInstallLegacyLadder(
         localSelection: MeteringLocalProtocolSelection?
     ) -> Bool {
-        localSelection == nil || localSelection == .v1
+        _ = localSelection
+        return false
     }
 
     nonisolated static func makeEvent(

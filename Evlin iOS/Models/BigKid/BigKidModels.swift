@@ -34,7 +34,7 @@ enum LegacyDeviceTotalMode: String, Codable, Equatable, Sendable {
 
     init(from decoder: Decoder) throws {
         let value = try decoder.singleValueContainer().decode(String.self)
-        self = Self(rawValue: value) ?? .active
+        self = Self(rawValue: value) ?? .observeDisabled
     }
 }
 
@@ -249,8 +249,8 @@ struct ChildStateResponse: Codable, Equatable, Sendable {
         lastResolvedReflection: ResolvedReflection?,
         usageCountingAllowed: Bool? = nil,
         earnedTimeRuntime: EarnedTimeRuntime? = nil,
-        meteringProtocolVersion: Int = 1,
-        legacyDeviceTotalMode: LegacyDeviceTotalMode = .active
+        meteringProtocolVersion: Int = 2,
+        legacyDeviceTotalMode: LegacyDeviceTotalMode = .observeDisabled
     ) {
         self.meteringProtocolVersion = meteringProtocolVersion
         self.legacyDeviceTotalMode = legacyDeviceTotalMode
@@ -277,11 +277,18 @@ struct ChildStateResponse: Codable, Equatable, Sendable {
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        meteringProtocolVersion = try values.decodeIfPresent(Int.self, forKey: .meteringProtocolVersion) ?? 1
-        legacyDeviceTotalMode = try values.decodeIfPresent(
+        // V1 is retired. A missing or stale server field must not revive it.
+        meteringProtocolVersion = max(
+            2,
+            try values.decodeIfPresent(Int.self, forKey: .meteringProtocolVersion) ?? 2
+        )
+        // Decode the old field only to remain wire-compatible. Its value no
+        // longer selects behavior; every client treats legacy counting as off.
+        _ = try? values.decodeIfPresent(
             LegacyDeviceTotalMode.self,
             forKey: .legacyDeviceTotalMode
-        ) ?? .active
+        )
+        legacyDeviceTotalMode = .observeDisabled
         childName = try values.decode(String.self, forKey: .childName)
         minutesLeft = try values.decode(Int.self, forKey: .minutesLeft)
         minutesMax = try values.decode(Int.self, forKey: .minutesMax)

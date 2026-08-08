@@ -288,6 +288,21 @@ extension DeviceEpochStore {
                 generation.configuredDeviceCapMinutes = request.deviceCapMinutes
             }
             state.generations[generation.generationID] = generation
+            // New builds establish only a v2 route. Existing v1 state is
+            // promoted into the same pending state on its first v2 policy
+            // reconciliation; it must never re-arm a fresh legacy ladder.
+            if generation.protocolVersion >= 2,
+               state.ratchets[request.ownerChildDeviceID]?.localSelection != .v2,
+               state.ratchets[request.ownerChildDeviceID]?.localSelection != .dualActive {
+                state.ratchets[request.ownerChildDeviceID] = MeteringOwnerRatchet(
+                    ownerChildDeviceID: request.ownerChildDeviceID,
+                    advertisedVersion: generation.protocolVersion,
+                    localSelection: .v2Pending,
+                    registeredV2At: nil,
+                    dualActiveAt: nil,
+                    activatedV2At: nil
+                )
+            }
             if state.activeRouteID == nil {
                 state.activeGenerationID = generation.generationID
             }
@@ -314,6 +329,14 @@ extension DeviceEpochStore {
                             < $1.routeID.uuidString.lowercased()
                     }
                 if let existing = reusableRoutes.first {
+                    if usageDate == request.today {
+                        reopenRejectedInitialRegistrationIfProven(
+                            state: &state,
+                            owner: request.ownerChildDeviceID,
+                            routeID: existing.routeID,
+                            now: request.now
+                        )
+                    }
                     routeIDsByUsageDate[usageDate] = existing.routeID
                     continue
                 }
@@ -327,7 +350,7 @@ extension DeviceEpochStore {
                         usageDate: usageDate,
                         timeZone: timeZone
                     )
-                state.epochs[epochID] = DeviceDailyEpoch(
+                let epoch = DeviceDailyEpoch(
                     epochID: epochID,
                     protocolVersion: generation.protocolVersion,
                     childDeviceID: request.ownerChildDeviceID,
@@ -349,6 +372,7 @@ extension DeviceEpochStore {
                     exhaustedAt: nil,
                     baseCorrectionState: .available
                 )
+                state.epochs[epochID] = epoch
                 let thresholds: [Int]
                 if isToday,
                    let remaining = MeteringDatedSchedule.remainingPolicy(
@@ -440,6 +464,9 @@ extension DeviceEpochStore {
                 )
                 if isToday {
                     let registrationWorkID = UUID()
+                    let pendingRecoveryReason = state.pendingRegistrationRecovery.flatMap {
+                        EpochRegistrationReasonDTO(rawValue: $0.rawValue)
+                    }
                     state.registrationWork[registrationWorkID] = EpochRegistrationWork(
                         workID: registrationWorkID,
                         ownerChildDeviceID: request.ownerChildDeviceID,
@@ -456,7 +483,11 @@ extension DeviceEpochStore {
                             enforcementSetID: generation.enforcementSetID,
                             startedAt: request.now,
                             baseAcceptedMinutes: request.authoritativeBaseAcceptedMinutes,
-                            reason: .initial
+                            reason: pendingRecoveryReason ?? declaredRegistrationReason(
+                                state: state,
+                                owner: request.ownerChildDeviceID,
+                                nextEpoch: epoch
+                            )
                         ),
                         claim: nil,
                         retry: MeteringRetryState(
@@ -467,6 +498,9 @@ extension DeviceEpochStore {
                         ),
                         createdAt: request.now
                     )
+                    if pendingRecoveryReason != nil {
+                        state.pendingRegistrationRecovery = nil
+                    }
                     if state.activeRouteID == nil {
                         state.activeEpochID = epochID
                     }
@@ -479,6 +513,163 @@ extension DeviceEpochStore {
             )
         }
     }
+}
+
+nonisolated private func declaredRegistrationReason(
+    state: DeviceEpochStoreState,
+    owner: UUID,
+    nextEpoch: DeviceDailyEpoch
+) -> EpochRegistrationReasonDTO {
+    let predecessors = state.registrationWork.values.compactMap {
+        work -> (epoch: DeviceDailyEpoch, acknowledgedAt: Date, createdAt: Date, workID: UUID)? in
+        guard work.ownerChildDeviceID == owner,
+              work.epochID != nextEpoch.epochID,
+              work.retry.terminal == .succeeded,
+              let epoch = state.epochs[work.epochID],
+              epoch.childDeviceID == owner,
+              epoch.retiredAt == nil,
+              let acknowledgedAt = epoch.registeredAt,
+              let route = state.routes[work.routeID],
+              route.ownerChildDeviceID == owner,
+              route.epochID == epoch.epochID,
+              route.lifecycle == .active || route.lifecycle == .planned
+        else { return nil }
+        return (epoch, acknowledgedAt, work.createdAt, work.workID)
+    }.sorted {
+        if $0.acknowledgedAt != $1.acknowledgedAt {
+            return $0.acknowledgedAt > $1.acknowledgedAt
+        }
+        if $0.createdAt != $1.createdAt {
+            return $0.createdAt > $1.createdAt
+        }
+        return $0.workID.uuidString.lowercased()
+            < $1.workID.uuidString.lowercased()
+    }
+
+    guard let predecessor = predecessors.first?.epoch else {
+        return .initial
+    }
+    let active = MeteringEpochKey(
+        protocolVersion: predecessor.protocolVersion,
+        childDeviceID: predecessor.childDeviceID,
+        usageDate: predecessor.usageDate,
+        canonicalTimezone: predecessor.canonicalTimezone,
+        policyRevision: predecessor.policyRevision,
+        measurementSelectionDigest: predecessor.measurementSelectionDigest,
+        enforcementSetID: predecessor.enforcementSetID
+    )
+    let next = MeteringEpochKey(
+        protocolVersion: nextEpoch.protocolVersion,
+        childDeviceID: nextEpoch.childDeviceID,
+        usageDate: nextEpoch.usageDate,
+        canonicalTimezone: nextEpoch.canonicalTimezone,
+        policyRevision: nextEpoch.policyRevision,
+        measurementSelectionDigest: nextEpoch.measurementSelectionDigest,
+        enforcementSetID: nextEpoch.enforcementSetID
+    )
+    if let classified = MeteringEpochContract.replacementReason(
+        active: active,
+        next: next,
+        explicitRecovery: nil
+    ), let declared = EpochRegistrationReasonDTO(rawValue: classified.rawValue) {
+        return declared
+    }
+    // A new physical route for the same immutable key is not an initial
+    // registration. It is an explicit physical-identity replacement.
+    return .identityRecovery
+}
+
+nonisolated private func reopenRejectedInitialRegistrationIfProven(
+    state: inout DeviceEpochStoreState,
+    owner: UUID,
+    routeID: UUID,
+    now: Date
+) {
+    guard state.ownerChildDeviceID == owner,
+          state.v2RouteHandoff == nil,
+          state.ratchets[owner]?.localSelection != .v1,
+          state.activeRouteID == nil,
+          let route = state.routes[routeID],
+          route.ownerChildDeviceID == owner,
+          route.lifecycle == .planned,
+          state.activeEpochID == route.epochID,
+          let epoch = state.epochs[route.epochID],
+          epoch.childDeviceID == owner,
+          epoch.status == .active,
+          epoch.retiredAt == nil,
+          epoch.registeredAt == nil,
+          let registrationKey = state.registrationWork.first(where: {
+              $0.value.ownerChildDeviceID == owner
+                  && $0.value.epochID == epoch.epochID
+                  && $0.value.routeID == routeID
+          })?.key,
+          state.registrationWork.values.filter({
+              $0.ownerChildDeviceID == owner
+                  && $0.epochID == epoch.epochID
+                  && $0.routeID == routeID
+          }).count == 1,
+          let registration = state.registrationWork[registrationKey],
+          registration.claim == nil,
+          registration.request.reason == .initial,
+          registration.retry.terminal == .rejected,
+          registration.retry.lastErrorCode == "replacement_reason_mismatch",
+          let install = state.installWork.values.first(where: {
+              $0.ownerChildDeviceID == owner && $0.routeID == routeID
+          }),
+          state.installWork.values.filter({
+              $0.ownerChildDeviceID == owner && $0.routeID == routeID
+          }).count == 1,
+          install.authorization == .registrationRequired,
+          install.phase == .pendingStart,
+          !state.activationWork.values.contains(where: {
+              $0.ownerChildDeviceID == owner
+                  && $0.epochID == epoch.epochID
+                  && $0.routeID == routeID
+                  && $0.retry.terminal == .succeeded
+          })
+    else { return }
+
+    let locallyDerivedReason = declaredRegistrationReason(
+        state: state,
+        owner: owner,
+        nextEpoch: epoch
+    )
+    // A completed same-owner cleanup intentionally removes every predecessor
+    // object. In that one upgrade shape, the authenticated backend rejection
+    // is the surviving proof that this device already has an epoch. The guard
+    // above makes this a one-shot correction of one exact initial request; a
+    // second rejection cannot reopen because the request is no longer initial.
+    let correctedReason: EpochRegistrationReasonDTO = locallyDerivedReason == .initial
+        ? .identityRecovery
+        : locallyDerivedReason
+    let request = registration.request
+    state.registrationWork[registrationKey] = EpochRegistrationWork(
+        workID: registration.workID,
+        ownerChildDeviceID: registration.ownerChildDeviceID,
+        epochID: registration.epochID,
+        routeID: registration.routeID,
+        request: EpochRegistrationRequestDTO(
+            protocolVersion: request.protocolVersion,
+            epochID: request.epochID,
+            deviceID: request.deviceID,
+            usageDate: request.usageDate,
+            timezone: request.timezone,
+            policyRevision: request.policyRevision,
+            measurementSelectionDigest: request.measurementSelectionDigest,
+            enforcementSetID: request.enforcementSetID,
+            startedAt: request.startedAt,
+            baseAcceptedMinutes: request.baseAcceptedMinutes,
+            reason: correctedReason
+        ),
+        claim: nil,
+        retry: MeteringRetryState(
+            attemptCount: registration.retry.attemptCount + 1,
+            nextAttemptAt: now,
+            lastErrorCode: nil,
+            terminal: .pending
+        ),
+        createdAt: registration.createdAt
+    )
 }
 
 nonisolated private func configuredCalendar(_ calendar: Calendar, timeZone: TimeZone) -> Calendar {

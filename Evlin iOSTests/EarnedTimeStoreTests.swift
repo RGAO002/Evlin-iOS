@@ -663,6 +663,49 @@ final class EarnedTimeStoreTests: XCTestCase {
         XCTAssertNotNil(reloaded.measurementSelection)
     }
 
+    func test_saveMeasurementSelection_preservesBytesForSameSemanticSelection() throws {
+        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
+        UserDefaults.standard.removePersistentDomain(forName: suiteName)
+        isolatedSuiteName = suiteName
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let store = EarnedTimeStore(suiteName: suiteName)
+        let existingBytes = Data(
+            """
+            {"applicationTokens":[],"categoryTokens":[],"webDomainTokens":[],"untokenizedApplicationIdentifiers":[],"untokenizedCategoryIdentifiers":[],"untokenizedWebDomainIdentifiers":[],"includeEntireCategory":false}
+            """.utf8
+        )
+        let sameSelection = try JSONDecoder().decode(
+            FamilyActivitySelection.self,
+            from: existingBytes
+        )
+        defaults.set(existingBytes, forKey: "earned.measurementSelection")
+
+        store.saveMeasurementSelection(sameSelection)
+
+        XCTAssertEqual(store.measurementSelectionBytes, existingBytes)
+    }
+
+    func test_saveMeasurementSelection_replacesBytesForChangedSelection() throws {
+        let suiteName = "EarnedTimeStoreTests.\(UUID().uuidString)"
+        UserDefaults.standard.removePersistentDomain(forName: suiteName)
+        isolatedSuiteName = suiteName
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let store = EarnedTimeStore(suiteName: suiteName)
+        let existingBytes = Data(
+            """
+            {"applicationTokens":[],"categoryTokens":[],"webDomainTokens":[],"untokenizedApplicationIdentifiers":[],"untokenizedCategoryIdentifiers":[],"untokenizedWebDomainIdentifiers":[],"includeEntireCategory":false}
+            """.utf8
+        )
+        defaults.set(existingBytes, forKey: "earned.measurementSelection")
+
+        store.saveMeasurementSelection(
+            FamilyActivitySelection(includeEntireCategory: true)
+        )
+
+        XCTAssertNotEqual(store.measurementSelectionBytes, existingBytes)
+        XCTAssertEqual(store.measurementSelection?.includeEntireCategory, true)
+    }
+
     // MARK: - Locked-set id round-trip
 
     func test_lockedSetID_roundTrips() {

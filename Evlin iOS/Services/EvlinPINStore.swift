@@ -84,6 +84,21 @@ nonisolated final class EvlinPINStore {
         defaults.removeObject(forKey: storageKey)
     }
 
+    /// Release-available material for the one-time migration of an existing
+    /// PIN. The raw PIN remains absent; recovery searches the bounded digit
+    /// space against this store's own salt and digest.
+    func recoveryMaterial() -> (salt: Data, digest: Data)? {
+        guard let blob = readBlob(), blob.count > saltLength else { return nil }
+        return (
+            Data(blob.prefix(saltLength)),
+            Data(blob.suffix(from: saltLength))
+        )
+    }
+
+    static func recoveryDigest(salt: Data, candidate: String) -> Data {
+        hash(salt: salt, pin: candidate)
+    }
+
     /// Test-only hook used to confirm independent salts produce different blobs.
     #if DEBUG
     func debugStoredBlob() -> Data? {

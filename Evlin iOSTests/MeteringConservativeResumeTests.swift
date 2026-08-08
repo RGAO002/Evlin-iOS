@@ -198,6 +198,78 @@ final class MeteringConservativeResumeTests: XCTestCase {
         XCTAssertFalse(state.sampleWork.values.contains { $0.retry.terminal == .pending })
     }
 
+    func testSameDayResumeSettlesStrandedPausedSampleAndCompletesHandoff() async throws {
+        // #84 (P1-1), iPad 2026-08-05 02:28: a sample queued while the epoch
+        // was still active becomes permanently undeliverable once the gate
+        // closes — the dispatcher only claims samples on active epochs, so the
+        // delivery-settle terminalizer never runs — and the pending work then
+        // wedges the same-day resume replacement barrier until midnight.
+        let fixture = try ResumeFixture(owner: owner, start: start)
+        defer { fixture.cleanup() }
+        let runtime = resumeRuntime()
+        let pausedAt = start.addingTimeInterval(3_600)
+
+        let oldRoute = try XCTUnwrap(try fixture.store.read().routes[fixture.oldRouteID])
+        let oldEvent = try XCTUnwrap(oldRoute.plannedEvents.first)
+        let callback = EarnedMeteringCallback(
+            store: fixture.store,
+            clock: ResumeClock(now: pausedAt.addingTimeInterval(-1))
+        )
+        guard case .queued(let strandedSampleID) = try callback.handle(
+            MeteringAppleCallback(
+                activityName: oldRoute.activityName,
+                eventName: oldEvent.eventName,
+                observedAt: pausedAt.addingTimeInterval(-1)
+            ),
+            expectedOwnerChildDeviceID: owner
+        ) else { return XCTFail("pre-pause sample did not queue") }
+
+        try makeDriver(fixture, clock: ResumeClock(now: pausedAt))
+            .reconcileUsageGate(
+                ownerChildDeviceID: owner,
+                allowed: false,
+                runtime: runtime
+            )
+
+        let resumedAt = pausedAt.addingTimeInterval(420)
+        try makeDriver(fixture, clock: ResumeClock(now: resumedAt))
+            .reconcileUsageGate(
+                ownerChildDeviceID: owner,
+                allowed: true,
+                runtime: runtime
+            )
+
+        var state = try fixture.store.read()
+        let candidate = try XCTUnwrap(state.routes.values.first {
+            $0.routeID != fixture.oldRouteID
+                && state.epochs[$0.epochID]?.resumeBoundaryPending == true
+        })
+
+        fixture.transport.results = [
+            registrationResult(epochID: candidate.epochID),
+            activationResult(epochID: candidate.epochID)
+        ]
+        try await makeDriver(fixture, clock: ResumeClock(now: resumedAt.addingTimeInterval(5)))
+            .recover(ownerChildDeviceID: owner)
+
+        state = try fixture.store.read()
+        XCTAssertEqual(state.sampleWork[strandedSampleID]?.retry.terminal, .rejected)
+        XCTAssertEqual(
+            state.sampleWork[strandedSampleID]?.retry.lastErrorCode,
+            "accounting_paused"
+        )
+        XCTAssertEqual(state.v2RouteHandoff?.phase, .committed)
+        XCTAssertEqual(state.activeRouteID, candidate.routeID)
+        XCTAssertEqual(
+            state.registrationWork.values.first(where: { $0.routeID == candidate.routeID })?.retry.terminal,
+            .succeeded
+        )
+        XCTAssertEqual(
+            state.registrationWork.values.first(where: { $0.routeID == candidate.routeID })?.request.reason,
+            .gateResumeConservative
+        )
+    }
+
     func testPausedPriorDayResumesIntoAuthoritativeCurrentDayGeneration() async throws {
         let fixture = try ResumeFixture(owner: owner, start: start)
         defer { fixture.cleanup() }
@@ -302,6 +374,265 @@ final class MeteringConservativeResumeTests: XCTestCase {
         XCTAssertEqual(
             state.registrationWork.values.first(where: { $0.routeID == candidate.routeID })?.request.reason,
             .gateResumeConservative
+        )
+    }
+
+    func testElapsedNeverRegisteredCandidateHandoffIsAbandonedSoNextDayResumes() async throws {
+        // #53 (FIX-0c), iPad 2026-08-05: a same-day gate-resume candidate that
+        // never managed to register is stranded when midnight passes — the
+        // handoff slot it owns blocks the cross-day resume mint, the rollover
+        // effect leg refuses a slot holding someone else's handoffID, and the
+        // abandon sweeps demand a terminal rejection it never earned. The
+        // device stays pinned on yesterday until manual rescue.
+        for phase in [V2RouteHandoffPhase.preparing, .dualV2] {
+            let fixture = try ResumeFixture(owner: owner, start: start)
+            defer { fixture.cleanup() }
+            let pausedAt = start.addingTimeInterval(3_600)
+            let resumedAt = pausedAt.addingTimeInterval(420)
+
+            try makeDriver(fixture, clock: ResumeClock(now: pausedAt))
+                .reconcileUsageGate(
+                    ownerChildDeviceID: owner,
+                    allowed: false,
+                    runtime: resumeRuntime()
+                )
+            try makeDriver(fixture, clock: ResumeClock(now: resumedAt))
+                .reconcileUsageGate(
+                    ownerChildDeviceID: owner,
+                    allowed: true,
+                    runtime: resumeRuntime()
+                )
+
+            var state = try fixture.store.read()
+            let staleCandidate = try XCTUnwrap(state.routes.values.first {
+                $0.routeID != fixture.oldRouteID
+                    && state.epochs[$0.epochID]?.resumeBoundaryPending == true
+            })
+            let staleHandoffID = UUID()
+            try fixture.store.transaction(expectedOwner: owner) { state in
+                let installKey = try XCTUnwrap(
+                    state.installWork.first {
+                        $0.value.routeID == staleCandidate.routeID
+                    }?.key
+                )
+                // Installed at the daemon (tonight's device had callbacks
+                // arriving on the candidate) but never verified/registered.
+                var installed = try XCTUnwrap(state.routes[staleCandidate.routeID])
+                installed.installedSchedule = installed.plannedSchedule
+                installed.installedEvents = installed.plannedEvents
+                if phase == .dualV2 {
+                    installed.lifecycle = .active
+                    state.installWork[installKey]?.phase = .dualActive
+                } else {
+                    state.installWork[installKey]?.phase = .installed
+                }
+                state.routes[staleCandidate.routeID] = installed
+                state.v2RouteHandoff = V2RouteHandoff(
+                    handoffID: staleHandoffID,
+                    ownerChildDeviceID: owner,
+                    fromGenerationID: try XCTUnwrap(state.activeGenerationID),
+                    fromEpochID: fixture.oldEpochID,
+                    fromRouteID: fixture.oldRouteID,
+                    toGenerationID: staleCandidate.generationID,
+                    toEpochID: staleCandidate.epochID,
+                    toRouteID: staleCandidate.routeID,
+                    phase: phase,
+                    priorRouteInputClosedAt: nil,
+                    registrationAcknowledgedAt: nil,
+                    activationAcknowledgedAt: nil,
+                    priorStopAcknowledgedAt: nil,
+                    createdAt: resumedAt
+                )
+                state.v2RouteHandoff?.explicitRecovery = .gateResumeConservative
+            }
+            fixture.center.records[DeviceActivityName(staleCandidate.activityName)] = (
+                try MeteringDatedSchedule.datedSchedule(
+                    usageDate: staleCandidate.usageDate,
+                    timeZone: TimeZone(identifier: "America/New_York")!
+                ),
+                [:]
+            )
+
+            // Midnight passes; the parent's policy for the new day exists.
+            let nextDay = start.addingTimeInterval(86_400)
+            let currentRuntime = EarnedTimeRuntime(
+                usageDate: "2026-07-18",
+                timezone: "America/New_York",
+                policyRevision: "current-day",
+                dailyPoolMinutes: 180,
+                deviceCapMinutes: 120,
+                remainingMinutes: 120,
+                estimatedMinutes: 0
+            )
+            let currentGenerationID = try fixture.seedDesiredGeneration(
+                usageDate: currentRuntime.usageDate,
+                policyRevision: currentRuntime.policyRevision,
+                poolMinutes: currentRuntime.dailyPoolMinutes,
+                capMinutes: currentRuntime.deviceCapMinutes,
+                now: nextDay
+            )
+
+            // Production pass 1: gate reconcile (slot still occupied), then the
+            // recovery pass — where the elapsed candidate must be abandoned.
+            try makeDriver(fixture, clock: ResumeClock(now: nextDay.addingTimeInterval(1)))
+                .reconcileUsageGate(
+                    ownerChildDeviceID: owner,
+                    allowed: true,
+                    runtime: currentRuntime
+                )
+            try await makeDriver(fixture, clock: ResumeClock(now: nextDay.addingTimeInterval(2)))
+                .recover(ownerChildDeviceID: owner)
+
+            // Production pass 2: with the slot free, the cross-day resume mints
+            // the current-day candidate and drives it to committed.
+            try makeDriver(fixture, clock: ResumeClock(now: nextDay.addingTimeInterval(10)))
+                .reconcileUsageGate(
+                    ownerChildDeviceID: owner,
+                    allowed: true,
+                    runtime: currentRuntime
+                )
+            state = try fixture.store.read()
+            let todayCandidate = try XCTUnwrap(
+                state.routes.values.first {
+                    $0.generationID == currentGenerationID
+                        && $0.usageDate == currentRuntime.usageDate
+                        && state.epochs[$0.epochID]?.resumeBoundaryPending == true
+                },
+                "phase \(phase): no current-day candidate was minted — slot still wedged"
+            )
+            try fixture.store.transaction(expectedOwner: owner) { state in
+                for (key, var work) in state.installWork
+                    where work.routeID != fixture.oldRouteID
+                        && work.routeID != todayCandidate.routeID
+                        && work.routeID != staleCandidate.routeID
+                        && work.retry.terminal == .pending {
+                    work.retry.terminal = .superseded
+                    work.retry.lastErrorCode = "test_fixture_horizon_pruned"
+                    state.installWork[key] = work
+                }
+                for (key, var work) in state.registrationWork
+                    where work.routeID != fixture.oldRouteID
+                        && work.routeID != todayCandidate.routeID
+                        && work.retry.terminal == .pending {
+                    work.retry.terminal = .superseded
+                    work.retry.lastErrorCode = "test_fixture_horizon_pruned"
+                    state.registrationWork[key] = work
+                }
+            }
+            fixture.transport.results = [
+                registrationResult(
+                    epochID: todayCandidate.epochID,
+                    usageDate: currentRuntime.usageDate,
+                    estimatedMinutes: currentRuntime.estimatedMinutes,
+                    capMinutes: currentRuntime.deviceCapMinutes
+                ),
+                activationResult(
+                    epochID: todayCandidate.epochID,
+                    usageDate: currentRuntime.usageDate,
+                    estimatedMinutes: currentRuntime.estimatedMinutes,
+                    capMinutes: currentRuntime.deviceCapMinutes
+                )
+            ]
+            try await makeDriver(fixture, clock: ResumeClock(now: nextDay.addingTimeInterval(15)))
+                .recover(ownerChildDeviceID: owner)
+
+            state = try fixture.store.read()
+            XCTAssertEqual(state.activeEpochID, todayCandidate.epochID, "phase \(phase)")
+            XCTAssertEqual(state.activeRouteID, todayCandidate.routeID, "phase \(phase)")
+            // The abandoned candidate is tombstoned; later sweeps may garbage-
+            // collect the tombstone entirely. Either way it must be gone.
+            let staleLifecycle = state.routes[staleCandidate.routeID]?.lifecycle
+            XCTAssertTrue(
+                staleLifecycle == nil || staleLifecycle == .tombstoned,
+                "phase \(phase): stale candidate still \(String(describing: staleLifecycle))"
+            )
+            let staleStatus = state.epochs[staleCandidate.epochID]?.status
+            XCTAssertTrue(
+                staleStatus == nil || staleStatus == .retired,
+                "phase \(phase): stale epoch still \(String(describing: staleStatus))"
+            )
+            XCTAssertNotEqual(
+                state.v2RouteHandoff?.handoffID, staleHandoffID, "phase \(phase)"
+            )
+            XCTAssertFalse(
+                fixture.center.activities.contains(
+                    DeviceActivityName(staleCandidate.activityName)
+                ),
+                "phase \(phase): stale candidate still armed at the daemon"
+            )
+            XCTAssertEqual(
+                state.registrationWork.values.first {
+                    $0.routeID == todayCandidate.routeID
+                }?.request.reason,
+                .gateResumeConservative,
+                "phase \(phase)"
+            )
+        }
+    }
+
+    func testLadderRepairStormDetectorTripsOnFreshCorpsesOnly() throws {
+        // #85 (P1-3): the repair-storm breaker. Five tombstoned routes born
+        // within twenty minutes parks the ladder repair; fewer, or older,
+        // corpses must not (a healthy day produces one or two, hours apart).
+        let fixture = try ResumeFixture(owner: owner, start: start)
+        defer { fixture.cleanup() }
+        var state = try fixture.store.read()
+        let template = try XCTUnwrap(state.routes[fixture.oldRouteID])
+        let now = start.addingTimeInterval(7_200)
+        func addCorpse(bornSecondsAgo: TimeInterval) {
+            let routeID = UUID()
+            state.routes[routeID] = MeteringCallbackRoute(
+                routeID: routeID,
+                activityName: MeteringRouteNamespace.activityName(routeID: routeID),
+                namespace: MeteringRouteNamespace.prefix,
+                generationID: template.generationID,
+                generationKey: template.generationKey,
+                ownerChildDeviceID: owner,
+                usageDate: template.usageDate,
+                epochID: template.epochID,
+                plannedSchedule: template.plannedSchedule,
+                installedSchedule: nil,
+                plannedEvents: template.plannedEvents,
+                installedEvents: nil,
+                lifecycle: .tombstoned,
+                createdAt: now.addingTimeInterval(-bornSecondsAgo)
+            )
+        }
+
+        for _ in 0..<4 { addCorpse(bornSecondsAgo: 300) }
+        XCTAssertFalse(
+            EarnedMeteringRecoveryDriver.isLadderRepairStorming(state: state, now: now),
+            "four fresh corpses must not trip the breaker"
+        )
+        addCorpse(bornSecondsAgo: 300)
+        XCTAssertTrue(
+            EarnedMeteringRecoveryDriver.isLadderRepairStorming(state: state, now: now),
+            "five fresh corpses must trip the breaker"
+        )
+
+        var staleState = try fixture.store.read()
+        let freshRoutes = state.routes
+        for (routeID, route) in freshRoutes where route.lifecycle == .tombstoned {
+            staleState.routes[routeID] = MeteringCallbackRoute(
+                routeID: route.routeID,
+                activityName: route.activityName,
+                namespace: route.namespace,
+                generationID: route.generationID,
+                generationKey: route.generationKey,
+                ownerChildDeviceID: route.ownerChildDeviceID,
+                usageDate: route.usageDate,
+                epochID: route.epochID,
+                plannedSchedule: route.plannedSchedule,
+                installedSchedule: nil,
+                plannedEvents: route.plannedEvents,
+                installedEvents: nil,
+                lifecycle: .tombstoned,
+                createdAt: now.addingTimeInterval(-3_600)
+            )
+        }
+        XCTAssertFalse(
+            EarnedMeteringRecoveryDriver.isLadderRepairStorming(state: staleState, now: now),
+            "old corpses must not trip the breaker"
         )
     }
 

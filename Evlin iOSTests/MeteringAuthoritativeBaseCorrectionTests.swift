@@ -203,6 +203,11 @@ final class MeteringAuthoritativeBaseCorrectionTests: XCTestCase {
         XCTAssertEqual(replacement.fromEpochID, fixture.priorEpochID)
         XCTAssertEqual(replacement.fromRouteID, fixture.priorRouteID)
         XCTAssertEqual(replacement.phase, .preparing)
+        XCTAssertEqual(
+            replacement.consumedCandidateReplacementCount ?? 0,
+            0,
+            "a backend base correction must not spend the physical-event recovery budget"
+        )
         XCTAssertNotEqual(replacement.toGenerationID, fixture.rejectedGenerationID)
         XCTAssertNotEqual(replacement.toEpochID, fixture.rejectedEpochID)
         XCTAssertNotEqual(replacement.toRouteID, fixture.rejectedRouteID)
@@ -234,6 +239,27 @@ final class MeteringAuthoritativeBaseCorrectionTests: XCTestCase {
         XCTAssertNotEqual(correctedEpoch.baseAcceptedMinutes, 91)
         XCTAssertNotEqual(correctedEpoch.baseAcceptedMinutes, 3)
         XCTAssertNotEqual(correctedEpoch.baseAcceptedMinutes, 120)
+    }
+
+    func testAuthoritativeBaseMismatchPersistenceFailureIsRecorded() async throws {
+        let lock = CorrectionToggleLock()
+        let fixture = try CorrectionFixture(owner: owner, start: start, lock: lock)
+        defer { fixture.cleanup() }
+        var events: [ScreenTimeEvent] = []
+        MeteringFlightRecorder.testSink = { events.append($0) }
+        defer { MeteringFlightRecorder.testSink = nil }
+        fixture.transport.onRequest = { lock.setAvailable(false) }
+        fixture.transport.results = [fixture.authoritativeConflict(estimatedMinutes: 37)]
+
+        await fixture.delivery.drain(owner: owner)
+
+        let failure = try XCTUnwrap(events.first { event in
+            event.kind == .meteringError
+                && event.app?.hasPrefix("delivery.baseCorrection") == true
+        })
+        XCTAssertEqual(failure.reason, "error")
+        XCTAssertEqual(failure.corrID, fixture.rejectedRegistrationID.uuidString)
+        XCTAssertTrue(failure.app?.contains("lockUnavailable") == true)
     }
 
     func testSameGenerationBaseMismatchKeepsPriorRouteAuthoritativeForCorrection() async throws {
@@ -1435,14 +1461,30 @@ private final class CorrectionTransport: MeteringHTTPTransport, @unchecked Senda
     var results: [(Data, URLResponse)] = []
     var errors: [URLError.Code] = []
     var requests: [URLRequest] = []
+    var onRequest: (@Sendable () -> Void)?
 
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
         requests.append(request)
+        onRequest?()
         if !errors.isEmpty {
             throw URLError(errors.removeFirst())
         }
         guard !results.isEmpty else { throw URLError(.badServerResponse) }
         return results.removeFirst()
+    }
+}
+
+private final class CorrectionToggleLock: DeviceEpochStoreLocking, @unchecked Sendable {
+    private let stateLock = NSLock()
+    private var available = true
+
+    func setAvailable(_ available: Bool) {
+        stateLock.withLock { self.available = available }
+    }
+
+    func withLock<T>(_ body: () -> T) -> T? {
+        let canAcquire = stateLock.withLock { available }
+        return canAcquire ? body() : nil
     }
 }
 

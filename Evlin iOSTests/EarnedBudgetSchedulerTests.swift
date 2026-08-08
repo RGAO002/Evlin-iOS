@@ -35,7 +35,7 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         }
     }
 
-    func testDatedScheduleUsesPersistedCurrentDayInstallStartAndIncludesObservedIntervalUsage() throws {
+    func testDatedScheduleUsesPersistedCurrentDayInstallStartAndExcludesPreArmUsage() throws {
         let timeZone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
         var calendar = Calendar(identifier: .gregorian)
         calendar.locale = Locale(identifier: "en_US_POSIX")
@@ -64,7 +64,7 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         XCTAssertEqual(schedule.intervalEnd.minute, 0)
         XCTAssertEqual(schedule.intervalEnd.day, 24)
         XCTAssertFalse(schedule.repeats)
-        XCTAssertTrue(event.includesPastActivity)
+        XCTAssertFalse(event.includesPastActivity)
     }
 
     func testLegacyDatedSchedulePlanWithoutInstallStartStillDecodesAsMidnightPlan() throws {
@@ -225,7 +225,7 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         XCTAssertEqual(routesByDate[request.today]?.plannedSchedule.usageDate, request.today)
         let todayRoute = try XCTUnwrap(routesByDate[request.today])
         XCTAssertEqual(todayRoute.plannedEvents.map(\.thresholdMinutes), [
-            5, 10, 15, 20, 25, 30, 35, 40, 45, 50,
+            1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50,
         ])
         XCTAssertEqual(todayRoute.plannedEvents.map(\.eventName), todayRoute.plannedEvents.map {
             MeteringRouteNamespace.eventName(
@@ -241,7 +241,7 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
 
         for route in firstState.routes.values where route.usageDate != request.today {
             XCTAssertEqual(route.plannedEvents.map(\.thresholdMinutes), [
-                5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 62,
+                1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 62,
             ])
             XCTAssertEqual(route.plannedEvents.map(\.eventName), route.plannedEvents.map {
                 MeteringRouteNamespace.eventName(
@@ -344,6 +344,234 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         )
     }
 
+    func testHorizonDeclaresSelectionChangeWhenAcceptedPredecessorSurvivesWithoutActiveRoutePointer() throws {
+        let owner = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("metering-horizon-selection-reason-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let store = DeviceEpochStore(fileURL: storeURL, ownerProvider: { owner })
+        let firstBytes = Data([0x00, 0x01, 0xFE, 0xFF])
+        let secondBytes = Data([0x10, 0x11, 0xEE, 0xEF])
+        let firstNow = Date(timeIntervalSince1970: 1_785_488_000)
+        let secondNow = firstNow.addingTimeInterval(60)
+
+        func key(bytes: Data) -> MeteringGenerationKey {
+            MeteringGenerationKey(
+                protocolVersion: 2,
+                childDeviceID: owner,
+                canonicalTimezone: "America/New_York",
+                policyRevision: "policy-r1",
+                measurementSelectionDigest: MeteringEpochContract.selectionDigest(
+                    persistedBytes: bytes
+                ),
+                enforcementSetID: UUID(
+                    uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+                )!
+            )
+        }
+
+        let first = try store.reconcileMeteringHorizon(MeteringHorizonRequest(
+            ownerChildDeviceID: owner,
+            today: "2026-07-31",
+            generationKey: key(bytes: firstBytes),
+            persistedSelectionBytes: firstBytes,
+            poolMinutes: 120,
+            deviceCapMinutes: 120,
+            authoritativeBaseAcceptedMinutes: 0,
+            now: firstNow
+        ))
+        let firstRouteID = try XCTUnwrap(first.routeIDsByUsageDate["2026-07-31"])
+        try store.transaction(expectedOwner: owner) { state in
+            let firstEpochID = try XCTUnwrap(state.routes[firstRouteID]?.epochID)
+            let registrationKey = try XCTUnwrap(state.registrationWork.first(where: {
+                $0.value.routeID == firstRouteID
+            })?.key)
+            state.registrationWork[registrationKey]?.retry.terminal = .succeeded
+            state.epochs[firstEpochID]?.registeredAt = firstNow
+            state.routes[firstRouteID]?.lifecycle = .active
+            state.activeRouteID = nil
+        }
+
+        let second = try store.reconcileMeteringHorizon(MeteringHorizonRequest(
+            ownerChildDeviceID: owner,
+            today: "2026-07-31",
+            generationKey: key(bytes: secondBytes),
+            persistedSelectionBytes: secondBytes,
+            poolMinutes: 120,
+            deviceCapMinutes: 120,
+            authoritativeBaseAcceptedMinutes: 0,
+            now: secondNow
+        ))
+        let secondRouteID = try XCTUnwrap(second.routeIDsByUsageDate["2026-07-31"])
+        let state = try store.read()
+        let registration = try XCTUnwrap(state.registrationWork.values.first(where: {
+            $0.routeID == secondRouteID
+        }))
+
+        XCTAssertEqual(registration.request.reason, .selectionChange)
+    }
+
+    func testHorizonReopensPersistedInitialReasonMismatchUsingAcceptedPredecessor() throws {
+        let owner = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("metering-horizon-reason-recovery-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let store = DeviceEpochStore(fileURL: storeURL, ownerProvider: { owner })
+        let firstBytes = Data([0x00, 0x01, 0xFE, 0xFF])
+        let secondBytes = Data([0x10, 0x11, 0xEE, 0xEF])
+        let firstNow = Date(timeIntervalSince1970: 1_785_488_000)
+        let secondNow = firstNow.addingTimeInterval(60)
+
+        func request(bytes: Data, now: Date) -> MeteringHorizonRequest {
+            MeteringHorizonRequest(
+                ownerChildDeviceID: owner,
+                today: "2026-07-31",
+                generationKey: MeteringGenerationKey(
+                    protocolVersion: 2,
+                    childDeviceID: owner,
+                    canonicalTimezone: "America/New_York",
+                    policyRevision: "policy-r1",
+                    measurementSelectionDigest: MeteringEpochContract.selectionDigest(
+                        persistedBytes: bytes
+                    ),
+                    enforcementSetID: UUID(
+                        uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+                    )!
+                ),
+                persistedSelectionBytes: bytes,
+                poolMinutes: 120,
+                deviceCapMinutes: 120,
+                authoritativeBaseAcceptedMinutes: 0,
+                now: now
+            )
+        }
+
+        let first = try store.reconcileMeteringHorizon(
+            request(bytes: firstBytes, now: firstNow)
+        )
+        let firstRouteID = try XCTUnwrap(first.routeIDsByUsageDate["2026-07-31"])
+        try store.transaction(expectedOwner: owner) { state in
+            let firstEpochID = try XCTUnwrap(state.routes[firstRouteID]?.epochID)
+            let registrationKey = try XCTUnwrap(state.registrationWork.first(where: {
+                $0.value.routeID == firstRouteID
+            })?.key)
+            state.registrationWork[registrationKey]?.retry.terminal = .succeeded
+            state.epochs[firstEpochID]?.registeredAt = firstNow
+            state.routes[firstRouteID]?.lifecycle = .active
+            state.activeRouteID = nil
+        }
+
+        let secondRequest = request(bytes: secondBytes, now: secondNow)
+        let second = try store.reconcileMeteringHorizon(secondRequest)
+        let secondRouteID = try XCTUnwrap(second.routeIDsByUsageDate["2026-07-31"])
+        try store.transaction(expectedOwner: owner) { state in
+            let registrationKey = try XCTUnwrap(state.registrationWork.first(where: {
+                $0.value.routeID == secondRouteID
+            })?.key)
+            let existing = try XCTUnwrap(state.registrationWork[registrationKey])
+            state.registrationWork[registrationKey] = EpochRegistrationWork(
+                workID: existing.workID,
+                ownerChildDeviceID: existing.ownerChildDeviceID,
+                epochID: existing.epochID,
+                routeID: existing.routeID,
+                request: EpochRegistrationRequestDTO(
+                    protocolVersion: existing.request.protocolVersion,
+                    epochID: existing.request.epochID,
+                    deviceID: existing.request.deviceID,
+                    usageDate: existing.request.usageDate,
+                    timezone: existing.request.timezone,
+                    policyRevision: existing.request.policyRevision,
+                    measurementSelectionDigest: existing.request.measurementSelectionDigest,
+                    enforcementSetID: existing.request.enforcementSetID,
+                    startedAt: existing.request.startedAt,
+                    baseAcceptedMinutes: existing.request.baseAcceptedMinutes,
+                    reason: .initial
+                ),
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: secondNow,
+                    lastErrorCode: "replacement_reason_mismatch",
+                    terminal: .rejected
+                ),
+                createdAt: existing.createdAt
+            )
+        }
+
+        _ = try store.reconcileMeteringHorizon(
+            request(bytes: secondBytes, now: secondNow.addingTimeInterval(10))
+        )
+        let state = try store.read()
+        let registration = try XCTUnwrap(state.registrationWork.values.first(where: {
+            $0.routeID == secondRouteID
+        }))
+
+        XCTAssertEqual(registration.request.reason, .selectionChange)
+        XCTAssertEqual(registration.retry.terminal, .pending)
+        XCTAssertNil(registration.retry.lastErrorCode)
+    }
+
+    func testHorizonReopensPersistedInitialReasonMismatchAfterSameOwnerCleanupLostPredecessor() throws {
+        let owner = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("metering-horizon-cleanup-recovery-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let store = DeviceEpochStore(fileURL: storeURL, ownerProvider: { owner })
+        let bytes = Data([0x00, 0x01, 0xFE, 0xFF])
+        let now = Date(timeIntervalSince1970: 1_785_657_600)
+        let request = MeteringHorizonRequest(
+            ownerChildDeviceID: owner,
+            today: "2026-08-02",
+            generationKey: MeteringGenerationKey(
+                protocolVersion: 2,
+                childDeviceID: owner,
+                canonicalTimezone: "America/New_York",
+                policyRevision: "same-owner-repair",
+                measurementSelectionDigest: MeteringEpochContract.selectionDigest(
+                    persistedBytes: bytes
+                ),
+                enforcementSetID: UUID(
+                    uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+                )!
+            ),
+            persistedSelectionBytes: bytes,
+            poolMinutes: 180,
+            deviceCapMinutes: 180,
+            authoritativeBaseAcceptedMinutes: 135,
+            now: now
+        )
+
+        let plan = try store.reconcileMeteringHorizon(request)
+        let routeID = try XCTUnwrap(plan.routeIDsByUsageDate[request.today])
+        try store.transaction(expectedOwner: owner) { state in
+            let registrationKey = try XCTUnwrap(state.registrationWork.first(where: {
+                $0.value.routeID == routeID
+            })?.key)
+            state.registrationWork[registrationKey]?.retry.terminal = .rejected
+            state.registrationWork[registrationKey]?.retry.lastErrorCode =
+                "replacement_reason_mismatch"
+        }
+
+        _ = try store.reconcileMeteringHorizon(MeteringHorizonRequest(
+            ownerChildDeviceID: request.ownerChildDeviceID,
+            today: request.today,
+            generationKey: request.generationKey,
+            persistedSelectionBytes: request.persistedSelectionBytes,
+            poolMinutes: request.poolMinutes,
+            deviceCapMinutes: request.deviceCapMinutes,
+            authoritativeBaseAcceptedMinutes: request.authoritativeBaseAcceptedMinutes,
+            now: now.addingTimeInterval(10)
+        ))
+
+        let state = try store.read()
+        let registration = try XCTUnwrap(state.registrationWork.values.first(where: {
+            $0.routeID == routeID
+        }))
+        XCTAssertEqual(registration.request.reason, .identityRecovery)
+        XCTAssertEqual(registration.retry.terminal, .pending)
+        XCTAssertNil(registration.retry.lastErrorCode)
+    }
+
     func testCurrentRouteUsesAuthoritativeBaseForRemainingLadderAndFutureRoutesUseFullLadder() throws {
         let owner = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
         let storeURL = FileManager.default.temporaryDirectory
@@ -366,11 +594,11 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
         let todayRoute = try XCTUnwrap(state.routes[plan.routeIDsByUsageDate[request.today]!])
         let futureRoute = try XCTUnwrap(state.routes[plan.routeIDsByUsageDate["2026-07-18"]!])
 
-        XCTAssertEqual(todayRoute.plannedEvents.map(\.thresholdMinutes), [5, 7])
-        XCTAssertEqual(futureRoute.plannedEvents.map(\.thresholdMinutes), [5, 10, 12])
+        XCTAssertEqual(todayRoute.plannedEvents.map(\.thresholdMinutes), [1, 5, 7])
+        XCTAssertEqual(futureRoute.plannedEvents.map(\.thresholdMinutes), [1, 5, 10, 12])
         XCTAssertEqual(
             todayRoute.plannedEvents.first?.eventName,
-            MeteringRouteNamespace.eventName(routeID: todayRoute.routeID, thresholdMinutes: 5)
+            MeteringRouteNamespace.eventName(routeID: todayRoute.routeID, thresholdMinutes: 1)
         )
         XCTAssertEqual(request.authoritativeBaseAcceptedMinutes + 5, 10)
     }
@@ -713,10 +941,15 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
 
     // MARK: - Basic capping at cap (cap < pool, multiple of bucket)
 
+    // Every ladder leads with ONE sacrificial 1-minute rung (#94): the resume
+    // calibration eats t1 (excluded, never debited) so a re-arm costs one
+    // minute instead of five; cadence then stays at the normal 5-minute step.
+    private let fineLead = [1]
+
     func test_thresholds_pool120_cap90_stopsAtCap() {
-        // cap=90, buckets: 5,10,15,...,90 (all multiples up to cap)
+        // cap=90: fine lead, then 5,10,15,...,90 (all multiples up to cap)
         let result = EarnedBudgetScheduler.thresholds(poolMinutes: 120, capMinutes: 90)
-        let expected = stride(from: 5, through: 90, by: 5).map { $0 }
+        let expected = fineLead + stride(from: 5, through: 90, by: 5)
         XCTAssertEqual(result, expected)
     }
 
@@ -725,8 +958,7 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
     func test_thresholds_pool120_cap95_appendsExactCap() {
         // cap=97, buckets up to 95 (last multiple ≤ 97), then 97 appended
         let result = EarnedBudgetScheduler.thresholds(poolMinutes: 120, capMinutes: 97)
-        let multiples = stride(from: 5, through: 95, by: 5).map { $0 }
-        let expected = multiples + [97]
+        let expected = fineLead + stride(from: 5, through: 95, by: 5) + [97]
         XCTAssertEqual(result, expected)
     }
 
@@ -734,7 +966,7 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
 
     func test_thresholds_pool120_cap120_coversFullRange() {
         let result = EarnedBudgetScheduler.thresholds(poolMinutes: 120, capMinutes: 120)
-        let expected = stride(from: 5, through: 120, by: 5).map { $0 }
+        let expected = fineLead + stride(from: 5, through: 120, by: 5)
         XCTAssertEqual(result, expected)
     }
 
@@ -743,15 +975,16 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
     func test_thresholds_pool60_cap120_cappedAtPool() {
         // effective ceiling = min(60, 120) = 60
         let result = EarnedBudgetScheduler.thresholds(poolMinutes: 60, capMinutes: 120)
-        let expected = stride(from: 5, through: 60, by: 5).map { $0 }
+        let expected = fineLead + stride(from: 5, through: 60, by: 5)
         XCTAssertEqual(result, expected)
     }
 
-    func test_thresholds_pool240_cap240_coversFourHoursAtFiveMinuteGranularity() {
+    func test_thresholds_pool240_cap240_coversFourHoursWithFineLead() {
+        // 240 over a 44-rung coarse budget widens the step to 10.
         let result = EarnedBudgetScheduler.thresholds(poolMinutes: 240, capMinutes: 240)
-        let expected = stride(from: 5, through: 240, by: 5).map { $0 }
+        let expected = fineLead + stride(from: 10, through: 240, by: 10)
         XCTAssertEqual(result, expected)
-        XCTAssertEqual(result.count, 48)
+        XCTAssertEqual(result.count, 25)
         XCTAssertEqual(EarnedBudgetScheduler.guardEventCount, 48)
     }
 
@@ -766,28 +999,31 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
     func test_thresholds_300MinutePolicyUsesExactAdaptiveTenMinuteLadder() {
         let result = EarnedBudgetScheduler.thresholds(poolMinutes: 300, capMinutes: 300)
 
-        XCTAssertEqual(result, stride(from: 10, through: 300, by: 10).map { $0 })
-        XCTAssertEqual(result.count, 30)
+        XCTAssertEqual(result, fineLead + stride(from: 10, through: 300, by: 10))
+        XCTAssertEqual(result.count, 31)
     }
 
-    func test_thresholds_1440MinutePolicyUsesCompleteThirtyMinuteLadderWithinGuard() {
+    func test_thresholds_1440MinutePolicyUsesCompleteThirtyFiveMinuteLadderWithinGuard() {
         let result = EarnedBudgetScheduler.thresholds(poolMinutes: 1_440, capMinutes: 1_440)
 
-        XCTAssertEqual(result, stride(from: 30, through: 1_440, by: 30).map { $0 })
-        XCTAssertEqual(result.count, EarnedBudgetScheduler.guardEventCount)
+        XCTAssertEqual(
+            result,
+            fineLead + stride(from: 35, through: 1_440, by: 35) + [1_440]
+        )
+        XCTAssertLessThanOrEqual(result.count, EarnedBudgetScheduler.guardEventCount)
     }
 
-    func test_thresholds_ordinaryPolicyPreservesFiveMinuteLadderAndExactTerminal() {
+    func test_thresholds_ordinaryPolicyPreservesLadderAndExactTerminal() {
         let result = EarnedBudgetScheduler.thresholds(poolMinutes: 237, capMinutes: 237)
 
-        XCTAssertEqual(result, stride(from: 5, through: 235, by: 5).map { $0 } + [237])
-        XCTAssertEqual(result.count, EarnedBudgetScheduler.guardEventCount)
+        XCTAssertEqual(result, fineLead + stride(from: 10, through: 230, by: 10) + [237])
+        XCTAssertLessThanOrEqual(result.count, EarnedBudgetScheduler.guardEventCount)
     }
 
     func test_thresholds_adaptivePolicyRetainsNonmultipleTerminalWithoutLargeGap() {
         let result = EarnedBudgetScheduler.thresholds(poolMinutes: 301, capMinutes: 301)
 
-        XCTAssertEqual(result, stride(from: 10, through: 300, by: 10).map { $0 } + [301])
+        XCTAssertEqual(result, fineLead + stride(from: 10, through: 300, by: 10) + [301])
         XCTAssertLessThanOrEqual(result.count, EarnedBudgetScheduler.guardEventCount)
     }
 
@@ -808,8 +1044,9 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
             XCTAssertEqual(result, result.sorted(), "ceiling=\(ceiling)")
             XCTAssertEqual(Set(result).count, result.count, "ceiling=\(ceiling)")
 
-            let minimumStep = (ceiling + EarnedBudgetScheduler.guardEventCount - 1)
-                / EarnedBudgetScheduler.guardEventCount
+            // The fine lead (#94) reserves 1 of the 48 event slots.
+            let coarseBudget = EarnedBudgetScheduler.guardEventCount - 1
+            let minimumStep = (ceiling + coarseBudget - 1) / coarseBudget
             let expectedStep = max(
                 EarnedBudgetScheduler.earnedBucketMinutes,
                 ((minimumStep + EarnedBudgetScheduler.earnedBucketMinutes - 1)
@@ -826,13 +1063,12 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
                 )
             }
 
-            if ceiling <= 240 {
-                var expected = stride(from: 5, through: ceiling, by: 5).map { $0 }
-                if expected.last != ceiling {
-                    expected.append(ceiling)
-                }
-                XCTAssertEqual(result, expected, "ceiling=\(ceiling)")
+            var expected = (1...1).filter { $0 < min(expectedStep, ceiling) }
+            expected += stride(from: expectedStep, through: ceiling, by: expectedStep)
+            if expected.last != ceiling {
+                expected.append(ceiling)
             }
+            XCTAssertEqual(result, expected, "ceiling=\(ceiling)")
         }
     }
 
@@ -895,7 +1131,7 @@ final class EarnedBudgetSchedulerTests: XCTestCase {
                 poolMinutes: policy?.poolMinutes ?? 0,
                 capMinutes: policy?.capMinutes ?? 0
             ),
-            [5, 10, 15]
+            [1, 5, 10, 15]
         )
     }
 

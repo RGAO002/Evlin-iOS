@@ -1,5 +1,6 @@
 import XCTest
 import FamilyControls
+import ManagedSettings
 @testable import Evlin_iOS
 
 /// Unit tests for `mergePreservingPriorSelection(_:prior:)` — the pure inner
@@ -15,6 +16,7 @@ import FamilyControls
 ///
 /// If a token-level integration test is needed it must run on-device with an
 /// active ScreenTime authorisation — add it under `Evlin iOSUITests`.
+@MainActor
 final class MergePreservingPriorSelectionTests: XCTestCase {
 
     // MARK: - Empty prior
@@ -100,5 +102,49 @@ final class MergePreservingPriorSelectionTests: XCTestCase {
         let prior  = FamilyActivitySelection()
         let merged = mergePreservingPriorSelection(picked, prior: prior)
         XCTAssertEqual(merged.webDomainTokens, picked.webDomainTokens)
+    }
+
+    func testPresentationReloadsRetainedSelectionInsteadOfKeepingInitialEmptyState() throws {
+        let retained = try selection(with: syntheticApplicationToken(byte: 11))
+
+        let presented = AppControlsSelectionLogic.selectionForPresentation {
+            retained
+        }
+
+        XCTAssertEqual(presented.applicationTokens, retained.applicationTokens)
+    }
+
+    func testPickerSaveUsesDisplayedSelectionAndDoesNotResurrectHiddenPersistedToken() throws {
+        let pickedToken = try syntheticApplicationToken(byte: 12)
+        let hiddenPersistedToken = try syntheticApplicationToken(byte: 13)
+        let displayed = FamilyActivitySelection()
+        let picked = try selection(with: pickedToken)
+        DefaultLockGroupStore.save(try selection(with: hiddenPersistedToken))
+        defer { DefaultLockGroupStore.save(FamilyActivitySelection()) }
+
+        let saved = AppControlsSelectionLogic.selectionAfterPickerSave(
+            picked: picked,
+            displayed: displayed
+        )
+
+        XCTAssertTrue(saved.applicationTokens.contains(pickedToken))
+        XCTAssertFalse(
+            saved.applicationTokens.contains(hiddenPersistedToken),
+            "A token absent from the visible list must not be silently resurrected"
+        )
+    }
+
+    private func selection(with token: ApplicationToken) throws -> FamilyActivitySelection {
+        var selection = FamilyActivitySelection()
+        selection.applicationTokens.insert(token)
+        return selection
+    }
+
+    private func syntheticApplicationToken(byte: UInt8) throws -> ApplicationToken {
+        let data = Data(repeating: byte, count: 128).base64EncodedString()
+        return try JSONDecoder().decode(
+            ApplicationToken.self,
+            from: Data(#"{"data":"\#(data)"}"#.utf8)
+        )
     }
 }

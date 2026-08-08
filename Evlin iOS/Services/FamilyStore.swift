@@ -1,6 +1,26 @@
 import Foundation
 import Observation
 
+@MainActor
+enum FamilyIdentityBackfill {
+    static func apply(
+        familyID: String?,
+        children: [ChildDTO],
+        defaults: UserDefaults = .standard
+    ) {
+        let existingFamilyID = defaults.string(forKey: "evlin.familyID") ?? ""
+        if existingFamilyID.isEmpty, let familyID, !familyID.isEmpty {
+            defaults.set(familyID, forKey: "evlin.familyID")
+        }
+
+        let existingDeviceID = defaults.string(forKey: "evlin.childDeviceID") ?? ""
+        guard existingDeviceID.isEmpty,
+              let device = children.first(where: { !$0.devices.isEmpty })?.devices.first
+        else { return }
+        defaults.set(device.device_id, forKey: "evlin.childDeviceID")
+    }
+}
+
 /// Single source of truth for the parent Home tab (spec §6.1). Replaces the
 /// hardcoded `ChildProfile.all` mock. Loaded from `GET /me/profile` (the
 /// authed-account aggregate that works for any signed-in parent, including a
@@ -126,15 +146,10 @@ final class FamilyStore {
     /// Re-derive the kid device id (+ family id) from the aggregate when the
     /// local value is missing — never clobber an explicit pairing on this device.
     private func backfillPairedChildDeviceIfMissing() {
-        let key = "evlin.childDeviceID"
-        let existing = UserDefaults.standard.string(forKey: key) ?? ""
-        guard existing.isEmpty,
-              let dev = children.first(where: { !$0.devices.isEmpty })?.devices.first
-        else { return }
-        UserDefaults.standard.set(dev.device_id, forKey: key)
-        if let famID = family?.id, !famID.isEmpty {
-            UserDefaults.standard.set(famID, forKey: "evlin.familyID")
-        }
+        FamilyIdentityBackfill.apply(
+            familyID: family?.id,
+            children: children
+        )
     }
 
     /// Look up a child by its backend id.

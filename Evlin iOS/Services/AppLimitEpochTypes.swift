@@ -312,6 +312,15 @@ nonisolated struct AppLimitArmProvenance: Codable, Equatable, Sendable {
     /// Audit-only pause provenance from the predecessor arm. It must never be
     /// subtracted from a successor whose raw threshold starts at zero.
     var predecessorIgnoredWhilePausedMinutes: Int? = nil
+    /// Apple consumed this arm's one-shot events before enough physical time
+    /// elapsed. The planner may replace the physical identity within its
+    /// bounded recovery budget.
+    var physicalEventsConsumedAt: Date? = nil
+    /// Persisted across replacements so process restarts cannot regain the
+    /// bounded recovery budget. Attempt one recalibrates immediately; attempt
+    /// two is delayed until the full remaining budget is physically plausible.
+    /// A new rule revision or usage day resets it.
+    var physicalReplacementAttemptCount: Int? = nil
     var activityName: String
     var armID: UUID
 

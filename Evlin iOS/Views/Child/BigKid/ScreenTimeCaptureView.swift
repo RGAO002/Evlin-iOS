@@ -5,9 +5,8 @@
 // This view is reachable from BigKidHomeView when the all-category measurement
 // selection is missing from EarnedTimeStore. It mirrors the working pattern in
 // WholeDeviceThresholdProbeView (DEBUG), but persists the result to
-// EarnedTimeStore.shared via saveMeasurementSelection() — making
-// isEarnedTimeReady satisfiable and arming the earned-budget ladder on next
-// foreground via armEarnedBudgetIfReady() in Evlin_iOSApp.
+// EarnedTimeStore.shared via saveMeasurementSelection(), then explicitly runs
+// the same v2 policy recovery used by the poller and onboarding flow.
 //
 // Gate: only shown when EarnedTimeStore.shared.measurementSelection == nil.
 // Once captured, the card disappears from BigKidHomeView automatically
@@ -24,11 +23,8 @@ struct ScreenTimeCaptureView: View {
     /// Called when the selection was successfully saved.
     var onDone: () -> Void = {}
 
-    @State private var selection = FamilyActivitySelection(includeEntireCategory: true)
+    @StateObject private var capture = TrackingSelectionCapture()
     @State private var pickerShown = false
-    @State private var isSaved = false
-    @State private var notAuthorized = false
-    @State private var selectionRequired = false
 
     var body: some View {
         EvKidCard(padding: 20) {
@@ -64,14 +60,14 @@ struct ScreenTimeCaptureView: View {
                     .foregroundStyle(EvlinKidColors.ink2)
                     .fixedSize(horizontal: false, vertical: true)
 
-                if selectionRequired {
+                if capture.state == .needsSelection {
                     Text("Choose All Apps & Categories before closing this step.")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(EvlinKidColors.amber)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                if notAuthorized {
+                if capture.state == .notAuthorized {
                     Text("Screen Time isn't authorized yet. Ask a parent to complete the Screen Time setup step first.")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(EvlinKidColors.amber)
@@ -85,28 +81,28 @@ struct ScreenTimeCaptureView: View {
                     HStack(spacing: 8) {
                         Image(systemName: "square.grid.2x2")
                             .font(.system(size: 16, weight: .semibold))
-                        Text(isSaved ? "Done! Tracking enabled" : "Select all categories")
+                        Text(capture.state == .saved ? "Done! Tracking enabled" : "Select all categories")
                             .font(.system(size: 15, weight: .heavy))
                             .tracking(EvlinKidMetrics.Letter.body)
                     }
-                    .foregroundStyle(isSaved ? EvlinKidColors.green700 : .white)
+                    .foregroundStyle(capture.state == .saved ? EvlinKidColors.green700 : .white)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 13)
                     .background(
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(isSaved ? EvlinKidColors.green100 : EvlinKidColors.green600)
+                            .fill(capture.state == .saved ? EvlinKidColors.green100 : EvlinKidColors.green600)
                     )
                 }
                 .buttonStyle(.plain)
-                .disabled(isSaved)
+                .disabled(capture.state == .saved)
             }
         }
         .overlay(
             RoundedRectangle(cornerRadius: EvlinKidMetrics.Radius.card)
-                .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: isSaved ? [] : [4]))
+                .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: capture.state == .saved ? [] : [4]))
                 .foregroundStyle(EvlinKidColors.green300)
         )
-        .familyActivityPicker(isPresented: $pickerShown, selection: $selection)
+        .familyActivityPicker(isPresented: $pickerShown, selection: $capture.selection)
         .onChange(of: pickerShown) { _, isOpen in
             // Picker was dismissed (closed) — save if the user picked anything
             if !isOpen {
@@ -119,34 +115,28 @@ struct ScreenTimeCaptureView: View {
         // Check authorization before opening the picker to avoid a crash on an
         // unauthorized device (should not happen in production — Screen Time
         // auth is acquired during child onboarding — but guard defensively).
-        let status = AuthorizationCenter.shared.authorizationStatus
-        guard status == .approved else {
-            notAuthorized = true
-            return
-        }
-        notAuthorized = false
-        selectionRequired = false
-        pickerShown = true
+        let approved = AuthorizationCenter.shared.authorizationStatus == .approved
+        pickerShown = capture.requestPicker(authorized: approved)
     }
 
     private func saveIfReady() {
-        guard !selection.applicationTokens.isEmpty
-                || !selection.categoryTokens.isEmpty
-                || !selection.webDomainTokens.isEmpty
-        else {
-            selectionRequired = true
-            return
-        }
-
-        EarnedTimeStore.shared.saveMeasurementSelection(selection)
-        // Arm immediately. Waiting for the next scene activation left the
-        // device unmonitored — or worse, still monitored by a stale ladder —
-        // when the kid went straight to other apps after this step.
-        EarnedBudgetArming.armIfReady()
-        withAnimation(.easeOut(duration: 0.3)) { isSaved = true }
-        // Brief delay so the success state is visible, then dismiss.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-            onDone()
+        Task {
+            await capture.commit {
+                guard let raw = UserDefaults.standard.string(
+                    forKey: DeviceIdentity.childKey
+                ),
+                let childID = UUID(uuidString: raw),
+                let baseURL = URL(string: APIClient.currentBaseURL)
+                else { return }
+                _ = await MeteringPolicyRefresh.now(
+                    childDeviceID: childID,
+                    baseURL: baseURL
+                )
+            }
+            guard capture.state == .saved else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                onDone()
+            }
         }
     }
 }

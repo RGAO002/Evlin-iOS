@@ -25,6 +25,8 @@ struct DeviceItem: Identifiable, Hashable {
     /// B11: the enrolled device's UUID — used to look up per-device earned-time estimates.
     /// Nil for mock/fixture rows.
     let deviceUUID: UUID?
+    /// Device-watchdog proof for today's exact activated v2 route.
+    let meteringReady: Bool
 
     /// Build a Profile "Enrolled Devices" row from a backend
     /// `EnrolledDeviceDTO` (`GET /family` / `GET /me/profile`). The display
@@ -39,15 +41,23 @@ struct DeviceItem: Identifiable, Hashable {
         self.detail = display
         self.locked = false
         self.deviceUUID = UUID(uuidString: dto.device_id)
+        self.meteringReady = dto.metering_ready == true
     }
 
     /// Direct memberwise-style initializer for the mock fixtures below.
-    init(iconSystemName: String, name: String, detail: String, locked: Bool) {
+    init(
+        iconSystemName: String,
+        name: String,
+        detail: String,
+        locked: Bool,
+        meteringReady: Bool = false
+    ) {
         self.iconSystemName = iconSystemName
         self.name = name
         self.detail = detail
         self.locked = locked
         self.deviceUUID = nil
+        self.meteringReady = meteringReady
     }
 
     private static func friendlyDisplay(dto: EnrolledDeviceDTO, friendlyModel: String?) -> String {

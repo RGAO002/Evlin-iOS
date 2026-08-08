@@ -33,6 +33,9 @@ import Foundation
 final class NotificationService: UNNotificationServiceExtension {
     private var contentHandler: ((UNNotificationContent) -> Void)?
     private var bestAttempt: UNMutableNotificationContent?
+    /// The in-flight apply pipeline, kept so expiry can cancel it instead of
+    /// letting iOS suspend us mid-recovery at an arbitrary await.
+    private var applyTask: Task<Void, Never>?
 
     override func didReceive(
         _ request: UNNotificationRequest,
@@ -54,7 +57,7 @@ final class NotificationService: UNNotificationServiceExtension {
             return
         }
 
-        Task { [weak self] in
+        applyTask = Task { [weak self] in
             await self?.applyLock(commandID: commandID)
             self?.finish()
         }
@@ -63,8 +66,11 @@ final class NotificationService: UNNotificationServiceExtension {
     override func serviceExtensionTimeWillExpire() {
         // iOS is about to suspend/kill us. Deliver whatever we have; the
         // ManagedSettings write (if reached) is synchronous inside the actor and
-        // has already been attempted.
+        // has already been attempted. Cancel the pipeline so a still-running
+        // recovery unwinds at its next await instead of being suspended at an
+        // arbitrary one (its durable work queue makes the cancellation safe).
         NSEConfig.log("time_will_expire")
+        applyTask?.cancel()
         finish()
     }
 
@@ -115,6 +121,18 @@ final class NotificationService: UNNotificationServiceExtension {
         }
         await NSENetwork.ack(baseURL: baseURL, deviceID: deviceID, commandID: commandID, outcome: outcome)
         NSEConfig.log("applied+acked cmd=\(commandID) verb=\(outcome.verb) name=\(outcome.displayName)")
+        // Lifting the all-apps shield reopened the counting gate above. Run one
+        // bounded recovery pass NOW so the paused pool actually resumes in this
+        // same wake: on a force-quit device this extension is the only code
+        // that will run until the kid reopens the app, and the config-command
+        // path (the other recovery caller) may never fire.
+        if outcome.verb == "unshield_all" {
+            _ = try? await Self.withDeadline(seconds: 12) {
+                try await MeteringProductionComposition.recoverFromSharedConfiguration(
+                    role: .pushApplier
+                )
+            }
+        }
     }
 
     private func persistAppLimit(
@@ -148,9 +166,33 @@ final class NotificationService: UNNotificationServiceExtension {
                 )
             },
             requestOwnerWake: {
-                // The backend queues a silent command wake with this same alert.
-                // Keeping the ack pending leaves the durable owner work pollable.
-                NSEConfig.log("limit owner wake requested cmd=\(commandID)")
+                // Arm it HERE. A force-quit device only ever wakes its
+                // extensions, so "persist now, let the owner arm later" meant
+                // later never came: the rule sat `accepted_needs_owner`, iOS
+                // was never handed a monitor, and the limit silently did not
+                // exist until someone opened the app (2026-08-07, real device:
+                // a 1-minute Apple TV limit that never fired). The planner is
+                // idempotent and reconciles from the live DeviceActivity set,
+                // so running it here is safe even when the app later runs it
+                // too. Failure is non-fatal — the ack stays pending and the
+                // durable owner work remains pollable, exactly as before.
+                let owner = MeteringOwnerMirror.current()
+                let rules = AppLimitRuleStore.shared.all()
+                let armed = owner.map { _ in
+                    AppLimitPlanner().arm(rules: rules)
+                }
+                // NSLog cannot cross back from the extension, so record the
+                // outcome where a `devicectl` pull can read it. Without this the
+                // arm attempt is invisible: the provenance shows an armID with
+                // no receipt and nothing says why.
+                UserDefaults(suiteName: "group.com.evlin.ios")?.set(
+                    "\(ISO8601DateFormatter().string(from: Date())) owner=\(owner != nil) "
+                        + "rules=\(rules.count) result=\(String(describing: armed))",
+                    forKey: "evlin.appLimit.nseArm"
+                )
+                NSEConfig.log(
+                    "limit armed in NSE cmd=\(commandID) result=\(String(describing: armed))"
+                )
             }
         )
         guard let delivery else {
@@ -224,14 +266,17 @@ final class NotificationService: UNNotificationServiceExtension {
                 command: command,
                 fetchedDeviceID: deviceID
             )
+            let recoveryRequired: Bool
             let status: String
             var detail: [String: Any] = ["owner": "device_epoch_store"]
             switch disposition {
             case .acceptedNeedsOwner, .duplicatePending:
+                recoveryRequired = true
                 status = "persisted_waiting_for_owner"
                 detail["application_state"] = "pending"
                 detail["reason"] = "persisted_waiting_for_owner"
             case .duplicateApplied:
+                recoveryRequired = false
                 let desired = try DeviceEpochStore.shared.read().desiredPolicy
                 if desired?.ackedAt != nil {
                     status = "confirmed"
@@ -243,11 +288,13 @@ final class NotificationService: UNNotificationServiceExtension {
                     detail["reason"] = "persisted_waiting_for_owner"
                 }
             case let .superseded(latestOrderingToken):
+                recoveryRequired = false
                 status = "confirmed"
                 detail["application_state"] = "superseded"
                 detail["reason"] = "superseded"
                 detail["latest_ordering_token"] = latestOrderingToken
             case .equalTokenConflict:
+                recoveryRequired = false
                 status = "failed"
                 detail["reason"] = "ordering_token_conflict"
             }
@@ -262,8 +309,70 @@ final class NotificationService: UNNotificationServiceExtension {
                 detail: detail
             )
             NSEConfig.log("earned policy persisted cmd=\(commandID) status=\(status)")
+            guard recoveryRequired else { return }
+            // The recovery leg gets its own failure domain: the policy above
+            // is already persisted AND acked, so a recovery error must never
+            // read as "earned policy rejected". It is also deadline-bounded —
+            // the NSE has ~30 s total, and an unbounded recovery left the
+            // outcome to wherever iOS happened to suspend us.
+            do {
+                let outcome = try await Self.withDeadline(seconds: 18) {
+                    try await MeteringProductionComposition.recoverFromSharedConfiguration(
+                        role: .pushApplier
+                    )
+                }
+                NSEConfig.log("recovery outcome=\(outcome) cmd=\(commandID)")
+                // The early ack said "waiting for owner" as a fail-safe. If
+                // the recovery actually applied the policy (the owner's ack
+                // mark is set), upgrade the receipt so the backend does not
+                // keep showing a command the device already honored.
+                if let desired = try? DeviceEpochStore.shared.read().desiredPolicy,
+                   desired.ackedAt != nil {
+                    var upgraded: [String: Any] = [
+                        "owner": "device_epoch_store",
+                        "application_state": "applied",
+                        "source": "push_applier_recovery_readback",
+                    ]
+                    if let token = command.earnedTimeConfig?.orderingToken {
+                        upgraded["ordering_token"] = token
+                    }
+                    try await NSENetwork.ack(
+                        baseURL: baseURL,
+                        deviceID: deviceID,
+                        commandID: commandID,
+                        status: "confirmed",
+                        detail: upgraded
+                    )
+                    NSEConfig.log("recovery ack upgraded cmd=\(commandID)")
+                }
+            } catch {
+                NSEConfig.log(
+                    "recovery failed (policy already persisted+acked) cmd=\(commandID) error=\(error)"
+                )
+            }
         } catch {
             NSEConfig.log("earned policy rejected cmd=\(commandID) error=\(error)")
+        }
+    }
+
+    /// Bounded await: races `work` against a deadline and cancels the loser.
+    /// The recovery's durable work queue makes mid-flight cancellation safe —
+    /// unfinished legs are re-driven by the app's next pass.
+    private static func withDeadline<T: Sendable>(
+        seconds: TimeInterval,
+        _ work: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await work() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw CancellationError()
+            }
+            guard let first = try await group.next() else {
+                throw CancellationError()
+            }
+            group.cancelAll()
+            return first
         }
     }
 }
@@ -300,6 +409,15 @@ enum NSELockApplier {
                 displayName: cmd.target.targetDisplay ?? "App"
             )
         case .unshieldAll:
+            // Lifting the all-apps shield is how a reflection ends, and the
+            // ONLY writer of the local counting gate used to be the kid app's
+            // foreground poller. On a force-quit device that poller never runs,
+            // so the gate stayed at the value it had while the reflection was
+            // open — "paused" — and the metering recovery this extension runs
+            // right after would dutifully keep the pool frozen. Reopening it
+            // here makes the resume genuinely force-quit-proof, which is what
+            // this command path already claims to be (2026-08-07).
+            earnedTimeStore.usageCountingAllowed = true
             return Outcome(
                 verb: "unshield_all",
                 displayName: cmd.target.targetDisplay ?? "All apps"

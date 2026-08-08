@@ -1,6 +1,10 @@
 import DeviceActivity
 import FamilyControls
 import Foundation
+// AuthorizationCenter probe: FamilyControls authorization can be revoked
+// out from under a running install (reinstall, Apple ID churn, iOS whim —
+// observed repeatedly on real hardware). Schedules SURVIVE revocation, so
+// every other probe stays green while not a single callback can ever fire.
 
 /// One self-check of today's metering route against Apple's daemon + the store.
 nonisolated struct MeteringWatchdogVerdict: Equatable, Sendable {
@@ -13,8 +17,12 @@ nonisolated struct MeteringWatchdogVerdict: Equatable, Sendable {
     /// True when the check could not run at all (no active route, no owner) —
     /// this is NOT a red: a device with no armed day has nothing to heal.
     var inconclusive: Bool
+    /// #95: faults the re-kick cannot repair (a stuck route handoff). Emitted
+    /// in the red line for visibility, but they never trigger the heal — a
+    /// re-kick against a wedged handoff is churn, not medicine.
+    var reportOnlyReds: [String] = []
 
-    var isGreen: Bool { reds.isEmpty && !inconclusive }
+    var isGreen: Bool { reds.isEmpty && reportOnlyReds.isEmpty && !inconclusive }
 }
 
 /// A3 — periodic self-check + self-heal for the metering engine.
@@ -63,12 +71,17 @@ nonisolated final class MeteringWatchdog: @unchecked Sendable {
     private let center: any MeteringDeviceActivityCenter
     private let now: @Sendable () -> Date
     private let heal: @Sendable () async -> String
+    /// Seam for probe 4. A unit-test process never holds FamilyControls
+    /// authorization, so reading `AuthorizationCenter` directly made every
+    /// green-verdict test fail on a condition that only exists off-device.
+    private let screenTimeAuthorized: @Sendable () -> Bool
 
     /// Guards the three throttle timestamps. The watchdog is reachable from the
     /// poll loop and from scene activation, which are not the same task.
     private let throttleLock = NSLock()
     private var lastCheckAt: Date?
     private var lastGreenEmitAt: Date?
+    private var lastGreenRouteID: UUID?
     private var lastRekickAt: Date?
 
     init(
@@ -77,12 +90,16 @@ nonisolated final class MeteringWatchdog: @unchecked Sendable {
         now: @escaping @Sendable () -> Date = { Date() },
         heal: @escaping @Sendable () async -> String = {
             await MeteringTodayRouteRekick.run(trigger: "watchdog")
+        },
+        screenTimeAuthorized: @escaping @Sendable () -> Bool = {
+            AuthorizationCenter.shared.authorizationStatus == .approved
         }
     ) {
         self.store = store
         self.center = center
         self.now = now
         self.heal = heal
+        self.screenTimeAuthorized = screenTimeAuthorized
     }
 
     /// Throttled entry point. Safe to call from every foreground transition and
@@ -107,8 +124,18 @@ nonisolated final class MeteringWatchdog: @unchecked Sendable {
         guard !verdict.inconclusive else { return }
 
         if verdict.isGreen {
-            // Rate-limit the green heartbeat; reds are never rate-limited.
+            // Rate-limit the green heartbeat — EXCEPT the first green for a
+            // route. The parent-side "armed" attestation requires a ledger
+            // green AFTER the current epoch's activation; suppressing that
+            // first green left every freshly re-armed device showing SYNCING
+            // for up to an hour while its checks were passing (2026-08-05).
+            // Repeat greens for the same route stay hourly.
             let shouldEmitGreen: Bool = throttleLock.withLock {
+                if verdict.routeID != lastGreenRouteID {
+                    lastGreenRouteID = verdict.routeID
+                    lastGreenEmitAt = now()
+                    return true
+                }
                 if let lastGreenEmitAt,
                    now().timeIntervalSince(lastGreenEmitAt) < Self.greenHeartbeatInterval {
                     return false
@@ -131,17 +158,18 @@ nonisolated final class MeteringWatchdog: @unchecked Sendable {
         let cooling: Bool = throttleLock.withLock {
             lastRekickAt.map { now().timeIntervalSince($0) < Self.rekickCooldown } ?? false
         }
+        let healable = !verdict.reds.isEmpty
         MeteringFlightRecorder.emit(
             kind: .meteringWatch,
             site: "watchdog.selfcheck",
-            verdict: "red:" + verdict.reds.joined(separator: ","),
+            verdict: "red:" + (verdict.reds + verdict.reportOnlyReds).joined(separator: ","),
             detail: MeteringFlightRecorder.detail([
                 ("trigger", trigger),
-                ("heal", cooling ? "cooling_down" : "rekick"),
+                ("heal", healable ? (cooling ? "cooling_down" : "rekick") : "none_applicable"),
             ]) + " " + verdict.detail,
             corrID: verdict.routeID
         )
-        guard !cooling else { return }
+        guard healable, !cooling else { return }
         throttleLock.withLock { lastRekickAt = now() }
         let report = await heal()
         MeteringFlightRecorder.emit(
@@ -154,6 +182,31 @@ nonisolated final class MeteringWatchdog: @unchecked Sendable {
             ]),
             corrID: verdict.routeID
         )
+    }
+
+    /// Every rule the per-app store considers armed must have its activity
+    /// live in the daemon. Report-and-heal: a missing arm is exactly what the
+    /// re-kick + owner recovery can repair.
+    nonisolated static func perAppReds(
+        owner: UUID,
+        center: any MeteringDeviceActivityCenter
+    ) -> [String] {
+        guard let state = try? AppLimitEpochStore.shared.read(),
+              state.ownerChildDeviceID == owner
+        else { return [] }
+        let live = Set(center.activities.map(\.rawValue))
+        var reds: [String] = []
+        for slot in state.slots.values {
+            guard slot.latestKind == .set,
+                  let provenance = slot.armProvenance,
+                  provenance.monitorStartPending != true
+            else { continue }
+            if !live.contains(provenance.activityName) {
+                reds.append("app_limit_arm_missing")
+                break
+            }
+        }
+        return reds
     }
 
     // MARK: - Read-only self-check
@@ -228,6 +281,52 @@ nonisolated final class MeteringWatchdog: @unchecked Sendable {
             reds.append(coverageRed)
         }
 
+        // 4. Screen Time authorization itself. iOS can revoke it silently
+        // mid-life (iPad 2026-08-05 23:xx: authorization OFF while probes 1-3
+        // all passed — schedules persist across revocation, so the device
+        // showed ACTIVE with both metering stacks stone dead). Report-only:
+        // only the user can re-grant; the kid UI surfaces the re-enable.
+        var reportOnly: [String] = []
+        if !screenTimeAuthorized() {
+            reportOnly.append("authorization_revoked")
+        }
+
+        // 5. The pool must never sit paused while counting is allowed. Every
+        // resume path (foreground poll, background wake, NSE unshield_all)
+        // calls the gate reconcile, but that reconcile has a wall of
+        // preconditions and any one of them returning silently used to leave
+        // the epoch paused with no trace — a freshly onboarded device then
+        // showed a full pool that never moved (2026-08-07). Surfacing it makes
+        // the parent row honest (SYNCING, not ACTIVE) and puts a line in the
+        // black box the moment it happens.
+        if EarnedTimeStore.shared.usageCountingAllowed,
+           state.epochs[route.epochID]?.status == .paused {
+            reportOnly.append("pool_paused_while_allowed")
+        }
+
+        // 6. Per-app arms. Until now this self-check covered ONLY the earned
+        // ladder, so a green verdict promised nothing about the per-app bars —
+        // yet the parent row reads that verdict as "everything is armed"
+        // (Fred, 2026-08-07: "if it says active, all three bars must move").
+        // Each slot the store believes is armed must be present in the daemon,
+        // otherwise the limit is silently unenforced.
+        for red in Self.perAppReds(owner: owner, center: center) {
+            reds.append(red)
+        }
+
+        // 7. #95: a route handoff is a transition, not a place to live. One
+        // stuck past the grace wedges the resume mint, the rollover effect
+        // leg, or both (iPad 2026-08-05 sat in exactly this state all night
+        // with every check reporting green). Report-only: the re-kick cannot
+        // repair it.
+        if let handoffRed = Self.handoffRed(
+            handoff: state.v2RouteHandoff,
+            owner: owner,
+            now: now()
+        ) {
+            reportOnly.append(handoffRed)
+        }
+
         return MeteringWatchdogVerdict(
             reds: reds,
             detail: MeteringFlightRecorder.detail([
@@ -237,8 +336,31 @@ nonisolated final class MeteringWatchdog: @unchecked Sendable {
                 ("date", route.usageDate),
             ]),
             routeID: routeID,
-            inconclusive: false
+            inconclusive: false,
+            reportOnlyReds: reportOnly
         )
+    }
+
+    /// How long a non-committed handoff may exist before the watchdog calls
+    /// it stuck. Cutover normally completes in seconds; half an hour of
+    /// squatting means something in the chain is wedged (or the device is
+    /// offline — in which case a red line that uploads on reconnect is
+    /// exactly the trace we want).
+    static let handoffStuckGraceSeconds: TimeInterval = 30 * 60
+
+    /// Pure decision seam (unit-tested): is the persisted handoff stuck?
+    /// `.committed` is history awaiting cleanup debt, never stuck.
+    static func handoffRed(
+        handoff: V2RouteHandoff?,
+        owner: UUID,
+        now: Date
+    ) -> String? {
+        guard let handoff,
+              handoff.ownerChildDeviceID == owner,
+              handoff.phase != .committed,
+              now.timeIntervalSince(handoff.createdAt) > handoffStuckGraceSeconds
+        else { return nil }
+        return "handoff_stuck_\(handoff.phase.rawValue)"
     }
 
     /// Pure decision seam (unit-tested): is the store's coverage healthy enough

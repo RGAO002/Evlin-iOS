@@ -18,6 +18,28 @@ final class FamilyStoreTests: XCTestCase {
         return store
     }
 
+    @MainActor
+    func testIdentityBackfillFillsMissingFamilyWhenDeviceAlreadyExists() {
+        let suite = "FamilyStoreTests.identity-backfill.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let existingDeviceID = UUID()
+        let familyID = UUID()
+        defaults.set(existingDeviceID.uuidString, forKey: "evlin.childDeviceID")
+
+        FamilyIdentityBackfill.apply(
+            familyID: familyID.uuidString,
+            children: [],
+            defaults: defaults
+        )
+
+        XCTAssertEqual(
+            defaults.string(forKey: "evlin.childDeviceID"),
+            existingDeviceID.uuidString
+        )
+        XCTAssertEqual(defaults.string(forKey: "evlin.familyID"), familyID.uuidString)
+    }
+
 
     /// A representative GET /family response: one family with two parents
     /// (owner + co-parent), two children (one with a photo avatar + a child
@@ -369,6 +391,48 @@ final class FamilyStoreTests: XCTestCase {
 
         XCTAssertEqual(item.name, "iPhone 17")
         XCTAssertEqual(item.detail, "iPhone 17 · iOS 26")
+    }
+
+    func testDeviceItemMapsServerConfirmedMeteringReadiness() {
+        let dto = EnrolledDeviceDTO(
+            device_id: "device-ready",
+            mode: "child",
+            label: "Kid iPhone",
+            device_model: "iPhone18,3",
+            platform: "ios",
+            os_version: "26.1",
+            display: "iPhone 17 · iOS 26",
+            last_seen_at: nil,
+            online: true,
+            is_self: false,
+            metering_ready: true
+        )
+
+        let item = DeviceItem(dto: dto)
+
+        XCTAssertTrue(item.meteringReady)
+    }
+
+    func testDeviceItemDefaultsMeteringReadinessToFalseForOlderResponses() throws {
+        let data = Data("""
+        {
+          "device_id": "legacy-device",
+          "mode": "child",
+          "label": "Older build",
+          "device_model": "iPhone12,1",
+          "platform": "ios",
+          "os_version": "18.5",
+          "display": "iPhone 11 · iOS 18",
+          "last_seen_at": null,
+          "online": true,
+          "is_self": false
+        }
+        """.utf8)
+
+        let dto = try JSONDecoder().decode(EnrolledDeviceDTO.self, from: data)
+        let item = DeviceItem(dto: dto)
+
+        XCTAssertFalse(item.meteringReady)
     }
 
     func testDeviceInfoProviderFieldNames() {

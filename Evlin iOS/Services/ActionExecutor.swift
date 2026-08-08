@@ -97,52 +97,7 @@ enum CatalogCommandTokenData {
     }
 }
 
-protocol DeviceActivityScheduling {
-    func startMonitoring(_ name: DeviceActivityName, during schedule: DeviceActivitySchedule) throws
-    /// Arm an activity that also measures usage events (the per-app-limit path,
-    /// P5). The `events:` dict maps `DeviceActivityEvent.Name` → threshold so
-    /// the extension's `eventDidReachThreshold` fires when a budget is reached.
-    func startMonitoring(
-        _ activity: DeviceActivityName,
-        during schedule: DeviceActivitySchedule,
-        events: [DeviceActivityEvent.Name: DeviceActivityEvent]
-    ) throws
-    func stopMonitoring(_ activities: [DeviceActivityName])
-    func stopMonitoring()
-    /// The activities DeviceActivity currently considers monitored. Lets a
-    /// caller (the per-app-limit planner, P5) self-heal from the live set
-    /// instead of relying on in-memory state that doesn't survive a fresh
-    /// instance or an app restart.
-    func monitoredActivities() -> [DeviceActivityName]
-}
 
-struct DeviceActivityCenterScheduler: DeviceActivityScheduling {
-    private let center = DeviceActivityCenter()
-
-    func startMonitoring(_ name: DeviceActivityName, during schedule: DeviceActivitySchedule) throws {
-        try center.startMonitoring(name, during: schedule)
-    }
-
-    func startMonitoring(
-        _ activity: DeviceActivityName,
-        during schedule: DeviceActivitySchedule,
-        events: [DeviceActivityEvent.Name: DeviceActivityEvent]
-    ) throws {
-        try center.startMonitoring(activity, during: schedule, events: events)
-    }
-
-    func stopMonitoring(_ activities: [DeviceActivityName]) {
-        center.stopMonitoring(activities)
-    }
-
-    func stopMonitoring() {
-        center.stopMonitoring()
-    }
-
-    func monitoredActivities() -> [DeviceActivityName] {
-        Array(center.activities)
-    }
-}
 
 func makeDefaultDeviceActivityScheduler() -> DeviceActivityScheduling {
 #if DEBUG
@@ -1161,6 +1116,14 @@ final class ActionExecutor: @unchecked Sendable {
         if let exp = expiresAt, exp.timeIntervalSinceNow < TimeInterval(Self.minScheduleMinutes * 60) {
             expiresAt = Date().addingTimeInterval(TimeInterval(Self.minScheduleMinutes * 60))
         }
+        // Token attach — catalog payload first, alias store second. A matched
+        // token gives a precise, verifiably-enforced block. When NO token can
+        // be matched, the fallback below fail-closes over the whole selected
+        // set instead of writing a bundle-id-only entry whose enforcement is
+        // unproven (2026-08-07): a block the parent was told succeeded must
+        // never quietly enforce nothing.
+        let appToken = CatalogCommandTokenData.decodedApplicationToken(from: cmd.target)
+            ?? LocalAliasStore.shared.applicationToken(forLookupKey: bundleID)
         let record = BlockRecord(
             bundleID: bundleID,
             displayName: cmd.target.targetDisplay ?? bundleID,
@@ -1168,7 +1131,8 @@ final class ActionExecutor: @unchecked Sendable {
             lastCommandID: cmd.id,
             originalRequest: cmd.target.originalRequest,
             targetChildID: identity.expectedChildID ?? cmd.target.targetChildID ?? UUID(),
-            expiresAt: expiresAt
+            expiresAt: expiresAt,
+            appToken: appToken
         )
         guard await prepareForMutation(identity) else {
             return Self.staleIdentityResult
@@ -1209,13 +1173,58 @@ final class ActionExecutor: @unchecked Sendable {
                 )
             }
         }
+        // Fail-closed fallback: no matched token → shield the whole selected
+        // set for the same lifetime, keyed to this block so unblock lifts it.
+        if appToken == nil {
+            let selection = DefaultLockGroupStore.load()
+            if !selection.applicationTokens.isEmpty
+                || !selection.categoryTokens.isEmpty {
+                let fallback = ShieldRecord(
+                    recordKey: Self.blockFallbackRecordKey(bundleID: bundleID),
+                    tier: .savedList,
+                    targetKey: Self.blockFallbackTargetKey(bundleID: bundleID),
+                    displayName: "\(record.displayName) (whole set)",
+                    lastCommandID: cmd.id,
+                    appTokens: selection.applicationTokens,
+                    categoryTokens: selection.categoryTokens,
+                    webDomainTokens: selection.webDomainTokens,
+                    appliesToAll: false,
+                    issuedAt: cmd.issuedAt,
+                    expiresAt: expiresAt,
+                    originalRequest: cmd.target.originalRequest,
+                    targetChildID: record.targetChildID
+                )
+                _ = await ActiveLockStore.shared.addShield(fallback, force: true)
+                afterMutationCheckpoint(.blockPersisted)
+                guard identity.isCurrent else {
+                    _ = await ActiveLockStore.shared.removeShield(
+                        recordKey: fallback.recordKey
+                    )
+                    await rollbackAddedBlock(blockMutation.receipt)
+                    return Self.staleIdentityResult
+                }
+            }
+        }
         let eff = effectiveStateFrom(state.stillCovered, isBlocked: true, possibleSavedList: state.possibleSavedListCoverage)
         switch result {
         case .added:
-            return .confirmedExact(verb: .block, displayName: record.displayName, effectiveState: eff)
+            let display = appToken == nil
+                ? "\(record.displayName) (locked whole set — app not matched)"
+                : record.displayName
+            return .confirmedExact(verb: .block, displayName: display, effectiveState: eff)
         case .alreadyBlocked:
             return .confirmedExact(verb: .block, displayName: "\(record.displayName) already blocked", effectiveState: eff)
         }
+    }
+
+    /// Whole-set fallback shield for a token-less block, keyed by the blocked
+    /// bundle id so `unblock` can lift exactly this record and nothing else.
+    static func blockFallbackTargetKey(bundleID: String) -> String {
+        "block-fallback:\(bundleID.lowercased())"
+    }
+
+    static func blockFallbackRecordKey(bundleID: String) -> String {
+        ShieldRecord.makeRecordKey(tier: .savedList, targetKey: blockFallbackTargetKey(bundleID: bundleID))
     }
 
     /// Schedule a DeviceActivityMonitor activity that fires intervalDidEnd
@@ -1629,6 +1638,11 @@ final class ActionExecutor: @unchecked Sendable {
             return .failed(.nothingToUnlock)
         }
         afterMutationCheckpoint(.unblockRemoved)
+        // Lift the whole-set fallback shield a token-less block may have
+        // installed alongside its record.
+        _ = await ActiveLockStore.shared.removeShield(
+            recordKey: Self.blockFallbackRecordKey(bundleID: bid)
+        )
         guard identity.isCurrent else {
             return Self.staleIdentityResult
         }

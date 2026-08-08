@@ -87,6 +87,77 @@ final class MeteringWatchdogTests: XCTestCase {
         )
     }
 
+    func testHandoffRedTripsOnlyForStuckNonCommittedHandoffs() {
+        // #95: a handoff is a transition, not a state. Stuck past the grace →
+        // report-only red. Committed, fresh, or foreign handoffs stay silent.
+        let owner = UUID()
+        let now = Date(timeIntervalSince1970: 1_784_332_800)
+        func handoff(
+            phase: V2RouteHandoffPhase,
+            ageSeconds: TimeInterval,
+            ownerID: UUID = owner
+        ) -> V2RouteHandoff {
+            V2RouteHandoff(
+                handoffID: UUID(),
+                ownerChildDeviceID: ownerID,
+                fromGenerationID: UUID(),
+                fromEpochID: UUID(),
+                fromRouteID: UUID(),
+                toGenerationID: UUID(),
+                toEpochID: UUID(),
+                toRouteID: UUID(),
+                phase: phase,
+                priorRouteInputClosedAt: nil,
+                registrationAcknowledgedAt: nil,
+                activationAcknowledgedAt: nil,
+                priorStopAcknowledgedAt: nil,
+                createdAt: now.addingTimeInterval(-ageSeconds)
+            )
+        }
+
+        XCTAssertNil(MeteringWatchdog.handoffRed(handoff: nil, owner: owner, now: now))
+        XCTAssertNil(
+            MeteringWatchdog.handoffRed(
+                handoff: handoff(phase: .preparing, ageSeconds: 60),
+                owner: owner,
+                now: now
+            ),
+            "a fresh handoff is a healthy transition"
+        )
+        XCTAssertNil(
+            MeteringWatchdog.handoffRed(
+                handoff: handoff(phase: .committed, ageSeconds: 7_200),
+                owner: owner,
+                now: now
+            ),
+            "committed is history awaiting cleanup debt, never stuck"
+        )
+        XCTAssertNil(
+            MeteringWatchdog.handoffRed(
+                handoff: handoff(phase: .dualV2, ageSeconds: 7_200, ownerID: UUID()),
+                owner: owner,
+                now: now
+            ),
+            "a foreign owner's handoff is not ours to judge"
+        )
+        XCTAssertEqual(
+            MeteringWatchdog.handoffRed(
+                handoff: handoff(phase: .preparing, ageSeconds: 31 * 60),
+                owner: owner,
+                now: now
+            ),
+            "handoff_stuck_preparing"
+        )
+        XCTAssertEqual(
+            MeteringWatchdog.handoffRed(
+                handoff: handoff(phase: .cutoverReady, ageSeconds: 7_200),
+                owner: owner,
+                now: now
+            ),
+            "handoff_stuck_cutoverReady"
+        )
+    }
+
     // MARK: - Red → heal
 
     func testMissingDaemonRegistrationIsRedAndTriggersOneRekick() async throws {
@@ -227,6 +298,10 @@ private final class WatchdogFixture: @unchecked Sendable {
         try? FileManager.default.removeItem(at: storeURL)
     }
 
+    /// Off-device there is no FamilyControls grant, so the authorization probe
+    /// is stubbed; `screenTimeAuthorized: false` exercises the revocation red.
+    var screenTimeAuthorized = true
+
     func makeWatchdog() -> MeteringWatchdog {
         MeteringWatchdog(
             store: store,
@@ -235,7 +310,8 @@ private final class WatchdogFixture: @unchecked Sendable {
             heal: { [unowned self] in
                 self.healCalls += 1
                 return "rekick-report"
-            }
+            },
+            screenTimeAuthorized: { [unowned self] in self.screenTimeAuthorized }
         )
     }
 

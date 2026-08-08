@@ -14,6 +14,7 @@ final class FamilyGoneDetectorTests: XCTestCase {
         }
         standard.set(UUID().uuidString, forKey: CommandPoller.childDeviceIDDefaultsKey)
         standard.set(UUID().uuidString, forKey: "evlin.familyID")
+        standard.set(true, forKey: "onboardingComplete")
         appGroup.set(UUID().uuidString, forKey: "evlin.childId")
         var events: [String] = []
 
@@ -31,5 +32,6 @@ final class FamilyGoneDetectorTests: XCTestCase {
         XCTAssertNil(appGroup.string(forKey: "evlin.childId"))
         XCTAssertNil(standard.string(forKey: CommandPoller.childDeviceIDDefaultsKey))
         XCTAssertNil(standard.string(forKey: "evlin.familyID"))
+        XCTAssertFalse(standard.bool(forKey: "onboardingComplete"))
     }
 }

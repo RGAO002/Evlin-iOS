@@ -36,6 +36,11 @@ nonisolated enum AppLimitCallbackLocalLedger {
 /// Resolves one per-app callback against its persisted arm before any external
 /// effect can observe it.
 nonisolated final class AppLimitCallbackValidator: @unchecked Sendable {
+    private struct Evaluation {
+        let decision: AppLimitCallbackDecision
+        let physicallyImpossibleCallback: AppLimitValidatedCallback?
+    }
+
     private let store: AppLimitEpochStore
 
     init(store: AppLimitEpochStore = .shared) {
@@ -49,6 +54,22 @@ nonisolated final class AppLimitCallbackValidator: @unchecked Sendable {
         observedAt: Date,
         usageCountingAllowed: Bool
     ) throws -> AppLimitCallbackDecision {
+        try evaluate(
+            activityName: activityName,
+            eventName: eventName,
+            canonicalUsageDate: canonicalUsageDate,
+            observedAt: observedAt,
+            usageCountingAllowed: usageCountingAllowed
+        ).decision
+    }
+
+    private func evaluate(
+        activityName: String,
+        eventName: String,
+        canonicalUsageDate: String,
+        observedAt: Date,
+        usageCountingAllowed: Bool
+    ) throws -> Evaluation {
         let state = try store.read()
         let matches = state.slots.values.compactMap { slot -> (AppLimitVersionSlot, AppLimitArmProvenance)? in
             guard let provenance = slot.armProvenance,
@@ -57,7 +78,10 @@ nonisolated final class AppLimitCallbackValidator: @unchecked Sendable {
             return (slot, provenance)
         }
         guard matches.count == 1, let (slot, provenance) = matches.first else {
-            return .rejected(reason: "unknown_activity")
+            return Evaluation(
+                decision: .rejected(reason: "unknown_activity"),
+                physicallyImpossibleCallback: nil
+            )
         }
         guard let rule = slot.activeRule,
               slot.latestKind == .set,
@@ -71,7 +95,12 @@ nonisolated final class AppLimitCallbackValidator: @unchecked Sendable {
               provenance.scheduleWindow == rule.window,
               provenance.budgetMinutes == rule.budgetMinutes,
               provenance.tokenDigest == Self.tokenDigest(rule: rule)
-        else { return .rejected(reason: "stale_provenance") }
+        else {
+            return Evaluation(
+                decision: .rejected(reason: "stale_provenance"),
+                physicallyImpossibleCallback: nil
+            )
+        }
 
         let (remainingBudgetMinutes, remainingOverflow) = provenance.budgetMinutes
             .subtractingReportingOverflow(provenance.baseAcceptedMinutes)
@@ -84,18 +113,38 @@ nonisolated final class AppLimitCallbackValidator: @unchecked Sendable {
                 armID: provenance.armID,
                 remainingBudgetMinutes: remainingBudgetMinutes
               )
-        else { return .rejected(reason: "unexpected_event") }
+        else {
+            return Evaluation(
+                decision: .rejected(reason: "unexpected_event"),
+                physicallyImpossibleCallback: nil
+            )
+        }
         let rawThresholdMinutes = parsedEvent.rawThresholdMinutes
         guard rawThresholdMinutes > 0,
               rawThresholdMinutes > provenance.lastRawThresholdMinutes
-        else { return .rejected(reason: "unexpected_event") }
+        else {
+            return Evaluation(
+                decision: .rejected(reason: "unexpected_event"),
+                physicallyImpossibleCallback: nil
+            )
+        }
 
         let (unignoredThresholdMinutes, subtractionOverflow) = rawThresholdMinutes
             .subtractingReportingOverflow(provenance.ignoredWhilePausedMinutes)
-        guard !subtractionOverflow else { return .rejected(reason: "invalid_estimate") }
+        guard !subtractionOverflow else {
+            return Evaluation(
+                decision: .rejected(reason: "invalid_estimate"),
+                physicallyImpossibleCallback: nil
+            )
+        }
         let (adjustedEstimateMinutes, overflow) = provenance.baseAcceptedMinutes
             .addingReportingOverflow(max(0, unignoredThresholdMinutes))
-        guard !overflow else { return .rejected(reason: "invalid_estimate") }
+        guard !overflow else {
+            return Evaluation(
+                decision: .rejected(reason: "invalid_estimate"),
+                physicallyImpossibleCallback: nil
+            )
+        }
 
         let callback = AppLimitValidatedCallback(
             rule: rule,
@@ -104,18 +153,27 @@ nonisolated final class AppLimitCallbackValidator: @unchecked Sendable {
             rawThresholdMinutes: rawThresholdMinutes,
             adjustedEstimateMinutes: adjustedEstimateMinutes
         )
-        guard usageCountingAllowed else { return .paused(callback) }
+        guard usageCountingAllowed else {
+            return Evaluation(decision: .paused(callback), physicallyImpossibleCallback: nil)
+        }
         guard MeteringCallbackPhysicalTime.allows(
             adjustedEstimateMinutes: adjustedEstimateMinutes,
             baseAcceptedMinutes: provenance.baseAcceptedMinutes,
             startedAt: provenance.startedAt,
             observedAt: observedAt
-        ) else { return .rejected(reason: "physically_impossible") }
-        return .accepted(callback)
+        ) else {
+            return Evaluation(
+                decision: .rejected(reason: "physically_impossible"),
+                physicallyImpossibleCallback: callback
+            )
+        }
+        return Evaluation(decision: .accepted(callback), physicallyImpossibleCallback: nil)
     }
 
-    /// Owns the complete callback boundary: validation, the matching persisted
-    /// high-water win, and at most one invocation of accepted effects.
+    /// Owns the complete callback boundary. Accepted effects must first create
+    /// their idempotent durable journal entry; only then may this consume the
+    /// one-shot callback by advancing the persisted high-water. Reversing that
+    /// order loses the callback forever if journal persistence fails.
     @discardableResult
     func process(
         activityName: String,
@@ -125,24 +183,30 @@ nonisolated final class AppLimitCallbackValidator: @unchecked Sendable {
         usageCountingAllowed: Bool,
         acceptedEffect: (AppLimitValidatedCallback) throws -> Void
     ) throws -> AppLimitCallbackDecision {
-        let decision = try validate(
+        let evaluation = try evaluate(
             activityName: activityName,
             eventName: eventName,
             canonicalUsageDate: canonicalUsageDate,
             observedAt: observedAt,
             usageCountingAllowed: usageCountingAllowed
         )
+        let decision = evaluation.decision
         switch decision {
+        case .rejected(reason: "physically_impossible"):
+            if let callback = evaluation.physicallyImpossibleCallback {
+                _ = try markPhysicalEventsConsumed(callback, observedAt: observedAt)
+            }
+            return decision
         case .rejected:
             return decision
         case .paused(let callback):
             _ = try recordPausedIgnoredHighWater(callback)
             return decision
         case .accepted(let callback):
+            try acceptedEffect(callback)
             guard try recordAcceptedHighWater(callback) else {
                 return .rejected(reason: "duplicate_or_stale")
             }
-            try acceptedEffect(callback)
             return decision
         }
     }
@@ -153,6 +217,21 @@ nonisolated final class AppLimitCallbackValidator: @unchecked Sendable {
                 return false
             }
             provenance.lastRawThresholdMinutes = callback.rawThresholdMinutes
+            provenance.physicalEventsConsumedAt = nil
+            return true
+        }
+    }
+
+    private func markPhysicalEventsConsumed(
+        _ callback: AppLimitValidatedCallback,
+        observedAt: Date
+    ) throws -> Bool {
+        try updateHighWater(
+            callback,
+            allowAdvancedAcceptedHighWater: false
+        ) { provenance in
+            guard provenance.physicalEventsConsumedAt == nil else { return false }
+            provenance.physicalEventsConsumedAt = observedAt
             return true
         }
     }
@@ -205,6 +284,9 @@ nonisolated final class AppLimitCallbackValidator: @unchecked Sendable {
             && current.startedAt == validated.startedAt
             && current.baseAcceptedMinutes == validated.baseAcceptedMinutes
             && current.ignoredWhilePausedMinutes == validated.ignoredWhilePausedMinutes
+            && current.physicalEventsConsumedAt == validated.physicalEventsConsumedAt
+            && current.physicalReplacementAttemptCount
+                == validated.physicalReplacementAttemptCount
             && (allowingAdvancedAcceptedHighWater
                 || current.lastRawThresholdMinutes == validated.lastRawThresholdMinutes)
     }

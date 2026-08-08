@@ -208,6 +208,188 @@ final class AppLimitPlannerTests: XCTestCase {
         XCTAssertTrue(spy.calls.contains(.startEvents("evlin.limit.v2.\(secondArm.uuidString.lowercased())")))
     }
 
+    func testImpossibleImmediateCallbackDoesNotMintAgainBeforePhysicalDeadline() throws {
+        let owner = UUID(uuidString: "cccccccc-0000-0000-0000-000000000001")!
+        let ruleID = UUID(uuidString: "dddddddd-0000-0000-0000-000000000400")!
+        let firstArm = UUID(uuidString: "eeeeeeee-0000-0000-0000-000000000010")!
+        let replacementArm = UUID(uuidString: "eeeeeeee-0000-0000-0000-000000000011")!
+        let forbiddenThirdArm = UUID(uuidString: "eeeeeeee-0000-0000-0000-000000000012")!
+        let now = Date(timeIntervalSince1970: 1_721_174_400)
+        let store = makeEpochStore(owner: owner)
+        let configured = rule(id: ruleID, budget: 30)
+        try seed(configured, token: 7, owner: owner, store: store)
+        let spy = PlannerSchedulerSpy()
+
+        XCTAssertEqual(
+            AppLimitPlanner(
+                scheduler: spy,
+                now: { now },
+                epochStore: store,
+                ownerProvider: { owner },
+                armIDProvider: { firstArm }
+            ).arm(rules: [configured]),
+            .armed(activityCount: 1, eventCount: 1)
+        )
+        let first = try XCTUnwrap(store.read().slots[ruleID]?.armProvenance)
+        XCTAssertEqual(first.armID, firstArm)
+
+        let firstDecision = try AppLimitCallbackValidator(store: store).process(
+            activityName: first.activityName,
+            eventName: AppLimitPlanner.v2EnforcementEventName(armID: firstArm),
+            canonicalUsageDate: first.usageDate,
+            observedAt: first.startedAt,
+            usageCountingAllowed: true
+        ) { _ in
+            XCTFail("an immediate impossible callback must have zero effects")
+        }
+        XCTAssertEqual(firstDecision, .rejected(reason: "physically_impossible"))
+
+        XCTAssertEqual(
+            AppLimitPlanner(
+                scheduler: spy,
+                now: { now.addingTimeInterval(10) },
+                epochStore: store,
+                ownerProvider: { owner },
+                armIDProvider: { replacementArm }
+            ).arm(rules: [configured]),
+            .armed(activityCount: 1, eventCount: 1)
+        )
+        let replacement = try XCTUnwrap(store.read().slots[ruleID]?.armProvenance)
+        XCTAssertEqual(replacement.armID, replacementArm)
+        XCTAssertEqual(replacement.baseAcceptedMinutes, first.baseAcceptedMinutes)
+        XCTAssertTrue(spy.calls.contains(.stop([first.activityName])))
+        XCTAssertTrue(spy.calls.contains(.startEvents(replacement.activityName)))
+
+        let secondDecision = try AppLimitCallbackValidator(store: store).process(
+            activityName: replacement.activityName,
+            eventName: AppLimitPlanner.v2EnforcementEventName(armID: replacementArm),
+            canonicalUsageDate: replacement.usageDate,
+            observedAt: replacement.startedAt,
+            usageCountingAllowed: true
+        ) { _ in
+            XCTFail("a second immediate impossible callback must have zero effects")
+        }
+        XCTAssertEqual(secondDecision, .rejected(reason: "physically_impossible"))
+
+        let callsBeforeExhaustedRecovery = spy.calls
+        XCTAssertEqual(
+            AppLimitPlanner(
+                scheduler: spy,
+                now: { now.addingTimeInterval(20) },
+                epochStore: store,
+                ownerProvider: { owner },
+                armIDProvider: { forbiddenThirdArm }
+            ).arm(rules: [configured]),
+            .partiallyArmed(armed: 0, failed: 1)
+        )
+        XCTAssertEqual(
+            try store.read().slots[ruleID]?.armProvenance?.armID,
+            replacementArm,
+            "polling before the physical deadline must not mint another identity"
+        )
+        XCTAssertEqual(spy.calls, callsBeforeExhaustedRecovery)
+    }
+
+    func testLimitIncreaseKeepsEightMinuteBaseAndEventuallyRecoversConsumedReplacement() throws {
+        let owner = UUID(uuidString: "cccccccc-0000-0000-0000-000000000001")!
+        let ruleID = UUID(uuidString: "dddddddd-0000-0000-0000-000000000401")!
+        let firstArm = UUID(uuidString: "eeeeeeee-0000-0000-0000-000000000020")!
+        let replacementArm = UUID(uuidString: "eeeeeeee-0000-0000-0000-000000000021")!
+        let settledArm = UUID(uuidString: "eeeeeeee-0000-0000-0000-000000000022")!
+        let now = Date(timeIntervalSince1970: 1_721_174_400)
+        let store = makeEpochStore(owner: owner)
+        let configured = rule(id: ruleID, budget: 15)
+        try seed(configured, token: 4, owner: owner, store: store)
+        let remainingView = rule(id: ruleID, budget: 7)
+        let spy = PlannerSchedulerSpy()
+
+        XCTAssertEqual(
+            AppLimitPlanner(
+                scheduler: spy,
+                now: { now },
+                epochStore: store,
+                ownerProvider: { owner },
+                armIDProvider: { firstArm }
+            ).arm(rules: [remainingView]),
+            .armed(activityCount: 1, eventCount: 1)
+        )
+        XCTAssertEqual(spy.armed.last?.events.count, 4)
+        let first = try XCTUnwrap(store.read().slots[ruleID]?.armProvenance)
+        XCTAssertEqual(first.baseAcceptedMinutes, 8)
+
+        XCTAssertEqual(
+            try AppLimitCallbackValidator(store: store).process(
+                activityName: first.activityName,
+                eventName: AppLimitPlanner.v2MeasurementEventName(
+                    armID: firstArm,
+                    threshold: 2
+                ),
+                canonicalUsageDate: first.usageDate,
+                observedAt: now,
+                usageCountingAllowed: true
+            ) { _ in XCTFail("an inherited immediate event must not count") },
+            .rejected(reason: "physically_impossible")
+        )
+
+        XCTAssertEqual(
+            AppLimitPlanner(
+                scheduler: spy,
+                now: { now.addingTimeInterval(10) },
+                epochStore: store,
+                ownerProvider: { owner },
+                armIDProvider: { replacementArm }
+            ).arm(rules: [remainingView]),
+            .armed(activityCount: 1, eventCount: 1)
+        )
+        XCTAssertEqual(spy.armed.last?.events.count, 4)
+        let replacement = try XCTUnwrap(store.read().slots[ruleID]?.armProvenance)
+        XCTAssertEqual(replacement.baseAcceptedMinutes, 8)
+        XCTAssertEqual(
+            replacement.startedAt,
+            first.startedAt,
+            "physical replacement must preserve the policy arm's elapsed-time anchor"
+        )
+
+        XCTAssertEqual(
+            try AppLimitCallbackValidator(store: store).process(
+                activityName: replacement.activityName,
+                eventName: AppLimitPlanner.v2EnforcementEventName(armID: replacementArm),
+                canonicalUsageDate: replacement.usageDate,
+                observedAt: now.addingTimeInterval(10),
+                usageCountingAllowed: true
+            ) { _ in XCTFail("the second inherited burst must remain uncounted") },
+            .rejected(reason: "physically_impossible")
+        )
+
+        XCTAssertEqual(
+            AppLimitPlanner(
+                scheduler: spy,
+                now: { now.addingTimeInterval(7 * 60) },
+                epochStore: store,
+                ownerProvider: { owner },
+                armIDProvider: { settledArm }
+            ).arm(rules: [remainingView]),
+            .armed(activityCount: 1, eventCount: 1),
+            "once seven real minutes have elapsed, a bounded final arm must replace the consumed one"
+        )
+        XCTAssertEqual(spy.armed.last?.events.count, 4)
+        let settled = try XCTUnwrap(store.read().slots[ruleID]?.armProvenance)
+        XCTAssertEqual(settled.armID, settledArm)
+        XCTAssertEqual(settled.baseAcceptedMinutes, 8)
+        XCTAssertEqual(settled.startedAt, first.startedAt)
+
+        var accepted: AppLimitValidatedCallback?
+        let decision = try AppLimitCallbackValidator(store: store).process(
+            activityName: settled.activityName,
+            eventName: AppLimitPlanner.v2EnforcementEventName(armID: settledArm),
+            canonicalUsageDate: settled.usageDate,
+            observedAt: now.addingTimeInterval(7 * 60),
+            usageCountingAllowed: true
+        ) { accepted = $0 }
+        XCTAssertAccepted(decision, kind: .enforcement)
+        XCTAssertEqual(accepted?.adjustedEstimateMinutes, 15)
+    }
+
     func testV2EnforcementAndMeasurementEventsExcludePastActivity() throws {
         let owner = UUID(uuidString: "cccccccc-0000-0000-0000-000000000001")!
         let ruleID = UUID(uuidString: "dddddddd-0000-0000-0000-000000000400")!

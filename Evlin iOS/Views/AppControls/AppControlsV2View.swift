@@ -23,6 +23,22 @@ private extension Color {
     static let evAccentGreenSoft = Color(hex: 0x16A34A).opacity(0.06)
 }
 
+@MainActor
+enum AppControlsSelectionLogic {
+    static func selectionForPresentation(
+        load: () -> FamilyActivitySelection = { DefaultLockGroupStore.load() }
+    ) -> FamilyActivitySelection {
+        load()
+    }
+
+    static func selectionAfterPickerSave(
+        picked: FamilyActivitySelection,
+        displayed: FamilyActivitySelection
+    ) -> FamilyActivitySelection {
+        mergePreservingPriorSelection(picked, prior: displayed)
+    }
+}
+
 /// App Controls v2 screen — Tasks 3.2 + 3.4 (accordion inline bind + upload-on-bind).
 ///
 /// Replicates the `app-controls-v2-prototype.html` "App Controls v2" layout:
@@ -59,7 +75,7 @@ struct AppControlsV2View: View {
 
     @EnvironmentObject var apiClient: APIClient
 
-    @State private var selection: FamilyActivitySelection = DefaultLockGroupStore.load()
+    @State private var selection = AppControlsSelectionLogic.selectionForPresentation()
     @State private var showPicker = false
 
     // Accordion: at most one app and one category expanded at a time.
@@ -134,6 +150,24 @@ struct AppControlsV2View: View {
         // Fix 1 — dismissing the whole screen while a Rebind is pending (the user
         // tapped "Rebind" but never picked a new match) leaves the app unbound.
         .onDisappear { cancelRebindIfPending() }
+        .onReceive(
+            NotificationCenter.default.publisher(for: .evlinCatalogConfirmationChanged)
+        ) { note in
+            guard let changedDeviceID = note.object as? UUID,
+                  changedDeviceID == childDeviceID
+            else { return }
+            refreshTick &+= 1
+        }
+        .task(id: childDeviceID) {
+            selection = AppControlsSelectionLogic.selectionForPresentation()
+            onSelectionChanged?()
+            if await AppControlsBackendSync.republishMatchedCatalogIfNeeded(
+                for: childDeviceID,
+                forceSnapshot: true
+            ) {
+                refreshTick &+= 1
+            }
+        }
         .sheet(isPresented: $showPicker) {
             CombinedPickerSheet(
                 // Fix — the "Add" picker starts EMPTY each time (nil → fresh empty
@@ -155,9 +189,10 @@ struct AppControlsV2View: View {
                         print("[AppControlsV2][pickerSave]   cat[\(i)] enc=\(b64)…")
                     }
                     #endif
-                    var merged = DefaultLockGroupStore.load()
-                    merged.applicationTokens.formUnion(picked.applicationTokens)
-                    merged.categoryTokens.formUnion(picked.categoryTokens)
+                    let merged = AppControlsSelectionLogic.selectionAfterPickerSave(
+                        picked: picked,
+                        displayed: selection
+                    )
                     DefaultLockGroupStore.save(merged)
                     reload()
                     onSelectionChanged?()
@@ -618,7 +653,8 @@ struct AppControlsV2View: View {
                     token: appToken,
                     displayName: upload.displayName,
                     bundleIdentifier: upload.bundleID,
-                    catalogAliasKey: key
+                    catalogAliasKey: key,
+                    catalogChildDeviceID: childDeviceID
                 )
                 // Fix A.1 — now that the NEW row exists, delete the stale OLD backend
                 // row. Guard `oldAliasKey != key` so re-confirming the SAME app (which
@@ -679,9 +715,19 @@ struct AppControlsV2View: View {
                     $0.displayName == upload.displayName
                         && $0.tokenKind.lowercased() == "category"
                 }?.id
-                LocalAliasStore.shared.saveCategoryToken(catToken, forName: upload.displayName, catalogAliasKey: key)
+                LocalAliasStore.shared.saveCategoryToken(
+                    catToken,
+                    forName: upload.displayName,
+                    catalogAliasKey: key,
+                    catalogChildDeviceID: childDeviceID
+                )
                 for alias in upload.aliases {
-                    LocalAliasStore.shared.saveCategoryToken(catToken, forName: alias, catalogAliasKey: key)
+                    LocalAliasStore.shared.saveCategoryToken(
+                        catToken,
+                        forName: alias,
+                        catalogAliasKey: key,
+                        catalogChildDeviceID: childDeviceID
+                    )
                 }
             } catch {
                 await MainActor.run {
@@ -766,7 +812,15 @@ struct AppControlsV2View: View {
         // just-matched app shows "Matched" the instant the user picks — no collapse/expand.
         let hasAliasKey = !LocalAliasStore.shared.applicationLookupKeys(equalTo: appToken).isEmpty
         let localTokenPresent = keys.contains { LocalAliasStore.shared.applicationToken(forLookupKey: $0) == appToken }
-        return MatchedState.from(hasAliasKey: hasAliasKey, localTokenPresent: localTokenPresent)
+        let currentDeviceCatalogConfirmed = LocalAliasStore.shared.hasCatalogConfirmation(
+            forApplicationToken: appToken,
+            childDeviceID: childDeviceID
+        )
+        return MatchedState.from(
+            hasAliasKey: hasAliasKey,
+            localTokenPresent: localTokenPresent,
+            currentDeviceCatalogConfirmed: currentDeviceCatalogConfirmed
+        )
     }
 
     private func matchedState(forCategory catToken: ActivityCategoryToken, tick: Int) -> MatchedState {
@@ -776,7 +830,15 @@ struct AppControlsV2View: View {
         // just-tagged category shows "Matched" the instant the user picks — no collapse/expand.
         let hasAliasKey = !LocalAliasStore.shared.categoryLookupKeys(equalTo: catToken).isEmpty
         let localTokenPresent = keys.contains { LocalAliasStore.shared.categoryToken(forName: $0) == catToken }
-        return MatchedState.from(hasAliasKey: hasAliasKey, localTokenPresent: localTokenPresent)
+        let currentDeviceCatalogConfirmed = LocalAliasStore.shared.hasCatalogConfirmation(
+            forCategoryToken: catToken,
+            childDeviceID: childDeviceID
+        )
+        return MatchedState.from(
+            hasAliasKey: hasAliasKey,
+            localTokenPresent: localTokenPresent,
+            currentDeviceCatalogConfirmed: currentDeviceCatalogConfirmed
+        )
     }
 
     /// Task 4 — the `semanticKey` of the suggestion this category is currently tagged

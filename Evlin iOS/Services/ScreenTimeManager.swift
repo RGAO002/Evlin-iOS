@@ -206,6 +206,18 @@ class ScreenTimeManager: ObservableObject {
         }
     }
 
+    /// Drop the FamilyControls selection — the picked application / category /
+    /// web-domain tokens — from memory AND the App Group. Used by account
+    /// deletion and identity teardown so a NEW account can never inherit the
+    /// previous family's App Controls picks. Tokens are opaque and scoped to
+    /// the family that picked them; carrying them across identities is a
+    /// privacy leak, not a convenience.
+    func clearSelectionForIdentityTeardown() {
+        selectedApps = FamilyActivitySelection(includeEntireCategory: true)
+        sharedDefaults?.removeObject(forKey: "selectedApps")
+        sharedDefaults?.synchronize()
+    }
+
     /// Save the selected apps to shared UserDefaults so the Monitor extension can read them.
     func saveSelection() {
         // Persist semantic + picker display-string aliases (`LocalAliasStore`) from the

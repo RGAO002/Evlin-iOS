@@ -195,25 +195,79 @@ final class AppLimitEffectRecoveryEntry {
 @MainActor
 enum AppLimitRecoveryTrigger {
     static func launch() async {
-        await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured()
-        await AppLimitEffectRecoveryEntry.shared.recoverIfConfigured()
-        await reconcileAlreadyAppliedRules()
+        await runLifecycleRecovery(
+            convergeIdentity: { convergeCurrentIdentity() },
+            recoverOwnerWork: { await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured() },
+            recoverEffects: { await AppLimitEffectRecoveryEntry.shared.recoverIfConfigured() },
+            reconcileRules: { await reconcileAlreadyAppliedRules() },
+            reapplyRestrictions: { await ActiveLockStore.shared.reapplyCurrentRestrictions() }
+        )
     }
 
     static func foreground() async {
-        await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured()
-        await AppLimitEffectRecoveryEntry.shared.recoverIfConfigured()
-        await reconcileAlreadyAppliedRules()
+        await runLifecycleRecovery(
+            convergeIdentity: { convergeCurrentIdentity() },
+            recoverOwnerWork: { await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured() },
+            recoverEffects: { await AppLimitEffectRecoveryEntry.shared.recoverIfConfigured() },
+            reconcileRules: { await reconcileAlreadyAppliedRules() },
+            reapplyRestrictions: { await ActiveLockStore.shared.reapplyCurrentRestrictions() }
+        )
     }
 
     static func silentRemoteNotification() async {
+        convergeCurrentIdentity()
         await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured()
         await AppLimitEffectRecoveryEntry.shared.recoverIfConfigured()
     }
 
     static func pollCompletion() async {
-        await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured()
-        await AppLimitEffectRecoveryEntry.shared.recoverIfConfigured()
+        await runPollRecovery(
+            convergeIdentity: { convergeCurrentIdentity() },
+            recoverOwnerWork: { await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured() },
+            recoverEffects: { await AppLimitEffectRecoveryEntry.shared.recoverIfConfigured() },
+            reconcileConsumedPhysicalEvents: {
+                await reconcileConsumedPhysicalEventsIfNeeded()
+            }
+        )
+    }
+
+    /// A launch/foreground recovery must finish by projecting the durable lock
+    /// union, even when the effect journal had no new enforcement callback.
+    /// That is the retry path for a prior NSE ManagedSettings write which made
+    /// it into App Group state but did not reach SpringBoard.
+    static func runLifecycleRecovery(
+        convergeIdentity: () async -> Void,
+        recoverOwnerWork: () async -> Void,
+        recoverEffects: () async -> Void,
+        reconcileRules: () async -> Void,
+        reapplyRestrictions: () async -> Void
+    ) async {
+        await convergeIdentity()
+        await recoverOwnerWork()
+        await recoverEffects()
+        await reconcileRules()
+        await reapplyRestrictions()
+    }
+
+    /// Polling normally processes durable work only. A physically impossible
+    /// callback is the narrow exception: it consumes Apple's one-shot events,
+    /// so the existing bounded replacement state machine must get another turn
+    /// without waiting for a scene transition or policy edit.
+    static func runPollRecovery(
+        convergeIdentity: () async -> Void,
+        recoverOwnerWork: () async -> Void,
+        recoverEffects: () async -> Void,
+        reconcileConsumedPhysicalEvents: () async -> Void
+    ) async {
+        await convergeIdentity()
+        await recoverOwnerWork()
+        await recoverEffects()
+        await reconcileConsumedPhysicalEvents()
+    }
+
+    private static func convergeCurrentIdentity() {
+        guard let owner = MeteringOwnerMirror.current() else { return }
+        AppLimitPairingIdentityConvergence.run(ownerChildDeviceID: owner)
     }
 
     private static func reconcileAlreadyAppliedRules() async {
@@ -228,6 +282,28 @@ enum AppLimitRecoveryTrigger {
                 ownerProvider: { owner }
             ).arm(rules: rules)
         }.value
+    }
+
+    private static func reconcileConsumedPhysicalEventsIfNeeded() async {
+        guard let owner = MeteringOwnerMirror.current(),
+              let state = try? AppLimitEpochStore.shared.read(),
+              shouldReconcileConsumedPhysicalEvents(state: state, owner: owner)
+        else { return }
+
+        // The durable marker is checked before crossing into DeviceActivity.
+        // Ordinary 10-second polls therefore do no scheduler readback or rearm.
+        await reconcileAlreadyAppliedRules()
+    }
+
+    static func shouldReconcileConsumedPhysicalEvents(
+        state: AppLimitEpochStoreState,
+        owner: UUID
+    ) -> Bool {
+        state.ownerChildDeviceID == owner
+            && state.slots.values.contains(where: {
+                $0.latestKind == .set
+                    && $0.armProvenance?.physicalEventsConsumedAt != nil
+            })
     }
 }
 
@@ -247,6 +323,7 @@ final class CommandPoller {
     private var currentDeviceID: UUID?
     private var currentAPIClient: APIClient?
     private var pendingPollAfterCurrent = false
+    private var pollCompletionWaiters: [CheckedContinuation<Void, Never>] = []
 
     /// UserDefaults key the whole app uses for the paired child device id.
     /// Same store `@AppStorage("evlin.childDeviceID")` writes to (see
@@ -394,12 +471,22 @@ final class CommandPoller {
                 CommandDeliveryDiagnostics.keyCommandPoll,
                 "coalesced pending_poll"
             )
+            // A silent push shares iOS's short background window with the
+            // poll already in flight. Do not report that wake as complete
+            // until the active poll has made its follow-up pass and recovered
+            // durable app-limit owner work.
+            await withCheckedContinuation { continuation in
+                pollCompletionWaiters.append(continuation)
+            }
             return
         }
         isPolling = true
         defer {
             isPolling = false
             pendingPollAfterCurrent = false
+            let waiters = pollCompletionWaiters
+            pollCompletionWaiters.removeAll()
+            waiters.forEach { $0.resume() }
         }
 
         repeat {

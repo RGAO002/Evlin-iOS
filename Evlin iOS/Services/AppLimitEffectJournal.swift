@@ -79,6 +79,28 @@ nonisolated struct AppLimitShieldPersistence {
     }()
 }
 
+/// The durable half of a validated app-limit callback. This deliberately does
+/// not project to `ManagedSettingsStore`: DeviceActivity can stall while
+/// talking to that daemon, but the usage receipt and shield intent must be
+/// committed first so another process can finish projection or transport.
+nonisolated enum AppLimitEffectLocalPersistence {
+    static func persist(
+        _ callback: AppLimitValidatedCallback,
+        usageStore: EarnedTimeStore = .shared,
+        shieldPersistence: AppLimitShieldPersistence,
+        now: Date = Date()
+    ) throws {
+        try AppLimitCallbackLocalLedger.record(callback, store: usageStore)
+        guard callback.effectKind == .enforcement else { return }
+        let updated = LimitShieldLogic.applyingLimit(
+            to: try shieldPersistence.load(),
+            callback: callback,
+            now: now
+        )
+        try shieldPersistence.persist(updated)
+    }
+}
+
 /// Durable callback effects keyed to the exact rule version and arm that the
 /// Task 13 validator accepted. Every commit rechecks the epoch store while the
 /// shared ActiveLock lock is held.
@@ -453,7 +475,10 @@ nonisolated final class AppLimitEffectJournal: @unchecked Sendable {
     }()
 }
 
-private extension AppLimitEffectEnvelope {
+/// Reconstructs the validated callback from its durable envelope. Both the
+/// main app and DeviceActivity extension need the exact same callback after a
+/// receipt is committed, so projection can happen outside the journal lock.
+extension AppLimitEffectEnvelope {
     var callback: AppLimitValidatedCallback {
         let kind: AppLimitCallbackEffectKind = key.effectKind == .measurement
             ? .measurement

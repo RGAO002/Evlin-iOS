@@ -12,6 +12,7 @@ struct DeviceRow: View {
     /// When nil the bottom row is hidden (legacy callers).
     var timeLeft: String? = nil
     var timePct: Double? = nil
+    var meteringReady: Bool = false
     var isLast: Bool = false
     var onPress: () -> Void = {}
 
@@ -41,6 +42,27 @@ struct DeviceRow: View {
         .buttonStyle(.plain)
     }
 
+    /// One pill carries the whole story, so the name/detail column keeps its
+    /// width (the separate tick + pill pair used to wrap "iPad (10th gen) ·
+    /// iOS 26" onto two lines):
+    /// - LOCKED   (red)   — a shield is covering this device
+    /// - TRACKING (green) — armed, and the device's watchdog attested it
+    /// - SYNCING  (grey)  — no attestation yet (fresh arm, app closed, …)
+    private var statusText: String {
+        if locked { return "LOCKED" }
+        return meteringReady ? "ACTIVE" : "SYNCING"
+    }
+
+    private var statusColor: Color {
+        if locked { return Color.evError }
+        return meteringReady ? Color.evSecondary : Color.evOnSurfaceVariant
+    }
+
+    private var statusBackground: Color {
+        if locked { return Color.evErrorContainer }
+        return meteringReady ? Color.evSecondaryContainer : Color.evSurfaceContainerHigh
+    }
+
     private var topRow: some View {
         HStack(spacing: 14) {
             ZStack {
@@ -56,25 +78,35 @@ struct DeviceRow: View {
                 Text(name)
                     .font(.custom("Manrope", size: 14).weight(.bold))
                     .foregroundStyle(Color.evPrimary)
+                    .lineLimit(1)
                 Text(detail)
                     .font(.custom("Inter", size: 12))
                     .foregroundStyle(Color.evOnSurfaceVariant)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
-            Spacer()
+            .layoutPriority(1)
+            Spacer(minLength: 8)
 
             HStack(spacing: 6) {
                 Circle()
-                    .fill(locked ? Color.evError : Color.evSecondary)
+                    .fill(statusColor)
                     .frame(width: 6, height: 6)
-                Text(locked ? "LOCKED" : "ACTIVE")
+                Text(statusText)
                     .font(.custom("Inter", size: 9).weight(.heavy))
                     .tracking(1.3)
-                    .foregroundStyle(locked ? Color.evError : Color.evSecondary)
+                    .foregroundStyle(statusColor)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
-            .background(
-                Capsule().fill(locked ? Color.evErrorContainer : Color.evSecondaryContainer)
+            .background(Capsule().fill(statusBackground))
+            .fixedSize()
+            .accessibilityLabel(
+                locked
+                    ? "Device locked"
+                    : (meteringReady
+                        ? "Screen Time tracking confirmed"
+                        : "Screen Time tracking not yet confirmed")
             )
 
             Image(systemName: "chevron.right")

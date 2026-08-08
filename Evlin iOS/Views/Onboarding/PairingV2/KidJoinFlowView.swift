@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// The whole kid-side pairing v2 flow behind one view.
 ///
@@ -8,6 +9,12 @@ import SwiftUI
 struct KidJoinFlowView: View {
 
     @StateObject private var model: KidJoinFlowModel
+    // New-child pairing shares the normal onboarding profile surface instead
+    // of maintaining a second, stripped-down name form in this flow.
+    @State private var newChildName = ""
+    @State private var newChildBirthYear: Int?
+    @State private var newChildGender: String?
+    @State private var newChildAvatar: UIImage?
     /// Single-device demo: the tester just saw the code on the parent screen of
     /// this same phone, so feed it in rather than making them retype it. The
     /// resolve/commit path taken afterwards is identical to a real device's.
@@ -65,9 +72,20 @@ struct KidJoinFlowView: View {
                 }
 
             case .collectNewChildProfile:
-                KidNewChildProfileStep { profile in
-                    Task { await model.choose(.invited, profile: profile) }
-                }
+                ChildProfileStep(
+                    name: $newChildName,
+                    birthYear: $newChildBirthYear,
+                    gender: $newChildGender,
+                    pickedAvatar: $newChildAvatar,
+                    onContinue: {
+                        let profile = PairingNewChildProfile(
+                            displayName: newChildName.trimmingCharacters(in: .whitespacesAndNewlines),
+                            birthYear: newChildBirthYear,
+                            gender: newChildGender
+                        )
+                        Task { await model.choose(.invited, profile: profile) }
+                    }
+                )
 
             case .committing:
                 ProgressView("Setting up…")

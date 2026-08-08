@@ -49,6 +49,31 @@ final class LocalAliasStoreCatalogMemberTests: XCTestCase {
         ])
     }
 
+    func testCatalogConfirmationIsScopedToCurrentChildDevice() {
+        let store = LocalAliasStore.shared
+        let aliasID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+        let oldDeviceID = UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!
+        let newDeviceID = UUID(uuidString: "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC")!
+
+        store.saveCatalogAliasKey(
+            aliasID,
+            targetType: .app,
+            encodedTokenKey: "app-token",
+            childDeviceID: oldDeviceID
+        )
+
+        XCTAssertTrue(store.hasCatalogConfirmation(
+            targetType: .app,
+            encodedTokenKey: "app-token",
+            childDeviceID: oldDeviceID
+        ))
+        XCTAssertFalse(store.hasCatalogConfirmation(
+            targetType: .app,
+            encodedTokenKey: "app-token",
+            childDeviceID: newDeviceID
+        ))
+    }
+
     func testCatalogListMembersDedupesSameAliasKeyAcrossTokenKeys() {
         let store = LocalAliasStore.shared
         let appID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!

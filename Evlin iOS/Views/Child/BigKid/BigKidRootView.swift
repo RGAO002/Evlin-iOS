@@ -1,3 +1,5 @@
+import Combine
+import FamilyControls
 import SwiftUI
 import ManagedSettings
 
@@ -59,6 +61,13 @@ struct BigKidRootView: View {
     @State private var reflectionPath = NavigationPath()
     @State private var showLockListGate = false
     @State private var showParentControls = false
+
+    /// Screen Time (FamilyControls) authorization can be revoked mid-life by
+    /// iOS; when it is, nothing can count or lock while everything looks
+    /// healthy. One-shot reads of `authorizationStatus` can return a stale
+    /// cached value right after (re)install, so this is driven by the
+    /// publisher below in addition to explicit refreshes.
+    @State private var screenTimeAuthorizationOff = false
 
     #if DEBUG
     @State private var debugScenario: BigKidDebugScenario = .live
@@ -145,13 +154,41 @@ struct BigKidRootView: View {
         .environmentObject(client)
         .environmentObject(poller)
         .safeAreaInset(edge: .top) {
-            if notifMonitor.notificationsOff {
-                NotificationsOffBanner()
+            VStack(spacing: 8) {
+                if screenTimeAuthorizationOff {
+                    ScreenTimeOffBanner()
+                }
+                if notifMonitor.notificationsOff {
+                    NotificationsOffBanner()
+                }
             }
         }
-        .task { notifMonitor.refresh() }
+        .task {
+            notifMonitor.refresh()
+            refreshScreenTimeAuthorization()
+        }
+        // The system syncs the real authorization state asynchronously after
+        // launch; the publisher delivers the truth even when the snapshot
+        // read above returned a stale cached `.approved`.
+        .onReceive(
+            AuthorizationCenter.shared.$authorizationStatus
+                .receive(on: DispatchQueue.main)
+        ) { status in
+            screenTimeAuthorizationOff = (status != .approved)
+            // A revoke→grant round trip rotates every ApplicationToken this
+            // device holds, so the retained App Controls picks stop matching
+            // any real app. Record the revoke; purge on the re-grant.
+            if status == .approved {
+                AppControlsIdentityGuard.noteAuthorizationApproved()
+            } else {
+                AppControlsIdentityGuard.noteAuthorizationRevoked()
+            }
+        }
         .onChange(of: scenePhase) { _, newPhase in
-            if newPhase == .active { notifMonitor.refresh() }
+            if newPhase == .active {
+                notifMonitor.refresh()
+                refreshScreenTimeAuthorization()
+            }
         }
         .onAppear {
             poller.start()
@@ -169,8 +206,20 @@ struct BigKidRootView: View {
         .onDisappear { poller.stop() }
         .onChange(of: scenePhase) { _, new in
             if new == .active {
+                // Re-ignite, don't just refresh: full-screen presentations on
+                // iPadOS can fire this view's onDisappear (→ poller.stop())
+                // without a matching onAppear when they dismiss, leaving the
+                // heartbeat/metering engine dead while the app sits foreground
+                // (iPad 2026-08-05 22:45–22:56, healed only by relaunch).
+                // start() is idempotent (guarded by task == nil).
+                poller.start()
                 Task { await poller.refreshNow() }
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .bigKidStateInvalidated)) { _ in
+            // Same belt for in-app events: any state invalidation implies
+            // someone expects the poller to be alive — make it true.
+            poller.start()
         }
         #if DEBUG
         .overlay(alignment: .bottom) {
@@ -305,11 +354,21 @@ struct BigKidRootView: View {
     /// Earned monitoring is invalidated synchronously before restriction release.
     @MainActor
     private func performKidSignOut() async {
+        // Persist the authenticated server-side clear before removing the
+        // local identity or PIN. Network failure is retried on a later launch.
+        ParentPINSyncCoordinator.prepareSignOut()
+        await ParentPINSyncCoordinator.flushPending()
         EarnedBudgetArming.teardownFamilyIdentity(epochStore: .shared)
 
         _ = await ActiveLockStore.shared.unshieldAll()
         _ = await ActiveLockStore.shared.unblockAll()
         ScreenTimeManager.shared.setDeletionProtectionEnabled(false)
+        ScreenTimeManager.shared.clearSelectionForIdentityTeardown()
+        // The saved-list store and alias store are the OTHER two places opaque
+        // tokens survive an identity change; leaving either re-seeds App
+        // Controls with the dead selection (2026-08-06).
+        DefaultLockGroupStore.clearAllListsForIdentityTeardown()
+        LocalAliasStore.shared.removeAllAliases()
         ManagedSettingsStore().clearAllSettings()
 
         CommandPoller.shared.stop()
@@ -323,6 +382,7 @@ struct BigKidRootView: View {
         }
         LocalAliasStore.shared.removeAllAliases()
         EvlinPINStore.shared.clear()
+        DeviceIdentity.shared.clear()
         d.set(false, forKey: "onboardingComplete")
     }
 
@@ -337,6 +397,11 @@ struct BigKidRootView: View {
     /// fires one immediate poll, so calling it on every appearance is cheap.
     /// Mirrors the app-level gate: only start with a valid paired UUID while
     /// in child mode (never lock a parent device).
+    private func refreshScreenTimeAuthorization() {
+        screenTimeAuthorizationOff =
+            AuthorizationCenter.shared.authorizationStatus != .approved
+    }
+
     private func ensureCommandPollerRunning() {
         guard let deviceID = UserDefaults.standard
                 .string(forKey: CommandPoller.childDeviceIDDefaultsKey)

@@ -2,7 +2,7 @@ import XCTest
 @testable import Evlin_iOS
 
 final class BigKidModelsTests: XCTestCase {
-    func testLegacyDeviceTotalModeDecodingIsRollbackSafe() throws {
+    func testChildStateDecodingIsV2OnlyEvenForStaleWirePayloads() throws {
         func decode(modeFragment: String) throws -> ChildStateResponse {
             let data = Data("""
             {
@@ -21,16 +21,21 @@ final class BigKidModelsTests: XCTestCase {
             return try JSONDecoder.bigKid.decode(ChildStateResponse.self, from: data)
         }
 
-        XCTAssertEqual(try decode(modeFragment: "").legacyDeviceTotalMode, .active)
+        XCTAssertEqual(try decode(modeFragment: "").legacyDeviceTotalMode, .observeDisabled)
         XCTAssertEqual(
             try decode(modeFragment: ", \"legacy_device_total_mode\": \"observe_disabled\"")
                 .legacyDeviceTotalMode,
             .observeDisabled
         )
         XCTAssertEqual(
+            try decode(modeFragment: ", \"legacy_device_total_mode\": \"active\"")
+                .legacyDeviceTotalMode,
+            .observeDisabled
+        )
+        XCTAssertEqual(
             try decode(modeFragment: ", \"legacy_device_total_mode\": \"future_mode\"")
                 .legacyDeviceTotalMode,
-            .active
+            .observeDisabled
         )
     }
 

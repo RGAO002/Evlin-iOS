@@ -2,6 +2,16 @@ import Foundation
 import XCTest
 
 final class MeteringTargetMembershipTests: XCTestCase {
+    // MARK: - Push-target metering surface (#96)
+    //
+    // The NSE runs `MeteringProductionComposition.recoverFromSharedConfiguration`
+    // on a silent wake so a force-quit kid device can self-heal without anyone
+    // opening the app (2026-08-05, device-verified). That pulled the earned
+    // metering stack — store, callback, recovery driver, dated routes, delivery,
+    // composition — into EvlinPushApplier. These assertions therefore encode the
+    // NEW rule: those files ARE push members. What stays out is owner-side
+    // execution (parent/policy write paths), asserted below.
+
     private enum Target: String {
         case app = "Evlin iOS"
         case deviceActivityMonitor = "EvlinDeviceActivityMonitor"
@@ -16,12 +26,12 @@ final class MeteringTargetMembershipTests: XCTestCase {
         XCTAssertTrue(isMember("Services/MeteringRuntimeInfrastructure.swift", of: .push, in: project))
     }
 
-    func testCenterBelongsToAppAndMonitorButNotPushTargets() throws {
+    func testCenterBelongsToAppMonitorAndPushTargets() throws {
         let project = try projectSource()
 
         XCTAssertTrue(isMember("Services/MeteringDeviceActivityCenter.swift", of: .app, in: project))
         XCTAssertTrue(isMember("Services/MeteringDeviceActivityCenter.swift", of: .deviceActivityMonitor, in: project))
-        XCTAssertFalse(isMember("Services/MeteringDeviceActivityCenter.swift", of: .push, in: project))
+        XCTAssertTrue(isMember("Services/MeteringDeviceActivityCenter.swift", of: .push, in: project))
     }
 
     func testEpochWireBelongsToAppMonitorAndPushTargets() throws {
@@ -40,7 +50,7 @@ final class MeteringTargetMembershipTests: XCTestCase {
         XCTAssertTrue(isMember("Services/DeviceEpochStore.swift", of: .push, in: project))
     }
 
-    func testDatedRouteServicesBelongToAppAndMonitorButNotPushTargets() throws {
+    func testDatedRouteServicesBelongToAppMonitorAndPushTargets() throws {
         let project = try projectSource()
         let paths = [
             "Services/MeteringCallbackRoute.swift",
@@ -51,48 +61,50 @@ final class MeteringTargetMembershipTests: XCTestCase {
         for path in paths {
             XCTAssertTrue(isMember(path, of: .app, in: project), path)
             XCTAssertTrue(isMember(path, of: .deviceActivityMonitor, in: project), path)
-            XCTAssertFalse(isMember(path, of: .push, in: project), path)
+            XCTAssertTrue(isMember(path, of: .push, in: project), path)
         }
     }
 
-    func testEpochDeliveryBelongsToAppAndMonitorButNotPushTargets() throws {
+    func testEpochDeliveryBelongsToAppMonitorAndPushTargets() throws {
         let project = try projectSource()
 
         XCTAssertTrue(isMember("Services/MeteringEpochDelivery.swift", of: .app, in: project))
         XCTAssertTrue(isMember("Services/MeteringEpochDelivery.swift", of: .deviceActivityMonitor, in: project))
-        XCTAssertFalse(isMember("Services/MeteringEpochDelivery.swift", of: .push, in: project))
+        XCTAssertTrue(isMember("Services/MeteringEpochDelivery.swift", of: .push, in: project))
     }
 
-    func testEarnedMeteringCallbackBelongsToAppAndMonitorButNotPushTargets() throws {
+    func testEarnedMeteringCallbackBelongsToAppMonitorAndPushTargets() throws {
         let project = try projectSource()
 
         XCTAssertTrue(isMember("Services/EarnedMeteringCallback.swift", of: .app, in: project))
         XCTAssertTrue(isMember("Services/EarnedMeteringCallback.swift", of: .deviceActivityMonitor, in: project))
-        XCTAssertFalse(isMember("Services/EarnedMeteringCallback.swift", of: .push, in: project))
+        XCTAssertTrue(isMember("Services/EarnedMeteringCallback.swift", of: .push, in: project))
     }
 
-    func testV2RecoveryBelongsToAppAndMonitorButNotPushTargets() throws {
+    func testV2RecoveryBelongsToAppMonitorAndPushTargets() throws {
         let project = try projectSource()
 
         XCTAssertTrue(isMember("Services/EarnedMeteringRecoveryDriver.swift", of: .app, in: project))
         XCTAssertTrue(isMember("Services/EarnedMeteringRecoveryDriver.swift", of: .deviceActivityMonitor, in: project))
-        XCTAssertFalse(isMember("Services/EarnedMeteringRecoveryDriver.swift", of: .push, in: project))
+        XCTAssertTrue(isMember("Services/EarnedMeteringRecoveryDriver.swift", of: .push, in: project))
     }
 
-    func testProductionCompositionBelongsToAppAndMonitorButNotPushTargets() throws {
+    func testProductionCompositionBelongsToAppMonitorAndPushTargets() throws {
         let project = try projectSource()
 
         XCTAssertTrue(isMember("Services/MeteringProductionComposition.swift", of: .app, in: project))
         XCTAssertTrue(isMember("Services/MeteringProductionComposition.swift", of: .deviceActivityMonitor, in: project))
-        XCTAssertFalse(isMember("Services/MeteringProductionComposition.swift", of: .push, in: project))
+        XCTAssertTrue(isMember("Services/MeteringProductionComposition.swift", of: .push, in: project))
     }
 
-    func testPolicyOwnerReadbackCompilesWithAppRecoveryButNotPush() throws {
+    /// The readback client is a dependency of the recovery driver, so the NSE's
+    /// self-heal leg (#96) carries it too.
+    func testPolicyOwnerReadbackCompilesEverywhereRecoveryRuns() throws {
         let project = try projectSource()
 
         XCTAssertTrue(isMember("Services/MeteringPolicyOwnerReadbackClient.swift", of: .app, in: project))
         XCTAssertTrue(isMember("Services/MeteringPolicyOwnerReadbackClient.swift", of: .deviceActivityMonitor, in: project))
-        XCTAssertFalse(isMember("Services/MeteringPolicyOwnerReadbackClient.swift", of: .push, in: project))
+        XCTAssertTrue(isMember("Services/MeteringPolicyOwnerReadbackClient.swift", of: .push, in: project))
     }
 
     func testProcessEntriesBelongToAppAndMonitorButNotPushTargets() throws {
@@ -105,9 +117,10 @@ final class MeteringTargetMembershipTests: XCTestCase {
 
     func testPhase5OwnerExecutionStaysOutOfPushTarget() throws {
         let project = try projectSource()
+        // Process entries own the app-side lifecycle wiring; the NSE composes
+        // its own recovery entry instead, so these must never reach push.
         let ownerOnly = [
             "Services/MeteringProcessEntries.swift",
-            "Services/MeteringPolicyOwnerReadbackClient.swift",
             "Services/AppLimitOwnerReadbackClient.swift",
         ]
         for path in ownerOnly {

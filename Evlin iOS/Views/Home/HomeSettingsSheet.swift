@@ -93,6 +93,23 @@ enum ParentSettingsPresentation {
         return "\(coParentCount) adults"
     }
 
+    /// Removing the device whose detail is currently displayed must pop one
+    /// level back to that child's device list. An unrelated detail selection is
+    /// never changed.
+    static func deviceDetailSelectionAfterRemoval(
+        selectedDeviceID: String?,
+        removedDeviceID: String
+    ) -> String? {
+        selectedDeviceID == removedDeviceID ? nil : selectedDeviceID
+    }
+
+    static func latestDevice(
+        initial: EnrolledDeviceDTO,
+        refreshedDevices: [EnrolledDeviceDTO]
+    ) -> EnrolledDeviceDTO {
+        refreshedDevices.first(where: { $0.device_id == initial.device_id }) ?? initial
+    }
+
     static func parentRootAvatarURL(_ signedURL: String?) -> String? {
         signedURL?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
     }
@@ -133,6 +150,62 @@ enum ParentSettingsPresentation {
     }
 }
 
+/// A tagged NavigationLink can clear its selection without dismissing a
+/// destination that is already on the stack. The open detail owns the final
+/// native dismissal after its device was removed.
+enum DeviceDetailDismissalPolicy {
+    static func shouldDismiss(selectedDeviceID: String?, detailDeviceID: String) -> Bool {
+        selectedDeviceID != detailDeviceID
+    }
+}
+
+/// Keeps identity teardown out of the live Settings hierarchy. Clearing the
+/// session while this large view is mounted can make SwiftUI recursively
+/// rebuild it while the app root is changing.
+struct HomeSettingsSessionExitCoordinator {
+    private var exitPending = false
+
+    mutating func requestExit(dismiss: () -> Void) {
+        guard !exitPending else { return }
+        exitPending = true
+        dismiss()
+    }
+
+    mutating func completeAfterDismissal(teardown: () -> Void) {
+        guard exitPending else { return }
+        exitPending = false
+        teardown()
+    }
+}
+
+private struct DeviceDetailDismissalHost<Content: View>: View {
+    @Binding private var selectedDeviceID: String?
+    private let detailDeviceID: String
+    private let content: Content
+    @Environment(\.dismiss) private var dismiss
+
+    init(
+        selectedDeviceID: Binding<String?>,
+        detailDeviceID: String,
+        @ViewBuilder content: () -> Content
+    ) {
+        _selectedDeviceID = selectedDeviceID
+        self.detailDeviceID = detailDeviceID
+        self.content = content()
+    }
+
+    var body: some View {
+        content.onChange(of: selectedDeviceID) { newValue in
+            if DeviceDetailDismissalPolicy.shouldDismiss(
+                selectedDeviceID: newValue,
+                detailDeviceID: detailDeviceID
+            ) {
+                dismiss()
+            }
+        }
+    }
+}
+
 struct HomeSettingsSheet: View {
     @EnvironmentObject var apiClient: APIClient
     @EnvironmentObject var screenTimeManager: ScreenTimeManager
@@ -152,11 +225,18 @@ struct HomeSettingsSheet: View {
     /// in place during the session.
     @State private var children: [ChildProfile] = []
     @State private var editing: ChildProfile? = nil
-    @State private var adding: Bool = false
 
     @State private var serverURL: String = ""
     @State private var childOpError: String? = nil
     @State private var isChildOpInFlight: Bool = false
+    @State private var devicePendingRemoval: DeviceRemovalTarget? = nil
+    @State private var removingDeviceID: String? = nil
+    @State private var deviceRemovalError: String? = nil
+    @State private var selectedDeviceDetailID: String? = nil
+    @State private var revealedParentPINDeviceIDs: Set<String> = []
+    @State private var clearingParentPINDeviceIDs: Set<String> = []
+    @State private var parentPINClearTarget: DeviceRemovalTarget? = nil
+    @State private var parentPINClearError: String? = nil
     /// HP-14: baseline for the "Parent name" field captured on appear, so we
     /// only PUT /me/profile when the user actually edited the name in THIS
     /// session (a stale legacy @AppStorage value must not silently rename
@@ -181,17 +261,32 @@ struct HomeSettingsSheet: View {
     @State private var isPickerPresented = false
     @State private var showPINGate = false
     @State private var showAddApp = false
+    /// Data-export (§5.4(a)) state.
+    @State private var exporting = false
+    @State private var exportError: String?
+    @State private var exportFileURL: URL?
+    @State private var showExportShare = false
+    /// Permanent-deletion confirmation state (typed DELETE + in-flight guard).
+    @State private var deleteConfirmText = ""
+    @State private var deleting = false
+    @State private var deleteError: String?
     @State private var showAddList = false
     @State private var showLockListGate = false
     @State private var showLockListManager = false
     @State private var showAddChildPairing = false
+    @State private var showAddDevicePairing = false
     @State private var showParentProfileMenu = false
     @State private var showDebugSettings = false
     @State private var showNotificationsMenu = false
-    @State private var addChildPairingKidName = ""
+    @State private var addDevicePairingKidName = ""
+    /// Settings only presents a scanner after a child has been selected. A
+    /// non-optional target makes it impossible for this path to mint a
+    /// `new_child` invite by accident.
+    @State private var addDeviceTargetChildID: UUID? = nil
     @State private var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
     @State private var pendingNotificationSystemSettingsIntent: Bool? = nil
     @State private var pendingGatedAction: GatedAction?
+    @State private var sessionExitCoordinator = HomeSettingsSessionExitCoordinator()
 
     @AppStorage("evlin.settings.notifications.enabled") private var notifyPushEnabled: Bool = true
     @AppStorage("evlin.settings.notifications.kidRequests") private var notifyKidRequests: Bool = true
@@ -211,6 +306,12 @@ struct HomeSettingsSheet: View {
     private enum GatedAction {
         case addApp
         case addList
+    }
+
+    private struct DeviceRemovalTarget: Identifiable {
+        let child: ChildProfile
+        let device: EnrolledDeviceDTO
+        var id: String { device.device_id }
     }
 
     var body: some View {
@@ -244,6 +345,11 @@ struct HomeSettingsSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(isPresented: $showParentProfileMenu) {
                 parentProfileMenu
+            }
+            .sheet(isPresented: $showExportShare) {
+                if let exportFileURL {
+                    DataExportShareSheet(fileURL: exportFileURL)
+                }
             }
             .navigationDestination(isPresented: $showNotificationsMenu) {
                 notificationsMenu
@@ -314,11 +420,6 @@ struct HomeSettingsSheet: View {
                     Task { await saveEditedChild(id: child.id, name: name, age: age) }
                 }
             }
-            .sheet(isPresented: $adding) {
-                ChildEditSheet(child: nil) { name, age in
-                    Task { await addChild(name: name, age: age) }
-                }
-            }
             #if DEBUG
             .sheet(isPresented: $showDebugSettings) {
                 NavigationStack {
@@ -326,19 +427,11 @@ struct HomeSettingsSheet: View {
                 }
             }
             #endif
+            .fullScreenCover(isPresented: $showAddDevicePairing) {
+                addDevicePairingCover
+            }
             .fullScreenCover(isPresented: $showAddChildPairing) {
-                SettingsAddChildPairingFlow(
-                    kidName: addChildPairingKidName,
-                    onPair: { code in await pairAdditionalChild(code) },
-                    onDone: {
-                        showAddChildPairing = false
-                        addChildPairingKidName = ""
-                    },
-                    onCancel: {
-                        showAddChildPairing = false
-                        addChildPairingKidName = ""
-                    }
-                )
+                addChildPairingCover
             }
             .sheet(isPresented: $showPINGate) {
                 EvlinPINGateView(
@@ -419,8 +512,84 @@ struct HomeSettingsSheet: View {
                         .padding()
                 }
             }
+            .confirmationDialog(
+                "Remove \(devicePendingRemoval.map { deviceDisplayName($0.device) } ?? "device")?",
+                isPresented: Binding(
+                    get: { devicePendingRemoval != nil },
+                    set: { if !$0 { devicePendingRemoval = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Remove Device", role: .destructive) {
+                    guard let target = devicePendingRemoval else { return }
+                    Task { await removeDevice(target) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This removes the device from this family. Its Evlin limits and setup are cleared the next time it opens Evlin. Your child and the device's past history stay in your account.")
+            }
+            .alert(
+                "Couldn’t Remove Device",
+                isPresented: Binding(
+                    get: { deviceRemovalError != nil },
+                    set: { if !$0 { deviceRemovalError = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(deviceRemovalError ?? "")
+            }
+        }
+        .onDisappear {
+            sessionExitCoordinator.completeAfterDismissal {
+                tearDownLocalSession()
+            }
         }
         .preferredColorScheme(.light)
+    }
+
+    @ViewBuilder
+    private var addDevicePairingCover: some View {
+        if let targetChildID = addDeviceTargetChildID {
+            ParentAddDevicePairingFlow(
+                kidName: addDevicePairingKidName,
+                targetChildProfileID: targetChildID,
+                apiClient: apiClient,
+                onDone: {
+                    showAddDevicePairing = false
+                    addDevicePairingKidName = ""
+                    addDeviceTargetChildID = nil
+                    Task {
+                        await familyStore.refresh()
+                        children = familyStore.childProfiles
+                    }
+                },
+                onCancel: {
+                    showAddDevicePairing = false
+                    addDevicePairingKidName = ""
+                    addDeviceTargetChildID = nil
+                }
+            )
+        } else {
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private var addChildPairingCover: some View {
+        ParentNewChildPairingFlow(
+            apiClient: apiClient,
+            onDone: {
+                showAddChildPairing = false
+                Task {
+                    await familyStore.refresh()
+                    children = familyStore.childProfiles
+                }
+            },
+            onCancel: {
+                showAddChildPairing = false
+            }
+        )
     }
 
     @ViewBuilder
@@ -485,7 +654,7 @@ struct HomeSettingsSheet: View {
             } label: {
                 settingsRow(
                     title: "Add Child",
-                    subtitle: "Scan the new child's first device",
+                    subtitle: "Create their profile, then pair a device",
                     systemImage: "plus",
                     accent: .evPrimary
                 )
@@ -543,6 +712,28 @@ struct HomeSettingsSheet: View {
                     accent: .evPrimary
                 )
             }
+
+            // Beta Participation Agreement §5.4(a): the parent can review the
+            // data Evlin holds. Served straight from the app so the promise
+            // doesn't depend on someone running a query by hand.
+            Button {
+                Task { await exportMyData() }
+            } label: {
+                settingsRow(
+                    title: exporting ? "Preparing…" : "Download my data",
+                    subtitle: "Everything Evlin stores for your family, as JSON",
+                    systemImage: "square.and.arrow.down",
+                    accent: .evPrimary,
+                    disabled: exporting
+                )
+            }
+            .disabled(exporting)
+
+            if let exportError {
+                Text(exportError)
+                    .font(.caption)
+                    .foregroundStyle(Color.evError)
+            }
         }
     }
 
@@ -585,7 +776,7 @@ struct HomeSettingsSheet: View {
                 } label: {
                     settingsRow(
                         title: "Add Child",
-                        subtitle: "Scan the new child's first device",
+                        subtitle: "Create their profile, then pair a device",
                         systemImage: "qrcode.viewfinder",
                         accent: .evPrimary
                     )
@@ -775,10 +966,168 @@ struct HomeSettingsSheet: View {
                         danger: true
                     )
                 }
+
+                NavigationLink {
+                    deleteAccountMenu
+                } label: {
+                    settingsRow(
+                        title: "Delete Account",
+                        subtitle: "Permanently delete your account and its data",
+                        systemImage: "trash",
+                        accent: .evError,
+                        danger: true
+                    )
+                }
             }
         }
         .navigationTitle("Parent Profile")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    /// Permanent account deletion. Deliberately a separate screen from Sign
+    /// Out: it names exactly what goes, warns about the kid device (whose
+    /// deletion protection can only be lifted while the app can still reach
+    /// it), and requires typing DELETE so it can't be triggered by a stray tap.
+    @ViewBuilder
+    private var deleteAccountMenu: some View {
+        Form {
+            settingsHeroNote(
+                title: isLastParent
+                    ? "Delete your account and this family?"
+                    : "Delete your parent account?",
+                message: isLastParent
+                    ? "You're the only parent, so the whole family goes with you: every child profile, task, screen-time record, and app rule. This cannot be undone."
+                    : "Your parent account, profile, and personal data are removed. The family, the children, and the other parents stay."
+            )
+
+            Section("Before you delete") {
+                deleteChecklistRow(
+                    icon: "iphone.slash",
+                    text: "On \(kidDeviceLabel)'s phone, open Evlin and sign out first. Until it hears about the deletion, that phone can't remove any app — including Evlin."
+                )
+                deleteChecklistRow(
+                    icon: "clock.arrow.circlepath",
+                    text: "If you can't sign out there now, just open Evlin on that phone once after deleting — it releases everything automatically."
+                )
+                deleteChecklistRow(
+                    icon: "exclamationmark.triangle",
+                    text: "Signing in again later creates a brand-new account. Nothing is restored."
+                )
+            }
+
+            Section("Type DELETE to confirm") {
+                TextField("DELETE", text: $deleteConfirmText)
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+                    .font(.system(size: 16, weight: .semibold, design: .monospaced))
+                    // `.characters` only sets the keyboard's default shift
+                    // state — a hardware keyboard, or one tap on shift, still
+                    // types lowercase. Fold the binding itself so what the
+                    // parent sees always matches the word they must type.
+                    .onChange(of: deleteConfirmText) { _, new in
+                        let folded = new.uppercased()
+                        if folded != new { deleteConfirmText = folded }
+                    }
+
+                if let deleteError {
+                    Text(deleteError)
+                        .font(.caption)
+                        .foregroundStyle(Color.evError)
+                }
+
+                Button(role: .destructive) {
+                    Task { await performDeleteAccount() }
+                } label: {
+                    HStack {
+                        settingsRow(
+                            title: deleting ? "Deleting…" : "Delete Account",
+                            subtitle: "This cannot be undone",
+                            systemImage: "trash",
+                            accent: .evError,
+                            danger: true,
+                            disabled: !canConfirmDelete
+                        )
+                        if deleting {
+                            Spacer()
+                            ProgressView()
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(!canConfirmDelete || deleting)
+            }
+        }
+        .navigationTitle("Delete Account")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    /// Fetch the export and hand it to a share sheet. Written to a temp file
+    /// first so the user can save it to Files / mail it, rather than staring
+    /// at JSON in a text view.
+    @MainActor
+    private func exportMyData() async {
+        guard !exporting else { return }
+        exporting = true
+        exportError = nil
+        defer { exporting = false }
+        do {
+            let data = try await apiClient.fetchDataExport()
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("evlin-data-export.json")
+            try data.write(to: url, options: .atomic)
+            exportFileURL = url
+            showExportShare = true
+        } catch {
+            exportError = "Couldn't prepare your data: \(error.localizedDescription)"
+        }
+    }
+
+    private var canConfirmDelete: Bool {
+        deleteConfirmText.trimmingCharacters(in: .whitespaces).uppercased() == "DELETE"
+    }
+
+    /// Other non-deleted parents in the family decide whether this deletion
+    /// takes the family with it. Mirrors the backend's co-parent branch.
+    private var isLastParent: Bool {
+        familyStore.parents.count <= 1
+    }
+
+    private var kidDeviceLabel: String {
+        familyStore.childProfiles.first?.name ?? "your kid"
+    }
+
+    @ViewBuilder
+    private func deleteChecklistRow(icon: String, text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color.evError)
+                .frame(width: 20)
+            Text(text)
+                .font(.system(size: 13))
+                .foregroundStyle(Color.evOnSurfaceVariant)
+        }
+        .padding(.vertical, 2)
+    }
+
+    /// Server first, local teardown second. If the request fails we keep every
+    /// local credential so the parent can retry — wiping first would strand a
+    /// live server-side account with no way back in.
+    @MainActor
+    private func performDeleteAccount() async {
+        guard canConfirmDelete, !deleting else { return }
+        deleting = true
+        deleteError = nil
+        do {
+            try await apiClient.deleteAccount()
+        } catch {
+            deleting = false
+            deleteError = "Couldn't delete the account: \(error.localizedDescription). Nothing was removed — check your connection and try again."
+            return
+        }
+        // Server confirmed. Dismiss the live Settings hierarchy before
+        // clearing @AppStorage and routing the app back to onboarding.
+        requestSessionExit()
     }
 
     @ViewBuilder
@@ -791,7 +1140,7 @@ struct HomeSettingsSheet: View {
 
             Section("Confirm") {
                 Button(role: .destructive) {
-                    performSignOut()
+                    requestSessionExit()
                 } label: {
                     settingsRow(
                         title: "Sign Out",
@@ -899,16 +1248,23 @@ struct HomeSettingsSheet: View {
                 if devices.isEmpty {
                     settingsRow(
                         title: "No devices enrolled yet",
-                        subtitle: "Use Add Child when the first kid device is ready",
+                        subtitle: "Use Add Device below when the first device is ready",
                         systemImage: "iphone.slash",
                         accent: .evOutline,
                         disabled: true
                     )
                 }
                 ForEach(devices) { device in
-                    NavigationLink {
-                        deviceDetailMenu(child: displayChild, device: device)
-                    } label: {
+                    NavigationLink(
+                        destination: DeviceDetailDismissalHost(
+                            selectedDeviceID: $selectedDeviceDetailID,
+                            detailDeviceID: device.device_id
+                        ) {
+                            deviceDetailMenu(child: displayChild, device: device)
+                        },
+                        tag: device.device_id,
+                        selection: $selectedDeviceDetailID
+                    ) {
                         settingsRow(
                             title: deviceDisplayName(device),
                             subtitle: deviceStatusLine(device),
@@ -933,25 +1289,42 @@ struct HomeSettingsSheet: View {
                 }
                 .buttonStyle(.plain)
 
-                settingsRow(
-                    title: "Add Device for \(displayChild.name)",
-                    subtitle: "Available from the child profile flow",
-                    systemImage: "plus",
-                    value: "Profile",
-                    accent: .evOutline,
-                    disabled: true
-                )
+                Button {
+                    // The target rides on the invite, so the kid device is
+                    // told whose device it is becoming and never asked for a
+                    // name it already has.
+                    addDeviceTargetChildID = UUID(uuidString: displayChild.id)
+                    addDevicePairingKidName = displayChild.name
+                    showAddDevicePairing = true
+                } label: {
+                    settingsRow(
+                        title: "Add/Recover Device for \(displayChild.name)",
+                        subtitle: "Show a code for the new or returning device to scan",
+                        systemImage: "plus",
+                        value: "",
+                        accent: .evSecondary
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(UUID(uuidString: displayChild.id) == nil)
             }
         }
         .navigationTitle(displayChild.name)
         .navigationBarTitleDisplayMode(.inline)
     }
 
-    private func deviceDetailMenu(child: ChildProfile, device: EnrolledDeviceDTO) -> some View {
-        Form {
+    private func deviceDetailMenu(
+        child: ChildProfile,
+        device initialDevice: EnrolledDeviceDTO
+    ) -> some View {
+        let device = ParentSettingsPresentation.latestDevice(
+            initial: initialDevice,
+            refreshedDevices: backendChild(for: child)?.devices ?? []
+        )
+        return Form {
             settingsHeroNote(
                 title: deviceDisplayName(device),
-                message: "Device-level state. App inventory belongs here because it comes from the kid device, not the parent phone."
+                message: "Device-level state reported by \(child.name)'s phone."
             )
 
             #if DEBUG
@@ -975,27 +1348,184 @@ struct HomeSettingsSheet: View {
             }
             #endif
 
-            Section("Device Inventory") {
-                settingsRow(
-                    title: "Registered Apps",
-                    subtitle: "Synced from child device, read-only here",
-                    systemImage: "square.grid.2x2",
-                    value: "Not wired",
-                    accent: .evOutline,
-                    disabled: true
+            Section("Security") {
+                let row = ParentPINRow.display(
+                    status: device.parent_pin_status ?? "not_set",
+                    pin: device.parent_pin,
+                    kidName: child.name
                 )
-                settingsRow(
-                    title: "Saved Lists",
-                    subtitle: "Created or confirmed from kid-device catalog",
-                    systemImage: "list.bullet.rectangle",
-                    value: "Not wired",
-                    accent: .evOutline,
-                    disabled: true
-                )
+                let revealed = revealedParentPINDeviceIDs.contains(device.device_id)
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 12) {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.evSecondaryContainer)
+                            .frame(width: 32, height: 32)
+                            .overlay(
+                                Image(systemName: "lock")
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .foregroundStyle(Color.evSecondary)
+                            )
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(row.title)
+                                .font(.evLabelLarge)
+                                .foregroundStyle(Color.evPrimary)
+                            Text(row.subtitle)
+                                .font(.evBodySmall)
+                                .foregroundStyle(Color.evOnSurfaceVariant)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 0)
+                    }
+
+                    // The value gets its own monospaced field rather than a
+                    // trailing label: a parent reads these digits off the screen
+                    // and types them on another phone, so even spacing and a
+                    // deliberate reveal beat a cramped right-aligned row.
+                    if let pin = row.value {
+                        HStack {
+                            Text(revealed ? pin : String(repeating: "•", count: pin.count))
+                                .font(.system(size: 17, weight: .medium, design: .monospaced))
+                                .tracking(revealed ? 4 : 2)
+                                .foregroundStyle(Color.evPrimary)
+                            Spacer(minLength: 0)
+                            Button {
+                                if revealed {
+                                    revealedParentPINDeviceIDs.remove(device.device_id)
+                                } else {
+                                    revealedParentPINDeviceIDs.insert(device.device_id)
+                                }
+                            } label: {
+                                Image(systemName: revealed ? "eye.slash" : "eye")
+                                    .font(.system(size: 16, weight: .medium))
+                                    .foregroundStyle(Color.evOnSurfaceVariant)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(revealed ? "Hide PIN" : "Show PIN")
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous)
+                                .fill(Color.evSurfaceContainerLow)
+                        )
+                    }
+                }
+                .padding(.vertical, 4)
+                if row.canClear {
+                    Button("Clear PIN", role: .destructive) {
+                        parentPINClearTarget = DeviceRemovalTarget(child: child, device: device)
+                    }
+                    .disabled(clearingParentPINDeviceIDs.contains(device.device_id))
+                }
+                if clearingParentPINDeviceIDs.contains(device.device_id) {
+                    HStack {
+                        ProgressView()
+                        Text("Clearing PIN")
+                    }
+                }
+            }
+
+            Section {
+                Button(role: .destructive) {
+                    devicePendingRemoval = DeviceRemovalTarget(child: child, device: device)
+                } label: {
+                    if removingDeviceID == device.device_id {
+                        HStack {
+                            ProgressView()
+                            Text("Removing Device")
+                        }
+                    } else {
+                        Label("Remove Device", systemImage: "trash")
+                    }
+                }
+                .disabled(removingDeviceID != nil)
+            } footer: {
+                Text("This removes only this device. The child profile and other enrolled devices stay in place.")
             }
         }
         .navigationTitle("Child Device")
         .navigationBarTitleDisplayMode(.inline)
+        .task(id: initialDevice.device_id) {
+            await familyStore.refresh()
+            children = familyStore.childProfiles
+        }
+        .confirmationDialog(
+            "Clear Parent PIN?",
+            isPresented: Binding(
+                get: { parentPINClearTarget != nil },
+                set: { if !$0 { parentPINClearTarget = nil } }
+            ),
+            presenting: parentPINClearTarget
+        ) { target in
+            Button("Clear PIN", role: .destructive) {
+                Task { await clearParentPIN(target) }
+            }
+            Button("Cancel", role: .cancel) { parentPINClearTarget = nil }
+        } message: { target in
+            Text("\(target.child.name) will need a new PIN the next time Parent Controls is opened on this device.")
+        }
+        .alert(
+            "Couldn’t Clear PIN",
+            isPresented: Binding(
+                get: { parentPINClearError != nil },
+                set: { if !$0 { parentPINClearError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { parentPINClearError = nil }
+        } message: {
+            Text(parentPINClearError ?? "Try again.")
+        }
+    }
+
+    private func clearParentPIN(_ target: DeviceRemovalTarget) async {
+        parentPINClearTarget = nil
+        guard !clearingParentPINDeviceIDs.contains(target.device.device_id) else { return }
+        clearingParentPINDeviceIDs.insert(target.device.device_id)
+        defer { clearingParentPINDeviceIDs.remove(target.device.device_id) }
+        do {
+            try await apiClient.clearChildDeviceParentPIN(
+                childID: target.child.id,
+                deviceID: target.device.device_id
+            )
+            revealedParentPINDeviceIDs.remove(target.device.device_id)
+            await familyStore.refresh()
+            children = familyStore.childProfiles
+        } catch {
+            parentPINClearError = "Evlin could not clear this PIN. Check your connection and try again."
+        }
+    }
+
+    private func removeDevice(_ target: DeviceRemovalTarget) async {
+        guard UUID(uuidString: target.child.id) != nil,
+              UUID(uuidString: target.device.device_id) != nil else {
+            devicePendingRemoval = nil
+            deviceRemovalError = "This device is missing a valid identifier. Refresh and try again."
+            return
+        }
+        removingDeviceID = target.device.device_id
+        defer { removingDeviceID = nil }
+        do {
+            try await apiClient.removeChildDevice(
+                childID: target.child.id,
+                deviceID: target.device.device_id
+            )
+            devicePendingRemoval = nil
+            removingDeviceID = nil
+            selectedDeviceDetailID = ParentSettingsPresentation.deviceDetailSelectionAfterRemoval(
+                selectedDeviceID: selectedDeviceDetailID,
+                removedDeviceID: target.device.device_id
+            )
+
+            // The deletion has committed. Refreshing all home aggregates is
+            // best-effort and must not keep this destructive action spinning.
+            Task {
+                await familyStore.refresh()
+                children = familyStore.childProfiles
+            }
+        } catch {
+            devicePendingRemoval = nil
+            deviceRemovalError = "Evlin could not remove this device. Check your connection and try again."
+        }
     }
 
     private var appVersionDisplay: String {
@@ -2376,7 +2906,11 @@ struct HomeSettingsSheet: View {
         }
     }
 
-    private func performSignOut() {
+    private func requestSessionExit() {
+        sessionExitCoordinator.requestExit(dismiss: onClose)
+    }
+
+    private func tearDownLocalSession() {
         // C2 fix: route through AuthService.signOutLocally() so the P0-1
         // chat-clear path (evlinClearChat → clearAllLocal + setAccount(nil))
         // always runs on sign-out. AuthService clears the Keychain, posts
@@ -2395,7 +2929,6 @@ struct HomeSettingsSheet: View {
         defaults.removeObject(forKey: "targetChildId")
         // evlinSessionSignedOut drives HomeView back to signed-out state.
         NotificationCenter.default.post(name: .evlinSessionSignedOut, object: nil)
-        onClose()
     }
 
     private func color(fromHexString hex: String) -> Color? {
@@ -2467,23 +3000,6 @@ struct HomeSettingsSheet: View {
     }
 
     @MainActor
-    private func addChild(name: String, age: Int) async {
-        isChildOpInFlight = true
-        defer { isChildOpInFlight = false }
-        do {
-            // Server returns the authoritative ChildDTO (with the real id).
-            _ = try await apiClient.createChild(
-                ChildCRUDMapper.createBody(name: name, age: age, referenceYear: referenceYear))
-            await familyStore.refresh()
-            children = familyStore.childProfiles            // re-seed from truth
-            adding = false
-            childOpError = nil
-        } catch {
-            childOpError = ChildCRUDMapper.saveErrorMessage(for: error)
-        }
-    }
-
-    @MainActor
     private func saveEditedChild(id: String, name: String, age: Int) async {
         isChildOpInFlight = true
         defer { isChildOpInFlight = false }
@@ -2515,45 +3031,6 @@ struct HomeSettingsSheet: View {
         }
         await familyStore.refresh()
         children = familyStore.childProfiles                // truth wins; failed delete stays
-    }
-
-    @MainActor
-    private func pairAdditionalChild(_ code: String) async -> String? {
-        let trimmed = code.filter(\.isNumber)
-        guard trimmed.count == 6 else { return "Enter the 6-digit code." }
-        do {
-            let response = try await apiClient.pairFamily(
-                code: trimmed,
-                deviceLabel: UIDevice.current.name,
-                protectionMode: savedProtectionMode
-            )
-            UserDefaults.standard.set(response.family_id.uuidString, forKey: "evlin.familyID")
-            UserDefaults.standard.set(response.parent_device_id.uuidString, forKey: "evlin.parentDeviceID")
-            UserDefaults.standard.set(response.child_device_id.uuidString, forKey: "evlin.childDeviceID")
-            familyID = response.family_id.uuidString
-            parentDeviceID = response.parent_device_id.uuidString
-            childDeviceID = response.child_device_id.uuidString
-
-            await familyStore.refresh()
-            children = familyStore.childProfiles
-            if let matched = familyStore.children.first(where: { child in
-                child.devices.contains { UUID(uuidString: $0.device_id) == response.child_device_id }
-            }) {
-                addChildPairingKidName = matched.display_name
-            } else {
-                addChildPairingKidName = "your kid"
-            }
-            return nil
-        } catch let APIError.serverError(status) {
-            switch status {
-            case 404: return "That code wasn't found. Double-check the 6 digits."
-            case 400: return "That code has expired or was already used. Ask your kid for a fresh one."
-            case 409: return "This account is already in a different family."
-            default:  return "Couldn't pair (error \(status)). Try again."
-            }
-        } catch {
-            return "Network error. Check your connection and try again."
-        }
     }
 
     /// Nuclear reset — wipes every layer that holds lock state. See the
@@ -2593,63 +3070,6 @@ private extension UNAuthorizationStatus {
         @unknown default:
             return false
         }
-    }
-}
-
-private struct SettingsAddChildPairingFlow: View {
-    let kidName: String
-    let onPair: (String) async -> String?
-    let onDone: () -> Void
-    let onCancel: () -> Void
-
-    @State private var paired = false
-
-    private var displayName: String {
-        let trimmed = kidName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "your kid" : trimmed
-    }
-
-    var body: some View {
-        NavigationStack {
-            Group {
-                if paired {
-                    VStack(spacing: 18) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 64, weight: .semibold))
-                            .foregroundStyle(Color.evSecondary)
-                        Text("Linked")
-                            .font(.custom("Manrope", size: 28).weight(.heavy))
-                            .foregroundStyle(Color.evOnSurface)
-                        Text("Connected to \(displayName).")
-                            .font(.custom("Inter", size: 15))
-                            .foregroundStyle(Color.evOnSurfaceVariant)
-                            .multilineTextAlignment(.center)
-                        Button("Done") {
-                            onDone()
-                        }
-                        .buttonStyle(.borderedProminent)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding()
-                    .background(Color.evSurface)
-                } else {
-                    ParentPairScanStep(
-                        onPaired: onPair,
-                        pairedSucceeded: false,
-                        onAdvance: { paired = true },
-                        onBack: onCancel
-                    )
-                }
-            }
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button(paired ? "Done" : "Cancel") {
-                        paired ? onDone() : onCancel()
-                    }
-                }
-            }
-        }
-        .preferredColorScheme(.light)
     }
 }
 
@@ -2694,4 +3114,16 @@ private struct ChildEditSheet: View {
         .environmentObject(APIClient(baseURL: "http://preview.local"))
         .environmentObject(ScreenTimeManager.shared)
         .environment(FamilyStore(api: APIClient(baseURL: "http://preview.local")))
+}
+
+/// Share sheet for the §5.4(a) data export — lets the parent save the JSON to
+/// Files, AirDrop it, or mail it to themselves.
+struct DataExportShareSheet: UIViewControllerRepresentable {
+    let fileURL: URL
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [fileURL], applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }

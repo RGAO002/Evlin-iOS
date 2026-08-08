@@ -9,6 +9,19 @@ import Foundation
 /// free of any app-only / extension-only API. NO actor, NO UserDefaults.
 enum ShieldSourceLogic {
 
+    /// Decode the cross-process shield snapshot without collapsing corrupt
+    /// persisted bytes into an empty record set. Callers must distinguish a
+    /// missing snapshot (legitimately empty) from a present snapshot that
+    /// cannot be decoded (fail closed and preserve the live projection).
+    static func decodePersistedShields(_ data: Data) -> [String: ShieldRecord]? {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        if let decoded = try? decoder.decode([String: ShieldRecord].self, from: data) {
+            return decoded
+        }
+        return try? PropertyListDecoder().decode([String: ShieldRecord].self, from: data)
+    }
+
     // MARK: - Record-level operations
 
     /// Return `record` with `newSources` unioned into its `sources` set.

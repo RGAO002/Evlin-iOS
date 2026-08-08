@@ -93,11 +93,15 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
 #endif
 
         if raw.hasPrefix(MeteringRouteNamespace.prefix) {
+            let project: ([String: ShieldRecord]) -> Void = { [weak self] shields in
+                self?.recomputeAndApplyShields(shields)
+            }
+            awaitBounded {
+                await DAMMeteringEntry.shared.recoverMeteringIfConfigured()
+            }
             Task { @MainActor in
-                await DAMMeteringEntry.shared.recoverIfConfigured(
-                    projectShields: { [weak self] shields in
-                        self?.recomputeAndApplyShields(shields)
-                    }
+                await DAMMeteringEntry.shared.recoverShieldEffectsIfConfigured(
+                    projectShields: project
                 )
             }
             return
@@ -164,7 +168,9 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                     generation,
                     mutationKeys: [shieldsKey],
                     rollbackExternalState: {
-                        recomputeAndApplyShields(loadShields())
+                        if let shields = loadShields() {
+                            recomputeAndApplyShields(shields)
+                        }
                     }
                 ) {
                     resetEarnedTimeShields(activity: raw)
@@ -216,9 +222,15 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         NSLog("[Evlin/Ext] intervalDidEnd %@", marker)
 
         if raw.hasPrefix(MeteringRouteNamespace.prefix) {
+            let project: ([String: ShieldRecord]) -> Void = { [weak self] shields in
+                self?.recomputeAndApplyShields(shields)
+            }
+            awaitBounded {
+                await DAMMeteringEntry.shared.recoverMeteringIfConfigured()
+            }
             Task { @MainActor in
-                await DAMMeteringEntry.shared.handleIntervalDidEnd(
-                    activityName: raw
+                await DAMMeteringEntry.shared.recoverShieldEffectsIfConfigured(
+                    projectShields: project
                 )
             }
             return
@@ -237,7 +249,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             if !found {
                 let keys: [String] = {
                     guard let data = defaults?.data(forKey: shieldsKey),
-                          let shields = decodeShields(from: data)
+                          let shields = ShieldSourceLogic.decodePersistedShields(data)
                     else { return [] }
                     return Array(shields.keys)
                 }()
@@ -380,7 +392,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     /// This can only make delivery earlier, never later.
     private func awaitBounded(_ work: @escaping @Sendable () async -> Void) {
         let done = DispatchSemaphore(value: 0)
-        Task {
+        Task.detached(priority: .utility) {
             defer { done.signal() }
             await work()
         }
@@ -432,8 +444,14 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                 detail: MeteringFlightRecorder.detail([("evt", event.rawValue)])
             )
         }
+        // The journal import and network drain are non-MainActor work. Wait for
+        // them briefly before this synchronous extension callback returns, or
+        // iOS can suspend the extension with a valid sample stranded on disk.
+        awaitBounded {
+            await DAMMeteringEntry.shared.deliverPendingCallbacksIfConfigured()
+        }
         Task { @MainActor in
-            await DAMMeteringEntry.shared.recoverIfConfigured(
+            await DAMMeteringEntry.shared.recoverShieldEffectsIfConfigured(
                 projectShields: project
             )
         }
@@ -470,6 +488,20 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         activity: DeviceActivityName
     ) {
         let context = EarnedTimeStore.shared.currentPolicyDateContext()
+        // Record the ARRIVAL — but as a single defaults key, NEVER a durable
+        // ring emit. The durable path loads and rewrites the full 2000-line
+        // event ring, which on a mature device blows the DAM extension's ~6MB
+        // memory cap and kills the process RIGHT HERE — consuming the one-shot
+        // bell before the validator ever runs. That was the per-app massacre
+        // of 2026-08-06/07: every bell arrived (entry breadcrumb advanced) and
+        // died at this doorstep; devices with a near-empty ring (fresh iPad)
+        // sailed through, which masqueraded as scheduling folklore. The earned
+        // branch's `emitCallbackArrival` carries the same warning for the same
+        // reason.
+        defaults?.set(
+            "\(ISO8601DateFormatter().string(from: Date())) arrived evt=\(event.rawValue)",
+            forKey: "evlin.appLimit.lastCallback"
+        )
         do {
             let decision = try appLimitCallbackValidator.process(
                 activityName: activity.rawValue,
@@ -483,7 +515,15 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             switch decision {
             case .rejected(let reason):
                 NSLog("[Evlin/Ext] app limit callback rejected: %@", reason)
+                defaults?.set(
+                    "\(ISO8601DateFormatter().string(from: Date())) \(reason) evt=\(event.rawValue)",
+                    forKey: "evlin.appLimit.lastVerdict"
+                )
             case .paused:
+                defaults?.set(
+                    "\(ISO8601DateFormatter().string(from: Date())) paused evt=\(event.rawValue)",
+                    forKey: "evlin.appLimit.lastVerdict"
+                )
                 return
             case .accepted:
                 break
@@ -503,33 +543,39 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                     claim,
                     source: "device_activity_monitor"
                 ) { [self] callback in
-                    try AppLimitCallbackLocalLedger.record(callback)
-                    if callback.effectKind == .enforcement {
-                        try applyLimitShield(callback: callback)
+                    try AppLimitEffectLocalPersistence.persist(
+                        callback,
+                        shieldPersistence: AppLimitShieldPersistence(
+                            store: defaults,
+                            storageKey: shieldsKey
+                        )
+                    )
+                }
+                guard localReceipt != nil else { continue }
+                if let baseURL = ExtensionConfig.baseURL,
+                   let deviceID = ExtensionConfig.childId {
+                    let journal = appLimitEffectJournal
+                    // Same race as the earned-pool reporter, same fix — see
+                    // `awaitBounded`. The per-app ladder is the one a parent watches
+                    // hit its budget, so a report that lands only when someone opens
+                    // the app is a limit that appears not to work.
+                    awaitBounded {
+                        do {
+                            _ = try await journal.submitUsage(
+                                claim,
+                                baseURL: baseURL,
+                                deviceID: deviceID
+                            )
+                        } catch {
+                            NSLog(
+                                "[Evlin/Ext] app limit usage journal failed: %@",
+                                String(describing: error)
+                            )
+                        }
                     }
                 }
-                guard localReceipt != nil,
-                      let baseURL = ExtensionConfig.baseURL,
-                      let deviceID = ExtensionConfig.childId
-                else { continue }
-                let journal = appLimitEffectJournal
-                // Same race as the earned-pool reporter, same fix — see
-                // `awaitBounded`. The per-app ladder is the one a parent watches
-                // hit its budget, so a report that lands only when someone opens
-                // the app is a limit that appears not to work.
-                awaitBounded {
-                    do {
-                        _ = try await journal.submitUsage(
-                            claim,
-                            baseURL: baseURL,
-                            deviceID: deviceID
-                        )
-                    } catch {
-                        NSLog(
-                            "[Evlin/Ext] app limit usage journal failed: %@",
-                            String(describing: error)
-                        )
-                    }
+                if claim.effect.key.effectKind == .enforcement {
+                    projectLimitShield(callback: claim.effect.callback)
                 }
             }
         } catch {
@@ -537,9 +583,11 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         }
     }
 
-    /// Called only inside `AppLimitEffectJournal.applyLocal`, with the shared
-    /// persistence lock held across final epoch validation and receipt readback.
-    private func applyLimitShield(callback: AppLimitValidatedCallback) throws {
+    /// Runs after the journal has durably recorded both the local usage and
+    /// shield intent. ManagedSettings is deliberately outside that transaction:
+    /// a slow Screen Time daemon must not strand a claimed callback without its
+    /// receipt and therefore delay parent-side usage.
+    private func projectLimitShield(callback: AppLimitValidatedCallback) {
         let rule = callback.rule
         let ruleId = rule.id
 
@@ -551,15 +599,9 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         postLimitReachedNotification(ruleId: ruleId, rule: rule)
 
         let now = Date()
-        let persistence = AppLimitShieldPersistence(store: defaults, storageKey: shieldsKey)
-        let current = try persistence.load()
-        let updated = LimitShieldLogic.applyingLimit(
-            to: current,
-            callback: callback,
-            now: now
-        )
-        try persistence.persist(updated)
-        recomputeAndApplyShields(updated)
+        if let shields = loadShields() {
+            recomputeAndApplyShields(shields)
+        }
 
         let ts = ISO8601DateFormatter().string(from: now)
         defaults?.set(
@@ -754,6 +796,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     private func resetEarnedTimeShields(activity: String) {
         var removedCount = 0
         var modifiedCount = 0
+        var didReset = false
         // FIX-E: this was the ONE read-modify-write of `evlin.shieldRecords` in
         // this file that ran without the shared cross-process lock — its two
         // siblings (`resetLimitsAtIntervalEnd`, `removeShieldByHashAndRecompute`)
@@ -762,7 +805,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         // concurrent update or publish a half-written blob, which is how the
         // terminal lock came to read bytes it could not decode.
         _ = ActiveLockPersistenceLock.shared.withLock {
-            let current = loadShields()
+            guard let current = loadShields() else { return }
             let stripped = ShieldSourceLogic.strippingSource(.earnedTime, from: current)
             removedCount = current.count - stripped.count
             modifiedCount = stripped.values.filter { rec in
@@ -772,7 +815,10 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                 defaults?.set(data, forKey: shieldsKey)
             }
             recomputeAndApplyShields(stripped)
+            didReset = true
         }
+
+        guard didReset else { return }
 
         let ts = ISO8601DateFormatter().string(from: Date())
         defaults?.set(
@@ -814,12 +860,11 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             NSLog("[Evlin/Ext] limit reset skipped (same-day re-arm) activity=%@ day=%@", activity, today)
             return
         }
-        defaults?.set(today, forKey: dayKeyKey)
-
         var removedCount = 0
         var remainingCount = 0
+        var didReset = false
         _ = ActiveLockPersistenceLock.shared.withLock {
-            let current = loadShields()
+            guard let current = loadShields() else { return }
             let stripped = LimitShieldLogic.strippingLimitShields(from: current)
             removedCount = current.count - stripped.count
             remainingCount = stripped.count
@@ -827,7 +872,11 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                 defaults?.set(data, forKey: shieldsKey)
             }
             recomputeAndApplyShields(stripped)
+            didReset = true
         }
+
+        guard didReset else { return }
+        defaults?.set(today, forKey: dayKeyKey)
 
         let ts = ISO8601DateFormatter().string(from: Date())
         defaults?.set(
@@ -841,10 +890,23 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
 
     /// Read the current shields dict from the App Group, normalizing each record
     /// to the current schema (same migration the shield-removal path applies).
-    private func loadShields() -> [String: ShieldRecord] {
-        guard let data = defaults?.data(forKey: shieldsKey),
-              let decoded = decodeShields(from: data) else { return [:] }
+    private func loadShields() -> [String: ShieldRecord]? {
+        guard let data = defaults?.data(forKey: shieldsKey) else { return [:] }
+        guard let decoded = ShieldSourceLogic.decodePersistedShields(data) else {
+            recordShieldDecodeFailure(site: "load")
+            return nil
+        }
         return decoded.mapValues { $0.normalizedForCurrentSchema().record }
+    }
+
+    private func recordShieldDecodeFailure(site: String) {
+        let reason = "shield_decode_failed_fail_closed"
+        defaults?.set(
+            "reason=\(reason) site=\(site) at=\(ISO8601DateFormatter().string(from: Date()))",
+            forKey: "evlin.lastShieldDecodeFailure"
+        )
+        NSLog("[Evlin/Ext] %@ site=%@", reason, site)
+        emitEvent(kind: .decision, source: nil, app: "device-wide", reason: reason)
     }
 
     @discardableResult
@@ -862,15 +924,21 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         // propagated, or sweepExpired set it from an actor thread that
         // springboard hasn't picked up yet). Idempotent recompute is safe.
         var migrated = false
-        let shields: [String: ShieldRecord] = {
-            guard let data = defaults?.data(forKey: shieldsKey),
-                  let decoded = decodeShields(from: data) else { return [:] }
-            return decoded.mapValues { record in
-                let normalized = record.normalizedForCurrentSchema()
-                migrated = migrated || normalized.migrated
-                return normalized.record
+        let decoded: [String: ShieldRecord]
+        if let data = defaults?.data(forKey: shieldsKey) {
+            guard let persisted = ShieldSourceLogic.decodePersistedShields(data) else {
+                recordShieldDecodeFailure(site: "remove_by_hash")
+                return false
             }
-        }()
+            decoded = persisted
+        } else {
+            decoded = [:]
+        }
+        let shields = decoded.mapValues { record in
+            let normalized = record.normalizedForCurrentSchema()
+            migrated = migrated || normalized.migrated
+            return normalized.record
+        }
 
         let targetKey = shields.keys.first(where: { key in
             let data = key.data(using: .utf8) ?? Data()
@@ -930,7 +998,10 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             return decoded
         }()
 
-        let blockedApps = Set(blocks.values.map { ManagedSettings.Application(bundleIdentifier: $0.bundleID) })
+        let blockedApps = Set(blocks.values.map { record in
+            record.appToken.map(ManagedSettings.Application.init(token:))
+                ?? ManagedSettings.Application(bundleIdentifier: record.bundleID)
+        })
         store.application.blockedApplications = blockedApps.isEmpty ? nil : blockedApps
 
         let broadRecords = shields.values.filter(\.appliesToAll)
@@ -1009,8 +1080,9 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         }
 
         // Re-derive blockedApplications from the surviving records.
-        let blockedApps = Set(blocks.values.map {
-            ManagedSettings.Application(bundleIdentifier: $0.bundleID)
+        let blockedApps = Set(blocks.values.map { record in
+            record.appToken.map(ManagedSettings.Application.init(token:))
+                ?? ManagedSettings.Application(bundleIdentifier: record.bundleID)
         })
         store.application.blockedApplications = blockedApps.isEmpty ? nil : blockedApps
         return true
@@ -1204,12 +1276,6 @@ private func evlinJSONEncoder() -> JSONEncoder {
     let e = JSONEncoder()
     e.dateEncodingStrategy = .iso8601
     return e
-}
-
-/// Match `ActiveLockStore` — JSON for token-heavy `ShieldRecord`; plist only for legacy payloads.
-private func decodeShields(from data: Data) -> [String: ShieldRecord]? {
-    if let d = try? evlinJSONDecoder().decode([String: ShieldRecord].self, from: data) { return d }
-    return try? PropertyListDecoder().decode([String: ShieldRecord].self, from: data)
 }
 
 private func encodeShields(_ shields: [String: ShieldRecord]) -> Data? {

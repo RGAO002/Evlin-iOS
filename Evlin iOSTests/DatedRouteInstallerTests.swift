@@ -8,7 +8,7 @@ import XCTest
 @MainActor
 final class DatedRouteInstallerTests: XCTestCase {
     private let owner = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
-    private let start = Date(timeIntervalSince1970: 1_784_889_600)
+    private let start = Date(timeIntervalSince1970: 1_784_371_200)
 
     func testTwoProcessesClaimOnlyOnceAndLoserHasNoCenterOrStoreSideEffects() throws {
         let fixture = try makeFixture()
@@ -146,11 +146,12 @@ final class DatedRouteInstallerTests: XCTestCase {
         XCTAssertEqual(try fixture.firstStore.read().installWork[work.workID]?.claim, claim.claim)
     }
 
-    func testCurrentDayInstallClaimPinsStartOnceAndCrashRetryKeepsSameStart() throws {
+    func testCurrentDayHorizonPinsStartOnceAndCrashRetryKeepsSameStart() throws {
         let fixture = try makeFixture()
         let state = try fixture.firstStore.read()
         let work = try work(forUsageDate: "2026-07-18", in: state)
         let route = try XCTUnwrap(state.routes[work.routeID])
+        let plannedStart = try XCTUnwrap(route.plannedSchedule.intervalStartAt)
         let timeZone = try XCTUnwrap(TimeZone(identifier: route.plannedSchedule.timezoneIdentifier))
         var calendar = Calendar(identifier: .gregorian)
         calendar.locale = Locale(identifier: "en_US_POSIX")
@@ -176,7 +177,7 @@ final class DatedRouteInstallerTests: XCTestCase {
         ))
         XCTAssertEqual(
             try fixture.firstStore.read().routes[route.routeID]?.plannedSchedule.intervalStartAt,
-            firstInstallAt
+            plannedStart
         )
 
         let retryAt = firstInstallAt.addingTimeInterval(DatedRouteInstaller.claimLeaseSeconds)
@@ -190,7 +191,7 @@ final class DatedRouteInstallerTests: XCTestCase {
         XCTAssertNotEqual(firstClaim.claim.token, retryClaim.claim.token)
         XCTAssertEqual(
             try fixture.secondStore.read().routes[route.routeID]?.plannedSchedule.intervalStartAt,
-            firstInstallAt
+            plannedStart
         )
         let futureRoute = try XCTUnwrap(
             try fixture.secondStore.read().routes.values.first { $0.usageDate == "2026-07-19" }
@@ -303,7 +304,83 @@ final class DatedRouteInstallerTests: XCTestCase {
         XCTAssertEqual(try fixture.firstStore.read().installWork[work.workID]?.phase, .active)
     }
 
-    func testZeroProgressCurrentDayRouteUpgradesOlderEventTopologyToCanonicalMidnight() throws {
+    func testPostAbsorbReadFailureNeverArmsThePreAbsorbLadder() throws {
+        let fixture = try makeFixture()
+        let initial = try fixture.firstStore.read()
+        let work = try work(forUsageDate: "2026-07-18", in: initial)
+        let route = try XCTUnwrap(initial.routes[work.routeID])
+        let epoch = try XCTUnwrap(initial.epochs[route.epochID])
+        try fixture.firstStore.transaction(expectedOwner: owner) { state in
+            state.epochs[epoch.epochID]?.lastRawThresholdMinutes = 5
+            let sampleID = UUID()
+            state.sampleWork[sampleID] = EpochSampleWork(
+                workID: sampleID,
+                ownerChildDeviceID: owner,
+                epochID: epoch.epochID,
+                routeID: route.routeID,
+                request: EpochSampleRequestDTO(
+                    deviceID: owner,
+                    usageDate: epoch.usageDate,
+                    timezone: epoch.canonicalTimezone,
+                    activityName: MeteringSampleWireAliases.activityName(routeID: route.routeID),
+                    eventName: MeteringSampleWireAliases.eventName(thresholdMinutes: 5),
+                    thresholdMinutes: 5,
+                    estimatedMinutes: 5,
+                    observedAt: start,
+                    clientSampleID: MeteringSampleWireAliases.clientSampleID(
+                        lane: .v2,
+                        routeID: route.routeID,
+                        thresholdMinutes: 5
+                    ),
+                    protocolVersion: 2,
+                    epochID: epoch.epochID,
+                    generationArmedAt: nil,
+                    generationOffsetMinutes: nil
+                ),
+                authorization: .v2Deliverable,
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 1,
+                    nextAttemptAt: start,
+                    lastErrorCode: nil,
+                    terminal: .succeeded
+                ),
+                createdAt: start
+            )
+        }
+        // claimInstallWork writes once; absorbCreditedProgressForRearm writes a
+        // second time. Fail the following read, precisely where the installer
+        // must rebuild from the newly persisted base and ladder.
+        fixture.io.failNextReadAfterWriteCount = fixture.io.writeCount + 2
+        fixture.io.readsToSkipAfterWriteThreshold = 1
+        let center = DatedCenter()
+        let installer = DatedRouteInstaller(
+            store: fixture.firstStore,
+            center: center,
+            processIdentity: MeteringProcessIdentity(role: .app, instanceID: UUID()),
+            clock: fixture.clock
+        )
+
+        XCTAssertEqual(
+            try installer.reconcile(ownerChildDeviceID: owner),
+            [.deferred(workID: work.workID, code: "postAbsorbConfigurationUnavailable")]
+        )
+        XCTAssertTrue(
+            center.startCalls.isEmpty,
+            "the pre-absorb ladder must never be armed after the store has repriced it"
+        )
+        let persisted = try fixture.firstStore.read()
+        XCTAssertEqual(persisted.epochs[epoch.epochID]?.baseAcceptedMinutes, 5)
+        XCTAssertEqual(persisted.epochs[epoch.epochID]?.lastRawThresholdMinutes, 0)
+        XCTAssertEqual(persisted.routes[route.routeID]?.ladderBaseMinutes, 5)
+        XCTAssertEqual(persisted.installWork[work.workID]?.phase, .pendingStart)
+        XCTAssertEqual(
+            persisted.installWork[work.workID]?.retry.lastErrorCode,
+            "postAbsorbConfigurationUnavailable"
+        )
+    }
+
+    func testZeroProgressCurrentDayRouteUpgradesOlderEventTopologyFromMigrationTime() throws {
         let fixture = try makeFixture()
         let initial = try fixture.firstStore.read()
         let work = try work(forUsageDate: "2026-07-18", in: initial)
@@ -345,18 +422,13 @@ final class DatedRouteInstallerTests: XCTestCase {
             work.workID
         )
         let upgraded = try fixture.firstStore.read()
-        let canonicalMidnight = try XCTUnwrap(calendar.date(from: DateComponents(
-            year: 2026,
-            month: 7,
-            day: 18
-        )))
         XCTAssertEqual(
             upgraded.routes[route.routeID]?.plannedSchedule.topologyVersion,
             DatedSchedulePlan.currentTopologyVersion
         )
         XCTAssertEqual(
             upgraded.routes[route.routeID]?.plannedSchedule.intervalStartAt,
-            canonicalMidnight
+            upgradeAt
         )
         XCTAssertEqual(upgraded.installWork[work.workID]?.phase, .pendingStart)
     }
@@ -463,6 +535,74 @@ final class DatedRouteInstallerTests: XCTestCase {
             try fixture.firstStore.read().installWork[currentWork.workID]
         )
         XCTAssertEqual(repairedWork.phase, .verified)
+    }
+
+    func testStuckPlannedNilAnchorCurrentDayRouteIsRetiredWhileFutureSurvives() throws {
+        // #86 / P1-6: horizon-born routes carry no pinned interval start —
+        // review 07-31 flagged them as permanently invisible to the stuck
+        // detector. The detector now falls back to the canonical day start;
+        // this pins that behavior: an armed-but-never-verified current-day
+        // route past the grace window is retired and stopped, while a future
+        // route whose window has not opened survives untouched.
+        let fixture = try makeFixture(leaveAllPending: true)
+        let state = try fixture.firstStore.read()
+        // The current-day route gets its start pinned at horizon creation;
+        // only FUTURE routes carry the nil anchor — the exact shape the
+        // review called invisible. The stuck subject is tomorrow's route,
+        // observed on its own day.
+        let stuckRoute = try XCTUnwrap(
+            state.routes.values.first { $0.usageDate == "2026-07-19" }
+        )
+        let futureRoute = try XCTUnwrap(
+            state.routes.values.first { $0.usageDate == "2026-07-20" }
+        )
+        XCTAssertNil(
+            stuckRoute.plannedSchedule.intervalStartAt,
+            "fixture no longer reproduces the nil-anchor shape this test exists for"
+        )
+        try fixture.firstStore.transaction(expectedOwner: owner) { state in
+            let key = try XCTUnwrap(
+                state.installWork.first { $0.value.routeID == stuckRoute.routeID }?.key
+            )
+            state.installWork[key]?.phase = .installed
+        }
+        let center = DatedCenter()
+        center.install(route: stuckRoute)
+
+        // Mid-morning of the stuck route's own day: its window has been open
+        // well past the 30-minute grace; the future route's window is closed.
+        let timeZone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        let windowOpen = try MeteringDatedSchedule.canonicalStart(
+            usageDate: "2026-07-19",
+            timeZone: timeZone
+        )
+        let installer = DatedRouteInstaller(
+            store: fixture.firstStore,
+            center: center,
+            processIdentity: MeteringProcessIdentity(role: .app, instanceID: UUID()),
+            clock: DatedClock(date: windowOpen.addingTimeInterval(5 * 3_600))
+        )
+        _ = try installer.reconcile(ownerChildDeviceID: owner)
+
+        let final = try fixture.firstStore.read()
+        let stuckLifecycle = final.routes[stuckRoute.routeID]?.lifecycle
+        XCTAssertTrue(
+            stuckLifecycle == nil || stuckLifecycle == .tombstoned,
+            "stuck nil-anchor route still \(String(describing: stuckLifecycle))"
+        )
+        if let epoch = final.epochs[stuckRoute.epochID] {
+            XCTAssertEqual(epoch.status, .retired)
+            XCTAssertEqual(epoch.retireReason, .coverageExpired)
+        }
+        XCTAssertFalse(
+            center.activities.contains(DeviceActivityName(stuckRoute.activityName)),
+            "stuck route is still armed at the daemon"
+        )
+        XCTAssertEqual(final.routes[futureRoute.routeID]?.lifecycle, .planned)
+        XCTAssertNotEqual(
+            final.epochs[futureRoute.epochID]?.status, .retired,
+            "future route was collateral damage of the stuck sweep"
+        )
     }
 
     func testReconcileCollectsRetiredGenerationAfterDaemonConfirmsItsActivitiesAreAbsent() throws {
@@ -940,6 +1080,76 @@ final class DatedRouteInstallerTests: XCTestCase {
         XCTAssertTrue(results.contains(.deferred(workID: today.workID, code: "registrationRequired")))
         XCTAssertFalse(center.startCalls.contains { $0.rawValue == state.routes[today.routeID]!.activityName })
         XCTAssertEqual(center.startCalls.count, 7)
+    }
+
+    func testSamePolicySelectionChurnSupersedesStaleRegistrationRequiredInstall() throws {
+        let fixture = try makeFixture(leaveAllPending: true)
+        let initial = try fixture.firstStore.read()
+        let initialGeneration = try XCTUnwrap(initial.generations.values.first)
+        let initialRoute = try XCTUnwrap(initial.routes.values.first {
+            $0.generationID == initialGeneration.generationID
+                && $0.usageDate == "2026-07-18"
+        })
+        let initialInstall = try XCTUnwrap(initial.installWork.values.first {
+            $0.routeID == initialRoute.routeID
+        })
+        var generationIDs = [initialGeneration.generationID]
+        var todayInstallIDs = [initialInstall.workID]
+
+        for index in 1...12 {
+            let selection = Data("same-policy-selection-\(index)".utf8)
+            let generationKey = MeteringGenerationKey(
+                protocolVersion: 2,
+                childDeviceID: owner,
+                canonicalTimezone: initialGeneration.canonicalTimezone,
+                policyRevision: initialGeneration.policyRevision,
+                measurementSelectionDigest: MeteringEpochContract.selectionDigest(
+                    persistedBytes: selection
+                ),
+                enforcementSetID: initialGeneration.enforcementSetID
+            )
+            let result = try fixture.firstStore.reconcileMeteringHorizon(MeteringHorizonRequest(
+                ownerChildDeviceID: owner,
+                today: "2026-07-18",
+                generationKey: generationKey,
+                persistedSelectionBytes: selection,
+                poolMinutes: 40,
+                deviceCapMinutes: 40,
+                authoritativeBaseAcceptedMinutes: 0,
+                now: start.addingTimeInterval(TimeInterval(index))
+            ))
+            let state = try fixture.firstStore.read()
+            let route = try XCTUnwrap(state.routes.values.first {
+                $0.generationID == result.generationID
+                    && $0.usageDate == "2026-07-18"
+            })
+            let install = try XCTUnwrap(state.installWork.values.first {
+                $0.routeID == route.routeID
+            })
+            generationIDs.append(result.generationID)
+            todayInstallIDs.append(install.workID)
+        }
+
+        fixture.clock.date = start.addingTimeInterval(30)
+        let installer = DatedRouteInstaller(
+            store: fixture.firstStore,
+            center: DatedCenter(),
+            processIdentity: MeteringProcessIdentity(role: .app, instanceID: UUID()),
+            clock: fixture.clock
+        )
+        _ = try installer.reconcile(ownerChildDeviceID: owner)
+
+        let final = try fixture.firstStore.read()
+        for (generationID, installID) in zip(
+            generationIDs.dropLast(),
+            todayInstallIDs.dropLast()
+        ) {
+            XCTAssertEqual(final.installWork[installID]?.retry.terminal, .superseded)
+            XCTAssertEqual(final.installWork[installID]?.retry.lastErrorCode, "route_superseded")
+            XCTAssertEqual(final.generations[generationID]?.retiredAt, fixture.clock.now)
+        }
+        XCTAssertNil(final.generations[generationIDs.last!]?.retiredAt)
+        XCTAssertEqual(final.installWork[todayInstallIDs.last!]?.retry.terminal, .pending)
     }
 
     func testRegistration200ForPlannedTodayRouteAllowsInstallerStartWithoutAuthorizationMutation() async throws {
@@ -1982,9 +2192,23 @@ private final class DatedLock: DeviceEpochStoreLocking, @unchecked Sendable {
 }
 
 private final class DatedFileIO: DeviceEpochFileIO, @unchecked Sendable {
+    private enum Fault: Error { case injectedReadFailure }
+
     var data: Data?
     var writeCount = 0
-    func read(from url: URL) throws -> Data? { data }
+    var failNextReadAfterWriteCount: Int?
+    var readsToSkipAfterWriteThreshold = 0
+    func read(from url: URL) throws -> Data? {
+        if let threshold = failNextReadAfterWriteCount, writeCount >= threshold {
+            if readsToSkipAfterWriteThreshold > 0 {
+                readsToSkipAfterWriteThreshold -= 1
+                return data
+            }
+            failNextReadAfterWriteCount = nil
+            throw Fault.injectedReadFailure
+        }
+        return data
+    }
     func writeAtomically(_ data: Data, to url: URL) throws { self.data = data; writeCount += 1 }
 }
 
@@ -2073,10 +2297,109 @@ final class StuckPlannedRouteTests: XCTestCase {
         )
     }
 
+    func testFuturePlannedRouteBecomesStuckAfterItsDayOpens() throws {
+        let bed = try makeStuckBed(
+            now: start.addingTimeInterval((3 * 24 + 6) * 3_600),
+            usageDate: "2026-07-27"
+        )
+        XCTAssertNil(bed.route.plannedSchedule.intervalStartAt)
+
+        _ = try bed.installer.reconcile(ownerChildDeviceID: owner)
+
+        XCTAssertFalse(
+            bed.center.activities.contains(DeviceActivityName(bed.route.activityName)),
+            "a future route must not remain permanently desired once its day opens and activation stays planned"
+        )
+        let persisted = try bed.store.read()
+        XCTAssertEqual(persisted.routes[bed.route.routeID]?.lifecycle, .tombstoned)
+        XCTAssertEqual(persisted.epochs[bed.route.epochID]?.status, .retired)
+        XCTAssertEqual(
+            persisted.epochs[bed.route.epochID]?.retireReason,
+            .coverageExpired
+        )
+        XCTAssertTrue(persisted.installWork.values.contains {
+            $0.routeID == bed.route.routeID && $0.phase == .pendingStop
+        })
+        XCTAssertFalse(
+            bed.center.startCalls.contains(DeviceActivityName(bed.route.activityName)),
+            "a route retired as stuck must not be reinstalled later in the same pass"
+        )
+    }
+
+    func testRegisteredStuckPlannedRouteRebuildsAsIdentityRecovery() throws {
+        let now = start.addingTimeInterval(6 * 3_600)
+        let bed = try makeStuckBed(now: now)
+        try bed.store.transaction(expectedOwner: owner) { state in
+            state.epochs[bed.route.epochID]?.registeredAt = start.addingTimeInterval(60)
+            for (key, var work) in state.registrationWork
+            where work.routeID == bed.route.routeID {
+                work.retry.terminal = .succeeded
+                state.registrationWork[key] = work
+            }
+            for key in state.installWork.keys
+            where state.installWork[key]?.routeID == bed.route.routeID {
+                state.installWork[key]?.authorization = .registered
+                state.installWork[key]?.phase = .installed
+            }
+        }
+
+        _ = try bed.installer.reconcile(ownerChildDeviceID: owner)
+        let retired = try bed.store.read()
+        let generation = try XCTUnwrap(retired.generations[bed.route.generationID])
+        let plan = try bed.store.reconcileMeteringHorizon(MeteringHorizonRequest(
+            ownerChildDeviceID: owner,
+            today: bed.route.usageDate,
+            generationKey: bed.route.generationKey,
+            persistedSelectionBytes: generation.measurementSelectionBytes,
+            poolMinutes: 40,
+            deviceCapMinutes: 40,
+            authoritativeBaseAcceptedMinutes: 0,
+            now: now.addingTimeInterval(1)
+        ))
+        let replacementRouteID = try XCTUnwrap(
+            plan.routeIDsByUsageDate[bed.route.usageDate]
+        )
+        XCTAssertNotEqual(replacementRouteID, bed.route.routeID)
+        let rebuilt = try bed.store.read()
+        let registration = try XCTUnwrap(rebuilt.registrationWork.values.first {
+            $0.routeID == replacementRouteID
+        })
+        XCTAssertEqual(registration.request.reason, .identityRecovery)
+    }
+
+    func testVerifiedPlannedRouteIsPreservedForActivationRecovery() throws {
+        let now = start.addingTimeInterval(6 * 3_600)
+        let bed = try makeStuckBed(now: now)
+        try bed.store.transaction(expectedOwner: owner) { state in
+            state.epochs[bed.route.epochID]?.registeredAt = start.addingTimeInterval(60)
+            for (key, var work) in state.registrationWork
+            where work.routeID == bed.route.routeID {
+                work.retry.terminal = .succeeded
+                state.registrationWork[key] = work
+            }
+            for key in state.installWork.keys
+            where state.installWork[key]?.routeID == bed.route.routeID {
+                state.installWork[key]?.authorization = .registered
+                state.installWork[key]?.phase = .verified
+            }
+        }
+
+        _ = try bed.installer.reconcile(ownerChildDeviceID: owner)
+
+        let persisted = try bed.store.read()
+        XCTAssertEqual(persisted.routes[bed.route.routeID]?.lifecycle, .planned)
+        XCTAssertEqual(persisted.epochs[bed.route.epochID]?.status, .active)
+        XCTAssertTrue(
+            bed.center.activities.contains(DeviceActivityName(bed.route.activityName)),
+            "exact daemon readback plus verified install is activation work, not a dead physical route"
+        )
+    }
+
     private struct StuckBed {
         let installer: DatedRouteInstaller
         let center: DatedCenter
         let route: MeteringCallbackRoute
+        let store: DeviceEpochStore
     }
 
     /// Builds a COHERENT store through the real horizon entry point — the store
@@ -2129,7 +2452,7 @@ final class StuckPlannedRouteTests: XCTestCase {
             processIdentity: MeteringProcessIdentity(role: .app, instanceID: UUID()),
             clock: DatedClock(date: now)
         )
-        return StuckBed(installer: installer, center: center, route: route)
+        return StuckBed(installer: installer, center: center, route: route, store: store)
     }
 
 

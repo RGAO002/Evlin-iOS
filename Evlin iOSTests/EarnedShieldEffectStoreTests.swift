@@ -126,6 +126,67 @@ final class EarnedShieldEffectStoreTests: XCTestCase {
         XCTAssertEqual(try envelopes()[operationID]?.phase, .released)
     }
 
+    func testIdentityCleanupRetiresPreparedEnvelopeWithoutApplyingEarnedSource() throws {
+        let fixture = try makeActiveEpochStore()
+        let effectStore = EarnedShieldEffectStore(defaults: defaults, epochStore: fixture.store)
+        let envelope = makeEnvelope(fixture: fixture)
+        try seedBefore(envelope)
+        try persistEnvelopes([operationID: envelope])
+        XCTAssertTrue(
+            try fixture.store.createOrVerifyEarnedShieldReference(
+                try effectStore.reference(for: envelope)
+            )
+        )
+        _ = try fixture.store.prepareIdentityCleanup(
+            oldOwner: owner,
+            newOwner: UUID(),
+            oldFallbackKeys: [],
+            now: now
+        )
+
+        try effectStore.retireForIdentityCleanup(
+            operationID: operationID,
+            expectedOwner: owner
+        )
+
+        XCTAssertEqual(try shields()[envelope.recordKey], envelope.beforeRecord)
+        XCTAssertEqual(try envelopes()[operationID]?.phase, .released)
+    }
+
+    func testIdentityCleanupAcceptsFalseSynchronizeWhenExactBytesReadBack() throws {
+        let falseSyncDefaults = try XCTUnwrap(
+            FalseSynchronizeEarnedShieldDefaults(suiteName: suiteName)
+        )
+        defaults = falseSyncDefaults
+        let fixture = try makeActiveEpochStore()
+        let effectStore = EarnedShieldEffectStore(
+            defaults: falseSyncDefaults,
+            epochStore: fixture.store
+        )
+        let envelope = makeEnvelope(fixture: fixture)
+        try seedBefore(envelope)
+        try persistEnvelopes([operationID: envelope])
+        XCTAssertTrue(
+            try fixture.store.createOrVerifyEarnedShieldReference(
+                try effectStore.reference(for: envelope)
+            )
+        )
+        _ = try fixture.store.prepareIdentityCleanup(
+            oldOwner: owner,
+            newOwner: UUID(),
+            oldFallbackKeys: [],
+            now: now
+        )
+
+        try effectStore.retireForIdentityCleanup(
+            operationID: operationID,
+            expectedOwner: owner
+        )
+
+        XCTAssertEqual(try shields()[envelope.recordKey], envelope.beforeRecord)
+        XCTAssertEqual(try envelopes()[operationID]?.phase, .released)
+    }
+
     func testRecoverMarksAppliedWhenShieldWriteWonButAppliedMarkerWasLost() throws {
         let fixture = try makeActiveEpochStore()
         let effectStore = EarnedShieldEffectStore(defaults: defaults, epochStore: fixture.store)
@@ -375,6 +436,13 @@ final class EarnedShieldEffectStoreTests: XCTestCase {
 
     private func seedBefore(_ envelope: EarnedShieldEffectEnvelope) throws {
         try persistShields([envelope.recordKey: try XCTUnwrap(envelope.beforeRecord)])
+    }
+}
+
+private final class FalseSynchronizeEarnedShieldDefaults: UserDefaults {
+    override func synchronize() -> Bool {
+        _ = super.synchronize()
+        return false
     }
 }
 

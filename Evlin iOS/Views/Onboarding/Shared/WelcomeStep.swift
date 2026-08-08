@@ -7,14 +7,12 @@ struct WelcomeStep: View {
         VStack(spacing: Spacing.section) {
             Spacer()
 
-            Circle()
-                .fill(Color.evPrimary)
-                .frame(width: 64, height: 64)
-                .overlay(
-                    Image(systemName: "shield.checkered")
-                        .font(.system(size: 28, weight: .bold))
-                        .foregroundStyle(Color.evOnPrimary)
-                )
+            Image("EvlinAppIcon")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 88, height: 88)
+                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .shadow(color: Color.black.opacity(0.12), radius: 10, y: 4)
 
             VStack(spacing: Spacing.lg) {
                 Text("Welcome to Evlin")

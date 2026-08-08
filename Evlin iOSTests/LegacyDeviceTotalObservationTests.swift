@@ -43,7 +43,6 @@ final class LegacyDeviceTotalObservationTests: XCTestCase {
             fetchState: { response },
             reconcileReflectionLock: { _ in },
             reconcileMeteringRuntime: { _, _ in events.append("epoch-recovery") },
-            startLegacyDeviceTotal: { events.append("legacy-start"); return true },
             stopLegacyDeviceTotal: { events.append("legacy-stop") },
             reportEffectiveState: { events.append("heartbeat") }
         )
@@ -53,23 +52,20 @@ final class LegacyDeviceTotalObservationTests: XCTestCase {
         XCTAssertEqual(events, ["legacy-stop", "epoch-recovery", "heartbeat"])
     }
 
-    func testActiveStartsLegacyForProtocolOneCompatibility() async {
+    func testActiveLegacyModeStopsLegacyBeforeV2Recovery() async {
         let response = snapshot(mode: .active, protocolVersion: 1)
         let state = BigKidState(snapshot: response)
-        var starts = 0
         var stops = 0
         let poller = BigKidStatePoller(
             state: state,
             fetchState: { response },
             reconcileReflectionLock: { _ in },
-            startLegacyDeviceTotal: { starts += 1; return true },
             stopLegacyDeviceTotal: { stops += 1 }
         )
 
         await poller.refreshNow()
 
-        XCTAssertEqual(starts, 1)
-        XCTAssertEqual(stops, 0)
+        XCTAssertEqual(stops, 1)
     }
 
     func testAuthoritativeTransitionsConvergeWithoutPersistedLatch() async {
@@ -84,7 +80,6 @@ final class LegacyDeviceTotalObservationTests: XCTestCase {
             state: state,
             fetchState: { responses.removeFirst() },
             reconcileReflectionLock: { _ in },
-            startLegacyDeviceTotal: { events.append("start"); return true },
             stopLegacyDeviceTotal: { events.append("stop") }
         )
 
@@ -92,7 +87,7 @@ final class LegacyDeviceTotalObservationTests: XCTestCase {
         await poller.refreshNow()
         await poller.refreshNow()
 
-        XCTAssertEqual(events, ["start", "stop", "start"])
+        XCTAssertEqual(events, ["stop", "stop", "stop"])
     }
 
     func testT6ObservationKeepsLegacyChainPresentUntilReleaseGate() throws {
@@ -110,7 +105,6 @@ final class LegacyDeviceTotalObservationTests: XCTestCase {
         for symbol in [
             "legacyDeviceTotalMode",
             "evlin.bigkid.freeplay",
-            "startLegacyDeviceTotal",
             "stopLegacyDeviceTotal",
         ] {
             XCTAssertTrue(sources.contains(symbol), symbol)

@@ -311,6 +311,17 @@ nonisolated final class EarnedTimeStore: @unchecked Sendable {
 
     /// Persist the all-category selection from the capture flow.
     func saveMeasurementSelection(_ selection: FamilyActivitySelection) {
+        // FamilyActivitySelection contains Sets, whose JSON element order is not
+        // stable. Preserve the existing bytes when the semantic selection did
+        // not change so the metering generation digest remains stable.
+        if let existingData = measurementSelectionBytes,
+           let existingSelection = try? JSONDecoder().decode(
+               FamilyActivitySelection.self,
+               from: existingData
+           ),
+           existingSelection == selection {
+            return
+        }
         guard let data = try? JSONEncoder().encode(selection) else { return }
         defaults?.set(data, forKey: measurementKey)
         defaults?.synchronize()

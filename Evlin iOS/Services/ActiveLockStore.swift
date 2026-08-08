@@ -881,8 +881,13 @@ actor ActiveLockStore {
             persist()
         }
 
-        // Blocks
-        let blockedApps = Set(blockRecords.values.map { ManagedSettings.Application(bundleIdentifier: $0.bundleID) })
+        // Blocks. A token-backed Application when the record carries one —
+        // the form enforcement verifiably honors — with the bundle-id form as
+        // the unchanged fallback for records that predate token capture.
+        let blockedApps = Set(blockRecords.values.map { record in
+            record.appToken.map(ManagedSettings.Application.init(token:))
+                ?? ManagedSettings.Application(bundleIdentifier: record.bundleID)
+        })
         store.application.blockedApplications = blockedApps.isEmpty ? nil : blockedApps
 
         // Shields: apply the pure full-union projection. This is the ONLY
@@ -971,9 +976,26 @@ actor ActiveLockStore {
         else { return false }
         defaults.set(shieldsData, forKey: shieldsKey)
         defaults.set(blocksData, forKey: blocksKey)
-        guard defaults.synchronize() else { return false }
-        return defaults.data(forKey: shieldsKey) == shieldsData
-            && defaults.data(forKey: blocksKey) == blocksData
+        let synchronizeReturned = defaults.synchronize()
+        let shieldsReadBack = defaults.data(forKey: shieldsKey) == shieldsData
+        let blocksReadBack = defaults.data(forKey: blocksKey) == blocksData
+        return Self.persistVerificationResult(
+            synchronizeReturned: synchronizeReturned,
+            shieldsReadBack: shieldsReadBack,
+            blocksReadBack: blocksReadBack
+        )
+    }
+
+    /// `UserDefaults.synchronize()` is only a flush hint and can report false
+    /// on a device even when the values are already durable. The bytes read
+    /// back from the shared suite are the actual persistence contract.
+    nonisolated static func persistVerificationResult(
+        synchronizeReturned: Bool,
+        shieldsReadBack: Bool,
+        blocksReadBack: Bool
+    ) -> Bool {
+        _ = synchronizeReturned
+        return shieldsReadBack && blocksReadBack
     }
 
     /// Replace the actor snapshot with the complete persisted dictionaries.

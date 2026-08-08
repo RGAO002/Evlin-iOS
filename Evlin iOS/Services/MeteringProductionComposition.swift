@@ -45,6 +45,12 @@ nonisolated struct MeteringRecoverablePolicyInputs: Sendable {
     let enforcementSetID: UUID
 }
 
+enum MeteringRecoveryOutcome: Equatable {
+    case attempted
+    case skippedMissingConfiguration
+    case skippedConfigurationMismatch
+}
+
 nonisolated enum MeteringProductionComposition {
     static let appGroupSuiteName = "group.com.evlin.ios"
     static let baseURLKey = "evlin.baseURL"
@@ -54,8 +60,8 @@ nonisolated enum MeteringProductionComposition {
 
     private static let appInstanceID = UUID()
     private static let monitorInstanceID = UUID()
+    private static let pushInstanceID = UUID()
 
-    @MainActor
     static func makeRecoveryDriver(
         baseURL: URL,
         role: MeteringProcessRole,
@@ -102,15 +108,33 @@ nonisolated enum MeteringProductionComposition {
     }
 
     @MainActor
+    @discardableResult
     static func recoverFromSharedConfiguration(
         role: MeteringProcessRole,
         runtime: EarnedTimeRuntime? = nil,
         usageCountingAllowed: Bool? = nil,
+        expectedOwner: UUID? = nil,
+        expectedBaseURL: URL? = nil,
         store: DeviceEpochStore = .shared,
         clock: any MeteringClock = MeteringRuntimeClock.live(),
         transport: any MeteringHTTPTransport = URLSession.shared
-    ) async throws {
-        guard let configuration = sharedConfiguration() else { return }
+    ) async throws -> MeteringRecoveryOutcome {
+        guard let configuration = sharedConfiguration() else {
+            return .skippedMissingConfiguration
+        }
+        if let expectedOwner, configuration.owner != expectedOwner {
+            return .skippedConfigurationMismatch
+        }
+        if let expectedBaseURL {
+            let slashes = CharacterSet(charactersIn: "/")
+            let configured = configuration.baseURL.absoluteString
+                .trimmingCharacters(in: slashes)
+            let expected = expectedBaseURL.absoluteString
+                .trimmingCharacters(in: slashes)
+            guard configured == expected else {
+                return .skippedConfigurationMismatch
+            }
+        }
         let driver = makeRecoveryDriver(
             baseURL: configuration.baseURL,
             role: role,
@@ -119,6 +143,21 @@ nonisolated enum MeteringProductionComposition {
             transport: transport,
             clock: clock
         )
+
+        // Identity cleanup replaces the entire persisted epoch root. Finish it
+        // before planning the current policy, otherwise this pass writes the
+        // new route into the old root and cleanup immediately erases it. This
+        // is especially important when re-pairing reuses the same device UUID.
+        if try store.read().identityCleanupWork != nil {
+            try await driver.recover(ownerChildDeviceID: configuration.owner)
+            let postCleanup = try store.read()
+            guard postCleanup.identityCleanupWork == nil else {
+                return .attempted
+            }
+            guard postCleanup.ownerChildDeviceID == configuration.owner else {
+                return .skippedConfigurationMismatch
+            }
+        }
 
         try planDesiredPolicyIfPresent(
             owner: configuration.owner,
@@ -141,8 +180,34 @@ nonisolated enum MeteringProductionComposition {
                 runtime: runtime
             )
         }
+        // Belt and braces: whatever the caller passed, if the gate is open and
+        // the active epoch is still paused, reconcile again from stored state.
+        // The reconcile is idempotent, and this is the only thing standing
+        // between "a precondition returned early" and a pool that never moves
+        // again for the rest of the day.
+        if let storedRuntime = storedRuntimeSnapshot(now: clock.now),
+           EarnedTimeStore.shared.usageCountingAllowed,
+           activeEpochIsPaused(owner: configuration.owner, store: store) {
+            // Only the kid-side foreground poller supplies these two arguments,
+            // so every OTHER entry point — background silent wake, NSE
+            // self-heal, launch recovery — skipped the gate entirely and left a
+            // paused epoch paused forever. An epoch is born paused whenever a
+            // reflection or task is open at registration time (every fresh
+            // onboarding does exactly that), so the pool stayed frozen until
+            // someone happened to open Evlin on the kid's device (2026-08-07,
+            // reproduced on a freshly paired iPhone).
+            //
+            // The gate's live value and the runtime policy are both already
+            // mirrored into the shared store by that same poller, so any
+            // process can read them instead of demanding they be passed in.
+            try driver.reconcileUsageGate(
+                ownerChildDeviceID: configuration.owner,
+                allowed: EarnedTimeStore.shared.usageCountingAllowed,
+                runtime: storedRuntime
+            )
+        }
         try await driver.recover(ownerChildDeviceID: configuration.owner)
-        if role == .app {
+        if role == .app || role == .pushApplier {
             try await finalizeDesiredPolicyIfApplied(
                 owner: configuration.owner,
                 baseURL: configuration.baseURL,
@@ -151,6 +216,64 @@ nonisolated enum MeteringProductionComposition {
                 now: clock.now
             )
         }
+        return .attempted
+    }
+
+    /// True when the owner's currently active epoch is paused — the exact
+    /// state a missed resume leaves behind.
+    private static func activeEpochIsPaused(owner: UUID, store: DeviceEpochStore) -> Bool {
+        guard let state = try? store.read(),
+              state.ownerChildDeviceID == owner,
+              let routeID = state.activeRouteID,
+              let route = state.routes[routeID],
+              let epoch = state.epochs[route.epochID]
+        else { return false }
+        return epoch.status == .paused
+    }
+
+    /// Rebuild the runtime policy from the values the poller mirrors into the
+    /// shared store, so gate reconciliation no longer requires a live snapshot
+    /// handed in by a foreground caller. Returns nil before the first sync,
+    /// when there is genuinely nothing to reconcile against.
+    private static func storedRuntimeSnapshot(
+        now: Date,
+        epochStore: DeviceEpochStore = .shared
+    ) -> EarnedTimeRuntime? {
+        // Prefer the desired policy the NSE itself persists. The
+        // `EarnedTimeStore` mirror below is written ONLY by the kid app's
+        // foreground poller, so on a device that was force-quit right after
+        // pairing it is still empty — and the paused-epoch rescue that depends
+        // on it silently did nothing, which is exactly the case this rescue
+        // exists for (2026-08-07).
+        if let desired = (try? epochStore.read())?.desiredPolicy {
+            return EarnedTimeRuntime(
+                usageDate: desired.usageDate,
+                timezone: desired.canonicalTimezone,
+                policyRevision: desired.policyRevision,
+                dailyPoolMinutes: desired.dailyPoolMinutes,
+                deviceCapMinutes: desired.deviceCapMinutes,
+                remainingMinutes: desired.remainingMinutes
+                    ?? min(desired.dailyPoolMinutes, desired.deviceCapMinutes),
+                estimatedMinutes: EarnedTimeStore.shared.latestDeviceEstimate ?? 0
+            )
+        }
+        let store = EarnedTimeStore.shared
+        guard let usageDate = store.currentCanonicalPolicyUsageDate(now: now),
+              let timezone = store.runtimeTimezoneIdentifier,
+              let policyRevision = store.runtimePolicyRevision,
+              let pool = store.poolMinutes,
+              let cap = store.capMinutes
+        else { return nil }
+        let estimate = store.latestDeviceEstimate ?? 0
+        return EarnedTimeRuntime(
+            usageDate: usageDate,
+            timezone: timezone,
+            policyRevision: policyRevision,
+            dailyPoolMinutes: pool,
+            deviceCapMinutes: cap,
+            remainingMinutes: store.backendRemainingAtLastSync ?? max(0, min(pool, cap) - estimate),
+            estimatedMinutes: estimate
+        )
     }
 
     private static func planDesiredPolicyIfPresent(
@@ -181,6 +304,24 @@ nonisolated enum MeteringProductionComposition {
         guard let desired = state.desiredPolicy,
               desired.ownerChildDeviceID == owner
         else { return }
+        guard let canonicalToday = canonicalUsageDate(
+            at: now,
+            timezoneIdentifier: desired.canonicalTimezone
+        ), desired.usageDate == canonicalToday else {
+            MeteringFlightRecorder.emitFailure(
+                site: "composition.desiredPolicy",
+                verdict: "stale_desired_policy_ignored",
+                detail: MeteringFlightRecorder.detail([
+                    ("desired", desired.usageDate),
+                    ("today", canonicalUsageDate(
+                        at: now,
+                        timezoneIdentifier: desired.canonicalTimezone
+                    ) ?? "invalid_timezone"),
+                    ("timezone", desired.canonicalTimezone),
+                ])
+            )
+            return
+        }
         guard repairPersistedPolicyInputsIfPossible(
             owner: owner,
             state: state,
@@ -253,6 +394,24 @@ nonisolated enum MeteringProductionComposition {
             )
             throw error
         }
+    }
+
+    static func canonicalUsageDate(
+        at date: Date,
+        timezoneIdentifier: String
+    ) -> String? {
+        guard let timezone = TimeZone(identifier: timezoneIdentifier) else {
+            return nil
+        }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = Locale(identifier: "en_US_POSIX")
+        calendar.timeZone = timezone
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        guard let year = components.year,
+              let month = components.month,
+              let day = components.day
+        else { return nil }
+        return String(format: "%04d-%02d-%02d", year, month, day)
     }
 
     @discardableResult
@@ -478,6 +637,7 @@ nonisolated enum MeteringProductionComposition {
         switch role {
         case .app: appInstanceID
         case .deviceActivityMonitor: monitorInstanceID
+        case .pushApplier: pushInstanceID
         }
     }
 

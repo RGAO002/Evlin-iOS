@@ -47,11 +47,45 @@ final class MeteringT3DemolitionTests: XCTestCase {
         let fixture = try T3Fixture()
         defer { fixture.cleanUp() }
 
-        let outcome = try fixture.handle(observedAt: fixture.startedAt.addingTimeInterval(269))
+        // 200s for a 300s rung: 100s early, well past the 60s jitter the
+        // physical-time bound has allowed since 40948ab (this test predated
+        // that widening and sat red pinning the obsolete tolerance), and past
+        // the arm-grace calibration window.
+        let outcome = try fixture.handle(observedAt: fixture.startedAt.addingTimeInterval(200))
 
         XCTAssertEqual(outcome, .discarded(reason: "too_early"))
         XCTAssertTrue(try fixture.store.read().sampleWork.isEmpty)
         XCTAssertTrue(try fixture.store.read().shieldReferences.isEmpty)
+        XCTAssertTrue(try fixture.envelopes().isEmpty)
+        XCTAssertTrue(try fixture.shields().isEmpty)
+        XCTAssertEqual(fixture.projectionCount, 0)
+    }
+
+    func testArmGraceBurstIsAbsorbedAsCalibrationWithoutKillingRoute() throws {
+        // FIX-Q: a rung firing seconds after arm is Apple back-firing
+        // thresholds the day's counter has already passed — a calibration
+        // signal, not cheating and not a dead route. It must raise the
+        // exclusion high-water and nothing else: no sample, no shield, no
+        // `physical_events_consumed_too_early` death stamp (the stamp is what
+        // fed the mint→burst→mint repair storm of 2026-08-05 03:12).
+        let fixture = try T3Fixture()
+        defer { fixture.cleanUp() }
+
+        let outcome = try fixture.handle(observedAt: fixture.startedAt.addingTimeInterval(30))
+
+        XCTAssertEqual(outcome, .discarded(reason: "arm_grace_calibration"))
+        let state = try fixture.store.read()
+        let epoch = try XCTUnwrap(state.epochs.values.first)
+        XCTAssertEqual(epoch.excludedWhilePausedMinutes, 5)
+        XCTAssertEqual(epoch.lastRawThresholdMinutes, 5)
+        let install = try XCTUnwrap(state.installWork.values.first)
+        XCTAssertNotEqual(
+            install.retry.lastErrorCode,
+            "physical_events_consumed_too_early",
+            "an absorbed calibration burst must not death-stamp the route"
+        )
+        XCTAssertTrue(state.sampleWork.isEmpty)
+        XCTAssertTrue(state.shieldReferences.isEmpty)
         XCTAssertTrue(try fixture.envelopes().isEmpty)
         XCTAssertTrue(try fixture.shields().isEmpty)
         XCTAssertEqual(fixture.projectionCount, 0)

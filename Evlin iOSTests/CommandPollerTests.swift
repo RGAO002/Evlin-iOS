@@ -461,6 +461,56 @@ final class CommandPollerTests: XCTestCase {
         XCTAssertEqual(pollCount, 2, "Concurrent wake should trigger one follow-up poll, not get dropped")
     }
 
+    /// A coalesced silent wake must keep the APNs completion path alive until
+    /// the in-flight poll performs its follow-up pass and owner recovery.
+    /// Returning early lets iOS suspend the process with a durable limit
+    /// command still waiting for the main-app owner to arm it.
+    func testCoalescedOneShotPollWaitsForInFlightOwnerRecovery() async {
+        let expectedID = UUID(uuidString: "ABCDEF00-0000-0000-0000-000000000014")!
+        poller.childDeviceIDProvider = { expectedID }
+
+        var pollCount = 0
+        var recoveries = 0
+        var firstPollContinuation: CheckedContinuation<Void, Never>?
+        let firstPollStarted = expectation(description: "first poll started")
+        poller.appLimitRecoveryOverride = { recoveries += 1 }
+        poller.pollCommandsOverride = { _, _ in
+            pollCount += 1
+            if pollCount == 1 {
+                firstPollStarted.fulfill()
+                await withCheckedContinuation { continuation in
+                    firstPollContinuation = continuation
+                }
+            }
+            return []
+        }
+
+        let firstPoll = Task { await self.poller.pollOnceForCurrentDevice() }
+        await fulfillment(of: [firstPollStarted], timeout: 1.0)
+
+        var coalescedWakeReturned = false
+        let coalescedWake = Task {
+            await self.poller.pollOnceForCurrentDevice(
+                recoveryReason: .silentRemoteNotification
+            )
+            coalescedWakeReturned = true
+        }
+        await Task.yield()
+        await Task.yield()
+        XCTAssertFalse(
+            coalescedWakeReturned,
+            "A coalesced silent wake must not complete before owner recovery can run"
+        )
+
+        firstPollContinuation?.resume()
+        await firstPoll.value
+        await coalescedWake.value
+
+        XCTAssertTrue(coalescedWakeReturned)
+        XCTAssertEqual(pollCount, 2)
+        XCTAssertEqual(recoveries, 1, "The active poll must reach owner recovery before the coalesced wake completes")
+    }
+
     func testDelayedFetchDiscardsCommandsWhenStoredIdentityChanges() async throws {
         let oldID = UUID(uuidString: "ABCDEF00-0000-0000-0000-000000000010")!
         let newID = UUID(uuidString: "ABCDEF00-0000-0000-0000-000000000011")!

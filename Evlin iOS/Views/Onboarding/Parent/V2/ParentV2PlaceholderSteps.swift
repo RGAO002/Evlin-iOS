@@ -882,12 +882,16 @@ struct ParentFirstActionsStep: View {
                     switch phase {
                     case .landed:
                         OnboardingV2PrimaryButton("It works — continue", role: .parent) {
+                            releaseTestBlock()
                             onContinue(true)
                         }
                     case .timedOut, .failed:
                         OnboardingV2PrimaryButton("Try again", systemImage: "paperplane.fill",
                                                   role: .parent) { Task { await sendBlock() } }
-                        OnboardingV2SecondaryButton("Skip for now", action: onSkip)
+                        OnboardingV2SecondaryButton("Skip for now") {
+                            releaseTestBlock()
+                            onSkip()
+                        }
                     default:
                         OnboardingV2PrimaryButton(
                             phase == .idle ? "Send block" : "Sending…",
@@ -998,6 +1002,22 @@ struct ParentFirstActionsStep: View {
         // The block is a real, short, timed app-lock that auto-releases on the
         // kid device — no explicit cancel needed when the parent leaves.
     }
+
+    /// Continue/Skip after a sent test block queues the matching unblock so
+    /// the demo never leaves the kid's app locked for the rest of the timed
+    /// window — the 5-minute cap stays as the backstop, not the experience.
+    private func releaseTestBlock() {
+        guard blockCommandID != nil,
+              let familyID, let childDeviceID, let app = firstBlockApp
+        else { return }
+        Task {
+            _ = try? await apiClient.queueOnboardingAppUnblock(
+                familyID: familyID,
+                childDeviceID: childDeviceID,
+                target: .appID(app.alias_key)
+            )
+        }
+    }
 }
 
 // MARK: - 10.5 · Try a reflection (separate demo after the block)
@@ -1072,7 +1092,14 @@ struct ParentTryReflectionStep: View {
             },
             footer: {
                 if sent {
-                    OnboardingV2PrimaryButton("Done", role: .parent, action: onContinue)
+                    OnboardingV2PrimaryButton("Done", role: .parent) {
+                        // Entering the main UI must clear the demo reflection
+                        // NOW — the onDisappear cleanup below is a backstop
+                        // that navigation containers don't always fire, and
+                        // the 180s cap is the last resort, not the UX.
+                        clearDemoReflection()
+                        onContinue()
+                    }
                 } else {
                     OnboardingV2PrimaryButton(
                         busy ? "Sending…" : (errorText == nil ? "Send a reflection" : "Try again"),
@@ -1081,7 +1108,12 @@ struct ParentTryReflectionStep: View {
                         Task { await sendReflection() }
                     }
                     .disabled(busy || !hasKidDevice)
-                    OnboardingV2SecondaryButton("Skip", action: onContinue)
+                    OnboardingV2SecondaryButton("Skip") {
+                        // Skipping after a failed-looking send must still clear
+                        // a reflection that actually landed.
+                        clearDemoReflection()
+                        onContinue()
+                    }
                 }
                 if let onBack { OnboardingV2BackLink(action: onBack) }
             }
@@ -1089,13 +1121,54 @@ struct ParentTryReflectionStep: View {
         .onDisappear {
             // Auto-clear at setup end: cancel the onboarding reflection when the
             // parent leaves this step (the short cap is the backstop).
-            if let rid = reflectionID {
-                Task { try? await apiClient.cancelChildReflection(reflectionId: rid) }
-            }
+            clearDemoReflection()
         }
     }
 
     @MainActor
+    /// Looks for a reflection this step caused but never learned the id of.
+    /// Returns true once one is adopted.
+    @discardableResult
+    private func adoptLiveReflection(
+        childDeviceID: UUID,
+        attempts: Int = 10,
+        gapSeconds: Double = 2
+    ) async -> Bool {
+        for attempt in 0..<attempts {
+            if attempt > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(gapSeconds * 1_000_000_000))
+            }
+            if let state = try? await apiClient.fetchParentChildState(
+                childDeviceID: childDeviceID
+            ), let live = state.reflectionRequest {
+                reflectionID = live.id
+                sent = true
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Clears the demo reflection on the way into the main UI. Must not depend
+    /// on `reflectionID` being known: when adoption lost the race the id is
+    /// nil while a real reflection is live on the kid's phone, which is
+    /// exactly the case that stranded one through onboarding (2026-08-06).
+    private func clearDemoReflection() {
+        if let rid = reflectionID {
+            reflectionID = nil
+            Task { try? await apiClient.cancelChildReflection(reflectionId: rid) }
+            return
+        }
+        guard let childDeviceID else { return }
+        Task {
+            if let state = try? await apiClient.fetchParentChildState(
+                childDeviceID: childDeviceID
+            ), let live = state.reflectionRequest {
+                try? await apiClient.cancelChildReflection(reflectionId: live.id)
+            }
+        }
+    }
+
     private func sendReflection() async {
         // P6: no silent onContinue() here — a missing device id renders the
         // explained/disabled state above instead of faking a sent reflection.
@@ -1112,6 +1185,20 @@ struct ParentTryReflectionStep: View {
             reflectionID = rid
             sent = true
         } catch {
+            // The trigger runs Gemini content generation server-side and can
+            // outlive the client's timeout — the request then COMPLETES on the
+            // backend while this catch fires, and the kid's phone shows a
+            // reflection the parent was just told failed (2026-08-05). Before
+            // declaring failure, ask the state endpoint whether a reflection
+            // actually landed; if it did, adopt it (which also restores the
+            // id the cleanup paths need to auto-clear it).
+            //
+            // Poll, don't peek once: generation finishes AFTER the timeout by
+            // definition, so a single immediate probe usually runs while the
+            // row still does not exist (2026-08-06: probe lost the race by
+            // seconds, so the parent saw "couldn't send" AND — because no id
+            // was adopted — nothing auto-cleared it afterwards).
+            if await adoptLiveReflection(childDeviceID: childDeviceID) { return }
             // P6: mirror ParentFirstActionsStep's failed treatment — honest
             // inline error + the button becomes "Try again".
             errorText = "Couldn't send the reflection. Check your connection and try again."

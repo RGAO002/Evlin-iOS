@@ -97,8 +97,14 @@ final class MeteringFlightRecorderTests: XCTestCase {
         defer { fixture.cleanup() }
 
         // Threshold 5 needs 5 minutes of wall clock since the epoch started.
+        // Observed 2 minutes in: past FIX-Q's 90-second arm-calibration grace
+        // (a bell inside it is an Apple back-fire, absorbed rather than judged),
+        // so this is the genuine anti-cheat rejection.
         let outcome = try fixture.store.enqueueAuthorizedV2Callback(
-            fixture.input(threshold: 5, observedAt: fixture.start),
+            fixture.input(
+                threshold: 5,
+                observedAt: fixture.start.addingTimeInterval(120)
+            ),
             owner: fixture.owner
         )
         XCTAssertEqual(outcome, .discarded(reason: "too_early"))
@@ -212,8 +218,14 @@ final class MeteringFlightRecorderTests: XCTestCase {
         XCTAssertEqual(event.reason, "absorbed")
         XCTAssertEqual(event.app?.contains("trigger=rekick:watchdog"), true)
         XCTAssertEqual(event.transition?.before, "base:12+raw:10")
-        XCTAssertEqual(event.transition?.after, "base:22+raw:0")
-        XCTAssertEqual(event.nums?.base, 22)
+        // The raw high-water is only an OBSERVATION — this fixture has no
+        // succeeded sample work, so the backend never accepted those 10
+        // minutes and the absorb must drop them instead of promoting them into
+        // the base. (Carrying raw blindly is the poison that inflated bases
+        // past the pool; `testAbsorbCarriesOnlyBackendAcceptedProgress...`
+        // covers the accepted case.)
+        XCTAssertEqual(event.transition?.after, "base:12+raw:0")
+        XCTAssertEqual(event.nums?.base, 12)
     }
 }
 

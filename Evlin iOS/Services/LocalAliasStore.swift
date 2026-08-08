@@ -2,6 +2,12 @@ import Foundation
 import FamilyControls
 import ManagedSettings
 
+extension Notification.Name {
+    static let evlinCatalogConfirmationChanged = Notification.Name(
+        "evlin.catalogConfirmationChanged"
+    )
+}
+
 struct LocalCatalogAppTarget: Identifiable, Equatable, Sendable {
     let aliasKey: UUID
     let label: String
@@ -39,7 +45,12 @@ final class LocalAliasStore: @unchecked Sendable {
 
     // MARK: - Categories
 
-    func saveCategoryToken(_ token: ActivityCategoryToken, forName name: String, catalogAliasKey: UUID? = nil) {
+    func saveCategoryToken(
+        _ token: ActivityCategoryToken,
+        forName name: String,
+        catalogAliasKey: UUID? = nil,
+        catalogChildDeviceID: UUID? = nil
+    ) {
         var dict = loadCategoryDict()
         if let data = _encodeTokenJSON(token) {
             dict[name.lowercased()] = data
@@ -48,7 +59,8 @@ final class LocalAliasStore: @unchecked Sendable {
                 saveCatalogAliasKey(
                     catalogAliasKey,
                     targetType: .category,
-                    encodedTokenKey: data.base64EncodedString()
+                    encodedTokenKey: data.base64EncodedString(),
+                    childDeviceID: catalogChildDeviceID
                 )
             }
         }
@@ -67,7 +79,8 @@ final class LocalAliasStore: @unchecked Sendable {
         token: ApplicationToken,
         displayName: String?,
         bundleIdentifier: String?,
-        catalogAliasKey: UUID? = nil
+        catalogAliasKey: UUID? = nil,
+        catalogChildDeviceID: UUID? = nil
     ) {
         guard let data = _encodeTokenJSON(token) else { return }
         var tokMap = loadApplicationTokenDict()
@@ -89,7 +102,8 @@ final class LocalAliasStore: @unchecked Sendable {
             saveCatalogAliasKey(
                 catalogAliasKey,
                 targetType: .app,
-                encodedTokenKey: data.base64EncodedString()
+                encodedTokenKey: data.base64EncodedString(),
+                childDeviceID: catalogChildDeviceID
             )
         }
     }
@@ -536,15 +550,63 @@ final class LocalAliasStore: @unchecked Sendable {
     func saveCatalogAliasKey(
         _ aliasKey: UUID,
         targetType: CatalogListMemberTargetType,
-        encodedTokenKey: String
+        encodedTokenKey: String,
+        childDeviceID: UUID? = nil
     ) {
         let key = encodedTokenKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return }
         var dict = loadCatalogAliasKeyIndex()
-        let record = CatalogAliasKeyRecord(targetType: targetType, aliasKey: aliasKey)
+        let record = CatalogAliasKeyRecord(
+            targetType: targetType,
+            aliasKey: aliasKey,
+            childDeviceID: childDeviceID
+        )
         guard let data = try? JSONEncoder().encode(record) else { return }
         dict[key] = data
         persistCatalogAliasKeyIndex(dict)
+        if let childDeviceID {
+            NotificationCenter.default.post(
+                name: .evlinCatalogConfirmationChanged,
+                object: childDeviceID
+            )
+        }
+    }
+
+    func hasCatalogConfirmation(
+        targetType: CatalogListMemberTargetType,
+        encodedTokenKey: String,
+        childDeviceID: UUID
+    ) -> Bool {
+        let key = encodedTokenKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty,
+              let data = loadCatalogAliasKeyIndex()[key],
+              let record = try? JSONDecoder().decode(CatalogAliasKeyRecord.self, from: data)
+        else { return false }
+        return record.targetType == targetType && record.childDeviceID == childDeviceID
+    }
+
+    func hasCatalogConfirmation(
+        forApplicationToken token: ApplicationToken,
+        childDeviceID: UUID
+    ) -> Bool {
+        guard let key = encodedTokenKey(token) else { return false }
+        return hasCatalogConfirmation(
+            targetType: .app,
+            encodedTokenKey: key,
+            childDeviceID: childDeviceID
+        )
+    }
+
+    func hasCatalogConfirmation(
+        forCategoryToken token: ActivityCategoryToken,
+        childDeviceID: UUID
+    ) -> Bool {
+        guard let key = encodedTokenKey(token) else { return false }
+        return hasCatalogConfirmation(
+            targetType: .category,
+            encodedTokenKey: key,
+            childDeviceID: childDeviceID
+        )
     }
 
     func catalogListMembers(
@@ -587,6 +649,7 @@ final class LocalAliasStore: @unchecked Sendable {
     private struct CatalogAliasKeyRecord: Codable {
         let targetType: CatalogListMemberTargetType
         let aliasKey: UUID
+        let childDeviceID: UUID?
     }
 
     private func loadCategoryDict() -> [String: Data] {

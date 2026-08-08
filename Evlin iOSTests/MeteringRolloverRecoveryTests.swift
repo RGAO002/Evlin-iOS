@@ -338,6 +338,127 @@ final class MeteringRolloverRecoveryTests: XCTestCase {
         XCTAssertEqual(state.rolloverEffectsWork?.retry.terminal, .succeeded)
     }
 
+    func testMidnightAbandonsFailedSameDayCandidateBeforeStartingRollover() async throws {
+        let fixture = try seedActiveAndReservedRoutes()
+        let initial = try store.read()
+        let priorRoute = try XCTUnwrap(initial.routes[fixture.oldRouteID])
+        let priorGeneration = try XCTUnwrap(initial.generations[priorRoute.generationID])
+        let candidateKey = MeteringGenerationKey(
+            protocolVersion: 2,
+            childDeviceID: owner,
+            canonicalTimezone: priorGeneration.canonicalTimezone,
+            policyRevision: "stale-same-day-candidate",
+            measurementSelectionDigest: priorGeneration.measurementSelectionDigest,
+            enforcementSetID: priorGeneration.enforcementSetID
+        )
+        let candidatePlan = try store.reconcileMeteringHorizon(MeteringHorizonRequest(
+            ownerChildDeviceID: owner,
+            today: "2026-07-17",
+            generationKey: candidateKey,
+            persistedSelectionBytes: priorGeneration.measurementSelectionBytes,
+            poolMinutes: 120,
+            deviceCapMinutes: 60,
+            authoritativeBaseAcceptedMinutes: 0,
+            now: start.addingTimeInterval(3_600)
+        ))
+        let candidateRouteID = try XCTUnwrap(
+            candidatePlan.routeIDsByUsageDate["2026-07-17"]
+        )
+        let candidateState = try store.read()
+        let candidateRoute = try XCTUnwrap(candidateState.routes[candidateRouteID])
+        let candidateEpochID = candidateRoute.epochID
+        let candidateInstallID = try XCTUnwrap(
+            candidateState.installWork.first {
+                $0.value.routeID == candidateRouteID
+            }?.key
+        )
+        let candidateRegistrationID = try XCTUnwrap(
+            candidateState.registrationWork.first {
+                $0.value.routeID == candidateRouteID
+            }?.key
+        )
+        let staleHandoffID = UUID()
+        try store.transaction(expectedOwner: owner) { state in
+            var installed = try XCTUnwrap(state.routes[candidateRouteID])
+            installed.lifecycle = .active
+            installed.installedSchedule = installed.plannedSchedule
+            installed.installedEvents = installed.plannedEvents
+            state.routes[candidateRouteID] = installed
+            state.epochs[candidateEpochID]?.registeredAt = start.addingTimeInterval(3_605)
+            state.installWork[candidateInstallID]?.authorization = .registered
+            state.installWork[candidateInstallID]?.phase = .dualActive
+            state.installWork[candidateInstallID]?.retry.terminal = .succeeded
+            state.registrationWork[candidateRegistrationID]?.retry.terminal = .succeeded
+            let activationID = UUID()
+            state.activationWork[activationID] = EpochActivationWork(
+                workID: activationID,
+                ownerChildDeviceID: owner,
+                epochID: candidateEpochID,
+                routeID: candidateRouteID,
+                request: EpochActivationRequestDTO(
+                    protocolVersion: 2,
+                    deviceID: owner,
+                    routeID: candidateRouteID,
+                    verifiedAt: start.addingTimeInterval(3_606)
+                ),
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: start.addingTimeInterval(3_606),
+                    lastErrorCode: "route_superseded",
+                    terminal: .superseded
+                ),
+                createdAt: start.addingTimeInterval(3_606)
+            )
+            state.v2RouteHandoff = V2RouteHandoff(
+                handoffID: staleHandoffID,
+                ownerChildDeviceID: owner,
+                fromGenerationID: priorRoute.generationID,
+                fromEpochID: fixture.oldEpochID,
+                fromRouteID: fixture.oldRouteID,
+                toGenerationID: candidatePlan.generationID,
+                toEpochID: candidateEpochID,
+                toRouteID: candidateRouteID,
+                phase: .cutoverReady,
+                priorRouteInputClosedAt: start.addingTimeInterval(3_606),
+                registrationAcknowledgedAt: start.addingTimeInterval(3_605),
+                activationAcknowledgedAt: nil,
+                priorStopAcknowledgedAt: nil,
+                createdAt: start.addingTimeInterval(3_600)
+            )
+        }
+
+        let center = RolloverCenter()
+        center.seed(DeviceActivityName(priorRoute.activityName))
+        center.seed(DeviceActivityName(candidateRoute.activityName))
+        let transport = RolloverTransport(results: [
+            registrationResult(epochID: fixture.newEpochID),
+            activationResult(epochID: fixture.newEpochID)
+        ])
+
+        try await makeDriver(
+            center: center,
+            transport: transport,
+            clock: RolloverClock(now: start.addingTimeInterval(86_430))
+        ).recover(ownerChildDeviceID: owner)
+
+        let final = try store.read()
+        XCTAssertEqual(final.activeRouteID, fixture.newRouteID)
+        XCTAssertEqual(final.rolloverEffectsWork?.retry.terminal, .succeeded)
+        XCTAssertNotEqual(final.routes[candidateRouteID]?.lifecycle, .active)
+        XCTAssertFalse(center.activities.contains(DeviceActivityName(candidateRoute.activityName)))
+        XCTAssertFalse(final.registrationWork.values.contains {
+            $0.routeID == candidateRouteID && $0.retry.terminal == .pending
+        })
+        XCTAssertFalse(final.activationWork.values.contains {
+            $0.routeID == candidateRouteID && $0.retry.terminal == .pending
+        })
+        XCTAssertFalse(final.sampleWork.values.contains {
+            $0.routeID == candidateRouteID && $0.retry.terminal == .pending
+        })
+        XCTAssertNotEqual(final.v2RouteHandoff?.handoffID, staleHandoffID)
+    }
+
     func testColdReopenRepairsLegacySupersededNewDayInstallBeforeRollover() async throws {
         let fixture = try seedActiveAndReservedRoutes()
         try store.transaction(expectedOwner: owner) { state in
@@ -650,6 +771,53 @@ final class MeteringRolloverRecoveryTests: XCTestCase {
         XCTAssertEqual(state.activeRouteID, fixture.newRouteID)
         XCTAssertEqual(center.stopCalls, [[oldName]])
         XCTAssertEqual(resetEffects.count, MeteringRolloverLocalEffect.allCases.count)
+    }
+
+    func testTerminalRolloverRegistrationIsNotRemintedOnEveryRecoveryPass() async throws {
+        let fixture = try seedActiveAndReservedRoutes()
+        _ = try store.prepareCanonicalRollover(
+            owner: owner,
+            toUsageDate: "2026-07-18",
+            now: start.addingTimeInterval(86_400)
+        )
+        let initial = try store.read()
+        let center = RolloverCenter()
+        center.seed(DeviceActivityName(
+            try XCTUnwrap(initial.routes[fixture.oldRouteID]?.activityName)
+        ))
+        center.seed(DeviceActivityName(
+            try XCTUnwrap(initial.routes[fixture.newRouteID]?.activityName)
+        ))
+        let transport = RolloverTransport(results: [
+            (
+                Data(#"{"detail":"policy_revision_mismatch"}"#.utf8),
+                httpResponse(status: 409)
+            ),
+        ])
+        let clock = RolloverClock(now: start.addingTimeInterval(86_430))
+        let driver = makeDriver(
+            center: center,
+            transport: transport,
+            clock: clock
+        )
+
+        try await driver.recover(ownerChildDeviceID: owner)
+        let afterRejection = try store.read()
+        let firstRegistrations = afterRejection.registrationWork.values.filter {
+            $0.epochID == fixture.newEpochID && $0.routeID == fixture.newRouteID
+        }
+        XCTAssertEqual(firstRegistrations.count, 1)
+        XCTAssertTrue(firstRegistrations.allSatisfy { $0.retry.terminal != .pending })
+
+        try await driver.recover(ownerChildDeviceID: owner)
+        let afterRetryPass = try store.read()
+        XCTAssertEqual(
+            afterRetryPass.registrationWork.values.filter {
+                $0.epochID == fixture.newEpochID && $0.routeID == fixture.newRouteID
+            }.count,
+            1,
+            "a terminal registration is immutable history; minting a new work ID for the same rollover tuple creates a 10-second hot loop"
+        )
     }
 
     private func seedActiveAndReservedRoutes() throws -> (

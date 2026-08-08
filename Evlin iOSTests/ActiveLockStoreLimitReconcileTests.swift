@@ -18,15 +18,18 @@ final class ActiveLockStoreLimitReconcileTests: XCTestCase {
     private let suiteName = "group.com.evlin.ios"
     private let shieldsKey = "evlin.shieldRecords"
     private let blocksKey = "evlin.blockRecords"
+    private let lastRecomputeKey = "evlin.lastRecompute"
 
     override func setUp() async throws {
         UserDefaults(suiteName: suiteName)?.removeObject(forKey: shieldsKey)
         UserDefaults(suiteName: suiteName)?.removeObject(forKey: blocksKey)
+        UserDefaults(suiteName: suiteName)?.removeObject(forKey: lastRecomputeKey)
     }
 
     override func tearDown() async throws {
         UserDefaults(suiteName: suiteName)?.removeObject(forKey: shieldsKey)
         UserDefaults(suiteName: suiteName)?.removeObject(forKey: blocksKey)
+        UserDefaults(suiteName: suiteName)?.removeObject(forKey: lastRecomputeKey)
     }
 
     // MARK: - NEGATIVE REGRESSION (the Critical)
@@ -107,6 +110,32 @@ final class ActiveLockStoreLimitReconcileTests: XCTestCase {
         XCTAssertFalse(
             present.contains(where: { $0.recordKey == limitRecord.recordKey }),
             "Stale in-memory .limit record was not dropped after the extension cleared it on disk."
+        )
+    }
+
+    /// A release can be redelivered after a prior process removed the durable
+    /// limit record but failed to clear iOS's ManagedSettings projection. The
+    /// durable map is already correct (empty), yet this delivery must still
+    /// write that authoritative empty projection to iOS. Fred, 2026-08-01:
+    /// Instagram remained shielded after the midnight 1m rule was raised to
+    /// 20m until foreground recovery reprojected the same empty map.
+    func test_noop_limit_release_reprojects_authoritative_empty_state() async throws {
+        let store = ActiveLockStore()
+        UserDefaults(suiteName: suiteName)?.removeObject(forKey: lastRecomputeKey)
+        let decision = AppLimitEnforcementDecision.release(
+            ruleID: UUID(),
+            recordKey: "exactApp:com.burbn.instagram"
+        )
+
+        let changed = await store.applyLimitConvergence(decision, now: Date())
+
+        XCTAssertFalse(changed, "the durable shield map was already empty")
+        let diagnostic = try XCTUnwrap(
+            UserDefaults(suiteName: suiteName)?.string(forKey: lastRecomputeKey)
+        )
+        XCTAssertTrue(
+            diagnostic.contains("shields=0"),
+            "a no-op release must still project the authoritative empty shield map"
         )
     }
 

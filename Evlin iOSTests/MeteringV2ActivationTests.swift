@@ -7,7 +7,7 @@ import XCTest
 @MainActor
 final class MeteringV2ActivationTests: XCTestCase {
     private let owner = UUID(uuidString: "C0123456-789A-4BCD-8EFA-0123456789AB")!
-    private let start = Date(timeIntervalSince1970: 1_784_000_000)
+    private let start = Date(timeIntervalSince1970: 1_784_289_600)
     private let baseURL = URL(string: "https://example.invalid/api/v1")!
 
     func testInitialActivationKeepsLegacyUntilBackendAcknowledgesThenSelectsV2() async throws {
@@ -37,7 +37,7 @@ final class MeteringV2ActivationTests: XCTestCase {
         ]])
     }
 
-    func testActivationFailureDoesNotRatchetOrStopLegacyLane() async throws {
+    func testActivationFailureReturnsToV2PendingInsteadOfFallingBackToV1() async throws {
         let fixture = try makeInitialFixture()
         defer { fixture.cleanup() }
         fixture.transport.results = [
@@ -50,15 +50,74 @@ final class MeteringV2ActivationTests: XCTestCase {
         let state = try fixture.store.read()
         let activation = try XCTUnwrap(state.activationWork.values.first)
         XCTAssertEqual(fixture.transport.requests.count, 1)
-        XCTAssertEqual(activation.retry.terminal, .rejected)
+        XCTAssertEqual(activation.retry.terminal, .pending)
         XCTAssertEqual(activation.retry.lastErrorCode, "epoch_paused")
         XCTAssertNil(activation.claim)
-        XCTAssertEqual(state.ratchets[owner]?.localSelection, .v1)
-        XCTAssertEqual(state.ratchets[owner]?.advertisedVersion, 1)
+        XCTAssertGreaterThan(activation.retry.nextAttemptAt, start)
+        XCTAssertEqual(state.ratchets[owner]?.localSelection, .v2Pending)
+        XCTAssertEqual(state.ratchets[owner]?.advertisedVersion, 2)
         XCTAssertEqual(state.legacy?.phase, .activeV1)
+        XCTAssertFalse(LegacyMeteringActivity.isAuthorized(
+            generation: try XCTUnwrap(state.legacy?.active),
+            store: fixture.store
+        ))
         XCTAssertEqual(state.epochs[fixture.candidateEpochID]?.status, .paused)
         XCTAssertEqual(state.routes[fixture.candidateRouteID]?.lifecycle, .planned)
         XCTAssertTrue(fixture.center.stopCalls.isEmpty)
+    }
+
+    func testHardInitialActivationRejectionRetiresCandidateForFreshV2Replan() async throws {
+        let fixture = try makeInitialFixture()
+        defer { fixture.cleanup() }
+        let original = try fixture.store.read()
+        let generation = try XCTUnwrap(original.generations[fixture.candidateGenerationID])
+        fixture.transport.results = [
+            (Data("{\"detail\":\"activation_route_mismatch\"}".utf8), httpResponse(status: 409))
+        ]
+
+        try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+
+        let rejected = try fixture.store.read()
+        XCTAssertEqual(rejected.activationWork.values.first?.retry.terminal, .rejected)
+        XCTAssertEqual(rejected.activationWork.values.first?.retry.lastErrorCode, "activation_route_mismatch")
+        XCTAssertEqual(rejected.routes[fixture.candidateRouteID]?.lifecycle, .tombstoned)
+        XCTAssertEqual(rejected.epochs[fixture.candidateEpochID]?.status, .retired)
+        XCTAssertEqual(rejected.epochs[fixture.candidateEpochID]?.retireReason, .activationSuperseded)
+        XCTAssertNotNil(rejected.generations[fixture.candidateGenerationID]?.retiredAt)
+        XCTAssertNil(rejected.activeGenerationID)
+        XCTAssertNil(rejected.activeEpochID)
+        XCTAssertNil(rejected.activeRouteID)
+        XCTAssertEqual(rejected.ratchets[owner]?.localSelection, .v2Pending)
+
+        let request = MeteringHorizonRequest(
+            ownerChildDeviceID: owner,
+            today: "2026-07-17",
+            generationKey: MeteringGenerationKey(
+                protocolVersion: generation.protocolVersion,
+                childDeviceID: generation.childDeviceID,
+                canonicalTimezone: generation.canonicalTimezone,
+                policyRevision: generation.policyRevision,
+                measurementSelectionDigest: generation.measurementSelectionDigest,
+                enforcementSetID: generation.enforcementSetID
+            ),
+            persistedSelectionBytes: generation.measurementSelectionBytes,
+            poolMinutes: 120,
+            deviceCapMinutes: 120,
+            authoritativeBaseAcceptedMinutes: 0,
+            now: start.addingTimeInterval(10)
+        )
+        let replanned = try fixture.store.reconcileMeteringHorizon(request)
+        let recovered = try fixture.store.read()
+        let replacementRouteID = try XCTUnwrap(replanned.routeIDsByUsageDate["2026-07-17"])
+
+        XCTAssertNotEqual(replanned.generationID, fixture.candidateGenerationID)
+        XCTAssertNotEqual(replacementRouteID, fixture.candidateRouteID)
+        XCTAssertEqual(recovered.activeGenerationID, replanned.generationID)
+        XCTAssertEqual(recovered.activeEpochID, recovered.routes[replacementRouteID]?.epochID)
+        XCTAssertEqual(recovered.routes[replacementRouteID]?.lifecycle, .planned)
+        XCTAssertTrue(recovered.registrationWork.values.contains {
+            $0.routeID == replacementRouteID && $0.retry.terminal == .pending
+        })
     }
 
     func testInitialDualActiveRequiresVerifiedInstallAndKeepsLegacyCountable() async throws {
@@ -121,6 +180,30 @@ final class MeteringV2ActivationTests: XCTestCase {
         XCTAssertTrue(state.activationWork.isEmpty)
         XCTAssertEqual(state.ratchets[owner]?.localSelection, .v1)
         XCTAssertEqual(state.legacy?.phase, .activeV1)
+    }
+
+    func testDualActiveRecoveryPromotesVerifiedSuccessorAfterPriorActivationWasSuperseded() async throws {
+        let fixture = try makeInitialFixture()
+        defer { fixture.cleanup() }
+        try fixture.enterDualActiveRecoveryGap()
+        fixture.transport.results = [activationResult(epochID: fixture.candidateEpochID)]
+
+        try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+
+        let state = try fixture.store.read()
+        let candidateActivation = try XCTUnwrap(state.activationWork.values.first(where: {
+            $0.epochID == fixture.candidateEpochID
+                && $0.routeID == fixture.candidateRouteID
+        }))
+        XCTAssertEqual(fixture.transport.requests.map(\.url?.path), [
+            "/api/v1/child/earned-time/epochs/\(fixture.candidateEpochID.uuidString.lowercased())/activation"
+        ])
+        XCTAssertEqual(candidateActivation.retry.terminal, .succeeded)
+        XCTAssertEqual(state.ratchets[owner]?.localSelection, .v2)
+        XCTAssertEqual(state.activeEpochID, fixture.candidateEpochID)
+        XCTAssertEqual(state.activeRouteID, fixture.candidateRouteID)
+        XCTAssertEqual(state.routes[fixture.candidateRouteID]?.lifecycle, .active)
+        XCTAssertEqual(state.installWork[fixture.candidateInstallID]?.phase, .active)
     }
 
     func testLostActivationResponseSurvivesRestartAndOnlyThenStopsLegacy() async throws {
@@ -420,6 +503,14 @@ final class MeteringV2ActivationTests: XCTestCase {
         try fixture.addPendingPriorSample()
         fixture.transport.errors = [.noResponse]
 
+        let before = try fixture.store.read()
+        let pendingSample = try XCTUnwrap(before.sampleWork.values.first)
+        XCTAssertEqual(pendingSample.authorization, .v2Deliverable)
+        XCTAssertEqual(pendingSample.routeID, fixture.priorRouteID)
+        XCTAssertEqual(before.routes[fixture.priorRouteID]?.lifecycle, .active)
+        XCTAssertEqual(before.epochs[fixture.priorEpochID]?.status, .active)
+        XCTAssertEqual(before.dueWork(now: start).first?.kind, .sample)
+
         try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
 
         let state = try fixture.store.read()
@@ -592,6 +683,9 @@ final class MeteringV2ActivationTests: XCTestCase {
     func testTerminalRejectedReplacementYieldsToNewerPolicyCandidate() async throws {
         let fixture = try makeReplacementFixture()
         defer { fixture.cleanup() }
+        let candidateActivityName = try XCTUnwrap(
+            fixture.store.read().routes[fixture.candidateRouteID]?.activityName
+        )
         try fixture.addPreplannedReplacement()
         try fixture.addPendingCandidateRegistration()
         fixture.transport.errors = [.noResponse]
@@ -606,9 +700,53 @@ final class MeteringV2ActivationTests: XCTestCase {
         XCTAssertEqual(state.activeRouteID, fixture.priorRouteID)
         XCTAssertEqual(state.v2RouteHandoff?.fromRouteID, fixture.priorRouteID)
         XCTAssertEqual(state.v2RouteHandoff?.toRouteID, fixture.recoveryRouteID)
-        XCTAssertEqual(state.routes[fixture.candidateRouteID]?.lifecycle, .tombstoned)
-        XCTAssertEqual(state.epochs[fixture.candidateEpochID]?.retireReason, .activationSuperseded)
-        XCTAssertEqual(state.installWork[fixture.candidateInstallID]?.phase, .stopped)
+        XCTAssertNotEqual(state.routes[fixture.candidateRouteID]?.lifecycle, .active)
+        XCTAssertFalse(fixture.center.activities.contains(DeviceActivityName(candidateActivityName)))
+        XCTAssertFalse(state.registrationWork.values.contains {
+            $0.routeID == fixture.candidateRouteID && $0.retry.terminal == .pending
+        })
+        XCTAssertFalse(state.activationWork.values.contains {
+            $0.routeID == fixture.candidateRouteID && $0.retry.terminal == .pending
+        })
+        XCTAssertFalse(state.sampleWork.values.contains {
+            $0.routeID == fixture.candidateRouteID && $0.retry.terminal == .pending
+        })
+    }
+
+    func testTerminalRejectedReplacementWithoutNewerCandidateReturnsToPrior() async throws {
+        let fixture = try makeReplacementFixture()
+        defer { fixture.cleanup() }
+        let candidateActivityName = try XCTUnwrap(
+            fixture.store.read().routes[fixture.candidateRouteID]?.activityName
+        )
+        try fixture.addPendingCandidateRegistration()
+        fixture.transport.errors = [.noResponse]
+
+        try await makeDriver(fixture).recover(ownerChildDeviceID: owner)
+        try fixture.rejectCandidateRegistration(code: "replacement_reason_mismatch")
+
+        try await makeDriver(fixture, at: start.addingTimeInterval(5))
+            .recover(ownerChildDeviceID: owner)
+
+        let state = try fixture.store.read()
+        XCTAssertNil(state.v2RouteHandoff)
+        XCTAssertEqual(state.activeGenerationID, fixture.priorGenerationID)
+        XCTAssertEqual(state.activeEpochID, fixture.priorEpochID)
+        XCTAssertEqual(state.activeRouteID, fixture.priorRouteID)
+        XCTAssertEqual(state.epochs[fixture.priorEpochID]?.status, .active)
+        XCTAssertEqual(state.routes[fixture.priorRouteID]?.lifecycle, .active)
+        XCTAssertNotEqual(state.epochs[fixture.candidateEpochID]?.status, .active)
+        XCTAssertNotEqual(state.routes[fixture.candidateRouteID]?.lifecycle, .active)
+        XCTAssertFalse(fixture.center.activities.contains(DeviceActivityName(candidateActivityName)))
+        XCTAssertFalse(state.registrationWork.values.contains {
+            $0.routeID == fixture.candidateRouteID && $0.retry.terminal == .pending
+        })
+        XCTAssertFalse(state.activationWork.values.contains {
+            $0.routeID == fixture.candidateRouteID && $0.retry.terminal == .pending
+        })
+        XCTAssertFalse(state.sampleWork.values.contains {
+            $0.routeID == fixture.candidateRouteID && $0.retry.terminal == .pending
+        })
     }
 
     func testSupersededAuditDoesNotAbandonSuccessfullyRegisteredCandidate() async throws {
@@ -763,7 +901,7 @@ final class MeteringV2ActivationTests: XCTestCase {
         )
     }
 
-    func testWaitingCandidateSampleDoesNotBlockItsRegistration() async throws {
+    func testWaitingCandidateSampleDoesNotBlockRegistrationOrBypassActivation() async throws {
         let fixture = try makeReplacementFixture()
         defer { fixture.cleanup() }
         try fixture.addPendingCandidateRegistration()
@@ -783,7 +921,8 @@ final class MeteringV2ActivationTests: XCTestCase {
         })
         XCTAssertEqual(
             state.sampleWork.values.first(where: { $0.routeID == fixture.candidateRouteID })?.authorization,
-            .v2Deliverable
+            .waitingForRegistration,
+            "registration must not make a handoff sample deliverable before activation"
         )
     }
 
@@ -905,7 +1044,7 @@ final class MeteringV2ActivationTests: XCTestCase {
             epochID: epochID,
             epochStatus: epochStatus,
             meteringProtocolVersion: 2,
-            snapshot: snapshot()
+            snapshot: epochStatus == .exhausted ? exhaustedSnapshot() : snapshot()
         )
         return (try! JSONEncoder().encode(response), httpResponse(status: 200))
     }
@@ -926,6 +1065,20 @@ final class MeteringV2ActivationTests: XCTestCase {
             childDayState: "available",
             usedMinutes: 0,
             remainingMinutes: 120,
+            counted: true,
+            warning: nil
+        )
+    }
+
+    private func exhaustedSnapshot() -> DeviceDaySnapshotDTO {
+        DeviceDaySnapshotDTO(
+            childDeviceID: owner,
+            usageDate: "2026-07-17",
+            estimatedMinutes: 120,
+            capMinutes: 120,
+            childDayState: "available",
+            usedMinutes: 120,
+            remainingMinutes: 0,
             counted: true,
             warning: nil
         )
@@ -1117,6 +1270,68 @@ private final class ActivationFixture {
                 claim: nil,
                 retry: retry(.succeeded),
                 createdAt: start
+            )
+        }
+    }
+
+    func enterDualActiveRecoveryGap() throws {
+        try store.transaction(expectedOwner: owner) { state in
+            let priorGeneration = makeGeneration(id: priorGenerationID, policy: "prior")
+            let priorEpoch = makeEpoch(
+                id: priorEpochID,
+                generation: priorGeneration,
+                registeredAt: start.addingTimeInterval(-60)
+            )
+            let priorRoute = makeRoute(
+                id: priorRouteID,
+                epoch: priorEpoch,
+                generation: priorGeneration,
+                name: "evlin.earned.superseded-prior",
+                lifecycle: .active,
+                createdAt: start.addingTimeInterval(-60)
+            )
+            let priorActivationID = UUID()
+
+            state.generations[priorGenerationID] = priorGeneration
+            state.epochs[priorEpochID] = priorEpoch
+            state.routes[priorRouteID] = priorRoute
+            state.installWork[priorInstallID] = ActivityInstallWork(
+                workID: priorInstallID,
+                ownerChildDeviceID: owner,
+                routeID: priorRouteID,
+                authorization: .registered,
+                phase: .dualActive,
+                claim: nil,
+                retry: retry(.pending),
+                createdAt: start.addingTimeInterval(-60)
+            )
+            state.activationWork[priorActivationID] = EpochActivationWork(
+                workID: priorActivationID,
+                ownerChildDeviceID: owner,
+                epochID: priorEpochID,
+                routeID: priorRouteID,
+                request: EpochActivationRequestDTO(
+                    protocolVersion: 2,
+                    deviceID: owner,
+                    routeID: priorRouteID,
+                    verifiedAt: start.addingTimeInterval(-55)
+                ),
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: start,
+                    lastErrorCode: "route_superseded",
+                    terminal: .superseded
+                ),
+                createdAt: start.addingTimeInterval(-55)
+            )
+            state.ratchets[owner] = MeteringOwnerRatchet(
+                ownerChildDeviceID: owner,
+                advertisedVersion: 2,
+                localSelection: .dualActive,
+                registeredV2At: start.addingTimeInterval(-60),
+                dualActiveAt: start.addingTimeInterval(-55),
+                activatedV2At: nil
             )
         }
     }
@@ -1413,8 +1628,8 @@ private final class ActivationFixture {
                 deviceID: owner,
                 usageDate: epoch.usageDate,
                 timezone: epoch.canonicalTimezone,
-                activityName: route.activityName,
-                eventName: route.plannedEvents[0].eventName,
+                activityName: MeteringSampleWireAliases.activityName(routeID: route.routeID),
+                eventName: MeteringSampleWireAliases.eventName(thresholdMinutes: 5),
                 thresholdMinutes: 5,
                 estimatedMinutes: 5,
                 observedAt: start,

@@ -1,4 +1,6 @@
 import Foundation
+import FamilyControls
+import ManagedSettings
 
 /// A block on a single app (by bundleID).
 /// Unique per bundleID. Permanent (expiresAt=nil) blocks lift only via
@@ -18,4 +20,11 @@ struct BlockRecord: Codable, Sendable, Equatable {
     /// means a timed block — DeviceActivityMonitor will fire at this
     /// instant and the extension will remove this record.
     var expiresAt: Date? = nil
+    /// Opaque per-device token, when one is known (catalog-verified command or
+    /// alias store). Purely additive: records without one keep the bundle-id
+    /// behavior, and no block is ever refused for lacking a token. Carried so
+    /// `blockedApplications` can hold a token-backed `Application` — the form
+    /// enforcement verifiably honors — instead of relying solely on the
+    /// bundle-id form (under suspicion since 2026-08-06, unresolved).
+    var appToken: ApplicationToken? = nil
 }

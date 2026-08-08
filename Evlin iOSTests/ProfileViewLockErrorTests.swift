@@ -9,6 +9,49 @@ import XCTest
 
 final class ProfileViewLockErrorTests: XCTestCase {
 
+    func test_profileIdentityChangeDismissesAChildThatNoLongerExists() {
+        XCTAssertEqual(
+            ProfileRouteIdentityReconciler.action(
+                openChildID: "old-child",
+                liveChildIDs: ["new-child"],
+                pairedDeviceOwnerChildID: "new-child"
+            ),
+            .dismissStaleProfile
+        )
+    }
+
+    func test_profileIdentityChangeRefreshesWhenThePairedDeviceStillBelongsToTheOpenChild() {
+        XCTAssertEqual(
+            ProfileRouteIdentityReconciler.action(
+                openChildID: "same-child",
+                liveChildIDs: ["same-child"],
+                pairedDeviceOwnerChildID: "same-child"
+            ),
+            .refreshCurrentProfile
+        )
+    }
+
+    func test_profileIdentityChangeWaitsForAnEmptyFamilyAggregate() {
+        XCTAssertEqual(
+            ProfileRouteIdentityReconciler.action(
+                openChildID: "child",
+                liveChildIDs: [],
+                pairedDeviceOwnerChildID: nil
+            ),
+            .waitForFamily
+        )
+    }
+
+    func test_persistVerification_acceptsReadbackWhenSynchronizeReportsFalse() {
+        XCTAssertTrue(
+            ActiveLockStore.persistVerificationResult(
+                synchronizeReturned: false,
+                shieldsReadBack: true,
+                blocksReadBack: true
+            )
+        )
+    }
+
     func test_pollRefreshScope_includesWholeVisibleProfileState() {
         let scope = ProfileRefreshScope.automaticPoll
 

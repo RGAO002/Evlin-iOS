@@ -117,14 +117,63 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         XCTAssertTrue(try journal.pending(owner: fixture.owner).isEmpty)
     }
 
+    func testRepeatedCallbackAfterSucceededSampleDoesNotRecreateSidecar() throws {
+        let fixture = try CallbackFixture.active()
+        defer { fixture.cleanup() }
+        let suiteName = "earned-v2-callback-settled-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let journal = EarnedV2CallbackJournal(
+            defaults: defaults,
+            lock: CallbackFixtureLock()
+        )
+        let callback = EarnedMeteringCallback(
+            store: fixture.store,
+            clock: CallbackClock(now: fixture.start.addingTimeInterval(5 * 60)),
+            journal: journal
+        )
+        let appleCallback = fixture.callback(threshold: 5)
+
+        _ = try callback.handleDurably(
+            appleCallback,
+            expectedOwnerChildDeviceID: fixture.owner
+        )
+        XCTAssertEqual(
+            try journal.replay(into: fixture.store, owner: fixture.owner),
+            1
+        )
+        let workID = try XCTUnwrap(fixture.store.read().sampleWork.keys.first)
+        try fixture.mutate { state in
+            state.sampleWork[workID]?.retry.terminal = .succeeded
+        }
+        XCTAssertTrue(try journal.pending(owner: fixture.owner).isEmpty)
+
+        let repeated = try callback.handleDurably(
+            appleCallback,
+            expectedOwnerChildDeviceID: fixture.owner
+        )
+
+        XCTAssertEqual(repeated, .queued(sampleWorkID: workID))
+        XCTAssertTrue(
+            try journal.pending(owner: fixture.owner).isEmpty,
+            "an Apple re-fire for an already-settled sample must not recreate the direct-transport sidecar"
+        )
+    }
+
     func testRejectedConsumedCallbackUsesOneDecodeAndOneCommittedReadback() throws {
         let fileIO = CountingCallbackFileIO()
         let fixture = try CallbackFixture.active(fileIO: fileIO)
         defer { fixture.cleanup() }
         fileIO.resetReadCount()
 
+        // 120s after arm: outside the 90s arm-grace calibration window (which
+        // absorbs bursts instead of rejecting them — covered by
+        // MeteringT3DemolitionTests), still 100s+ inside the too-early bound,
+        // so this exercises the consumed-route death-stamp path this test has
+        // always been about.
         let outcome = try fixture.store.enqueueAuthorizedV2Callback(
-            fixture.authorizedInput(observedAt: fixture.start),
+            fixture.authorizedInput(observedAt: fixture.start.addingTimeInterval(120)),
             owner: fixture.owner
         )
 
@@ -464,7 +513,12 @@ final class EarnedMeteringCallbackTests: XCTestCase {
             createdAt: reference.createdAt
         )
         let rejected = try early.callbackHandler().handle(
-            early.callback(threshold: 5, observedAt: early.start.addingTimeInterval(269)),
+            early.callback(
+                threshold: 5,
+                observedAt: early.start.addingTimeInterval(
+                    TimeInterval(5 * 60 - EarnedMeteringCallback.defaultJitterSeconds - 1)
+                )
+            ),
             expectedOwnerChildDeviceID: early.owner,
             preparedShieldReference: earlyReference
         )
@@ -474,10 +528,15 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         XCTAssertTrue(try early.store.read().shieldReferences.isEmpty)
     }
 
-    func testThirtyOneSecondsEarlyMarksConsumedRouteAndQueuesNothing() throws {
+    func testOneSecondBeyondJitterMarksConsumedRouteAndQueuesNothing() throws {
         let fixture = try CallbackFixture.active()
         defer { fixture.cleanup() }
-        let callback = fixture.callback(threshold: 5, observedAt: fixture.start.addingTimeInterval(269))
+        let callback = fixture.callback(
+            threshold: 5,
+            observedAt: fixture.start.addingTimeInterval(
+                TimeInterval(5 * 60 - EarnedMeteringCallback.defaultJitterSeconds - 1)
+            )
+        )
 
         let outcome = try fixture.callbackHandler().handle(callback, expectedOwnerChildDeviceID: fixture.owner)
 
@@ -553,7 +612,7 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         XCTAssertNotEqual(input, cases[0].1)
     }
 
-    func testWrongOwnerCoverageExhaustionAndV1SelectionAreByteIdenticalDiscards() throws {
+    func testWrongOwnerAndV1SelectionAreByteIdenticalDiscards() throws {
         let wrongOwnerFixture = try CallbackFixture.active()
         defer { wrongOwnerFixture.cleanup() }
         let wrongOwnerBefore = try Data(contentsOf: wrongOwnerFixture.storeURL)
@@ -563,27 +622,6 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         )
         XCTAssertEqual(wrongOwnerOutcome, .discarded(reason: "owner_mismatch"))
         XCTAssertEqual(try Data(contentsOf: wrongOwnerFixture.storeURL), wrongOwnerBefore)
-
-        let coverageFixture = try CallbackFixture.active()
-        defer { coverageFixture.cleanup() }
-        try coverageFixture.mutate { state in
-            state.coverage = MonitorCoverageState(
-                ownerChildDeviceID: coverageFixture.owner,
-                requiredFromUsageDate: "2026-07-18",
-                requiredThroughUsageDate: "2026-07-25",
-                readyThroughUsageDate: nil,
-                status: .coverageExhausted,
-                refreshedAt: coverageFixture.start,
-                errorCode: "coverage_exhausted"
-            )
-        }
-        let coverageBefore = try Data(contentsOf: coverageFixture.storeURL)
-        let coverageOutcome = try coverageFixture.callbackHandler().handle(
-            coverageFixture.callback(threshold: 5),
-            expectedOwnerChildDeviceID: coverageFixture.owner
-        )
-        XCTAssertEqual(coverageOutcome, .discarded(reason: "epoch_not_active"))
-        XCTAssertEqual(try Data(contentsOf: coverageFixture.storeURL), coverageBefore)
 
         let v1Fixture = try CallbackFixture.active()
         defer { v1Fixture.cleanup() }
@@ -597,6 +635,23 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         )
         XCTAssertEqual(v1Outcome, .discarded(reason: "epoch_not_active"))
         XCTAssertEqual(try Data(contentsOf: v1Fixture.storeURL), v1Before)
+    }
+
+    func testExactActiveCallbackOverridesStaleCoverageSnapshot() throws {
+        let fixture = try CallbackFixture.active()
+        defer { fixture.cleanup() }
+        try fixture.mutate { state in
+            state.coverage = fixture.exhaustedCoverage()
+        }
+
+        let outcome = try fixture.callbackHandler().handle(
+            fixture.callback(threshold: 5),
+            expectedOwnerChildDeviceID: fixture.owner
+        )
+
+        guard case .queued = outcome else {
+            return XCTFail("the daemon callback proves the exact active route is armed")
+        }
     }
 
     func testOnlyDualActiveAndActiveInstallPhasesAcceptCallbacks() throws {
@@ -1075,9 +1130,9 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         XCTAssertTrue(state.sampleWork.isEmpty)
     }
 
-    func testPausedCallbackRejectsInvalidRatchetRegistrationAndCoverageByteIdentically() throws {
+    func testPausedCallbackRejectsInvalidRatchetAndRegistrationByteIdentically() throws {
         enum InvalidPausedState: String, CaseIterable {
-            case v1Ratchet, unregistered, coverageExhausted
+            case v1Ratchet, unregistered
         }
 
         for invalidState in InvalidPausedState.allCases {
@@ -1090,8 +1145,6 @@ final class EarnedMeteringCallbackTests: XCTestCase {
                     state.ratchets[fixture.owner]?.localSelection = .v1
                 case .unregistered:
                     state.epochs[fixture.epochID]?.registeredAt = nil
-                case .coverageExhausted:
-                    state.coverage = fixture.exhaustedCoverage()
                 }
             }
             let before = try Data(contentsOf: fixture.storeURL)
@@ -1105,6 +1158,25 @@ final class EarnedMeteringCallbackTests: XCTestCase {
             XCTAssertEqual(try Data(contentsOf: fixture.storeURL), before, invalidState.rawValue)
             XCTAssertEqual(try fixture.store.read().epochs[fixture.epochID]?.lastRawThresholdMinutes, 0)
         }
+    }
+
+    func testPausedExactActiveCallbackOverridesStaleCoverageAndRecordsHighWater() throws {
+        let fixture = try CallbackFixture.active()
+        defer { fixture.cleanup() }
+        try fixture.mutate { state in
+            state.epochs[fixture.epochID]?.status = .paused
+            state.coverage = fixture.exhaustedCoverage()
+        }
+
+        let outcome = try fixture.callbackHandler().handle(
+            fixture.callback(threshold: 5),
+            expectedOwnerChildDeviceID: fixture.owner
+        )
+
+        XCTAssertEqual(outcome, .discarded(reason: "paused"))
+        let epoch = try fixture.store.read().epochs[fixture.epochID]
+        XCTAssertEqual(epoch?.lastRawThresholdMinutes, 5)
+        XCTAssertEqual(epoch?.excludedWhilePausedMinutes, 5)
     }
 
     func testPausedCallbackRejectsPreparingClosedAndUnregisteredCandidateRoutesByteIdentically() throws {
@@ -1392,6 +1464,50 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         XCTAssertEqual(state.sampleWork[priorID]?.request.estimatedMinutes, 17)
         XCTAssertEqual(state.sampleWork[candidateID]?.request.estimatedMinutes, 17)
         XCTAssertEqual(state.sampleWork[candidateID]?.authorization, .waitingForRegistration)
+    }
+
+    func testRegisteredHandoffCandidateStillWaitsForActivationAcknowledgement() throws {
+        let fixture = try CallbackFixture.dualV2(phase: .cutoverReady)
+        defer { fixture.cleanup() }
+        let activationID = UUID()
+        try fixture.mutate { state in
+            state.epochs[fixture.candidateEpochID]?.registeredAt = fixture.start
+            state.installWork[fixture.candidateInstallID]?.authorization = .registered
+            state.activationWork[activationID] = EpochActivationWork(
+                workID: activationID,
+                ownerChildDeviceID: fixture.owner,
+                epochID: fixture.candidateEpochID,
+                routeID: fixture.candidateRouteID,
+                request: EpochActivationRequestDTO(
+                    protocolVersion: 2,
+                    deviceID: fixture.owner,
+                    routeID: fixture.candidateRouteID,
+                    verifiedAt: fixture.start
+                ),
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: fixture.start,
+                    lastErrorCode: nil,
+                    terminal: .pending
+                ),
+                createdAt: fixture.start
+            )
+        }
+
+        let outcome = try fixture.callbackHandler().handle(
+            fixture.candidateCallback(threshold: 5),
+            expectedOwnerChildDeviceID: fixture.owner
+        )
+
+        guard case let .queued(workID) = outcome else {
+            return XCTFail("a valid callback should be retained locally while activation is pending")
+        }
+        XCTAssertEqual(
+            try fixture.store.read().sampleWork[workID]?.authorization,
+            .waitingForRegistration,
+            "registration alone must not make a candidate sample deliverable"
+        )
     }
 
     func testCutoverReadyPriorCallbackIsByteIdenticalDiscardWhileCandidateQueues() throws {
@@ -1713,7 +1829,7 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         XCTAssertEqual(try fixture.store.read().sampleWork.count, 1)
     }
 
-    func testExactRegistrationAcknowledgementPromotesWaitingCandidateSample() async throws {
+    func testExactRegistrationAcknowledgementKeepsCandidateSampleWaitingForActivation() async throws {
         let fixture = try CallbackFixture.dualV2(phase: .cutoverReady)
         defer { fixture.cleanup() }
         let outcome = try fixture.callbackHandler().handle(
@@ -1739,7 +1855,11 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         await delivery.drain(owner: fixture.owner)
 
         let state = try fixture.store.read()
-        XCTAssertEqual(state.sampleWork[workID]?.authorization, .v2Deliverable)
+        XCTAssertEqual(
+            state.sampleWork[workID]?.authorization,
+            .waitingForRegistration,
+            "registration is necessary but activation must succeed before the sample can leave the device"
+        )
         XCTAssertEqual(state.installWork[fixture.candidateInstallID]?.authorization, .registered)
         XCTAssertEqual(transport.requests.count, 1)
     }

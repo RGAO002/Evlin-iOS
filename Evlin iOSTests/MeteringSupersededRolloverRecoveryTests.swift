@@ -47,7 +47,11 @@ final class MeteringSupersededRolloverRecoveryTests: XCTestCase {
     override func setUpWithError() throws {
         storeURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("metering-superseded-rollover-\(UUID().uuidString).json")
-        store = DeviceEpochStore(fileURL: storeURL, ownerProvider: { self.owner })
+        store = DeviceEpochStore(
+            fileURL: storeURL,
+            ownerProvider: { self.owner },
+            legacyDefaults: nil
+        )
         enforcementSetID = UUID()
         selectionBytes = try JSONEncoder().encode(FamilyActivitySelection())
     }
@@ -115,9 +119,14 @@ final class MeteringSupersededRolloverRecoveryTests: XCTestCase {
         XCTAssertNotEqual(state.rolloverEffectsWork?.retry.terminal, .pending)
         XCTAssertNil(state.v2RouteHandoff)
 
-        // Yesterday's lane is retired and stopped.
-        XCTAssertEqual(state.routes[fixture.yesterdayRouteID]?.lifecycle, .tombstoned)
-        XCTAssertEqual(state.epochs[fixture.yesterdayEpochID]?.status, .retired)
+        // Yesterday's lane is terminal. Compaction may already have removed its
+        // acknowledged tombstone and retired epoch from the local root.
+        XCTAssertTrue(
+            state.routes[fixture.yesterdayRouteID].map { $0.lifecycle == .tombstoned } ?? true
+        )
+        XCTAssertTrue(
+            state.epochs[fixture.yesterdayEpochID].map { $0.status == .retired } ?? true
+        )
 
         // The dead generation's today route was reclaimed rather than left
         // planned (leaving it planned re-creates the same doomed rollover on
@@ -172,19 +181,27 @@ final class MeteringSupersededRolloverRecoveryTests: XCTestCase {
         let state = try store.read()
         XCTAssertEqual(state.activeRouteID, fixture.currentTodayRouteID, Self.dump(state))
         XCTAssertEqual(state.routes[fixture.currentTodayRouteID]?.lifecycle, .active)
-        XCTAssertEqual(state.routes[fixture.yesterdayRouteID]?.lifecycle, .tombstoned)
+        XCTAssertTrue(
+            state.routes[fixture.yesterdayRouteID].map { $0.lifecycle == .tombstoned } ?? true
+        )
         XCTAssertNil(state.v2RouteHandoff)
-        let priorInstall = try XCTUnwrap(
-            state.installWork.values.first(where: { $0.routeID == fixture.yesterdayRouteID })
-        )
-        XCTAssertEqual(priorInstall.phase, .stopped)
-        XCTAssertEqual(priorInstall.retry.lastErrorCode, "stale_day_prior_absent")
-        XCTAssertNotNil(state.tombstones[fixture.yesterdayRouteID]?.stopAcknowledgedAt)
-        let staleInstall = try XCTUnwrap(
-            state.installWork.values.first(where: { $0.routeID == fixture.staleTodayRouteID })
-        )
+        let priorInstalls = state.installWork.values.filter {
+            $0.routeID == fixture.yesterdayRouteID
+        }
+        XCTAssertTrue(priorInstalls.allSatisfy { $0.phase == .stopped })
+        XCTAssertTrue(priorInstalls.allSatisfy { $0.retry.terminal != .pending })
+        if let priorInstall = priorInstalls.first {
+            XCTAssertEqual(priorInstall.retry.lastErrorCode, "stale_day_prior_absent")
+        }
+        if let tombstone = state.tombstones[fixture.yesterdayRouteID] {
+            XCTAssertNotNil(tombstone.stopAcknowledgedAt)
+        }
         XCTAssertFalse(
-            staleInstall.phase == .pendingStart && staleInstall.retry.terminal == .pending,
+            state.installWork.values.contains {
+                $0.routeID == fixture.staleTodayRouteID
+                    && $0.phase == .pendingStart
+                    && $0.retry.terminal == .pending
+            },
             "the superseded generation's old install must not remain due"
         )
         XCTAssertTrue(
@@ -217,6 +234,114 @@ final class MeteringSupersededRolloverRecoveryTests: XCTestCase {
         XCTAssertEqual(afterPolling.activeEpochID, settledEpochID)
         XCTAssertEqual(afterPolling.activeRouteID, settledRouteID)
         XCTAssertFalse(center.startCalls.contains(yesterdayActivity.rawValue))
+    }
+
+    // Regression (iPhone, 2026-08-02 23:59:38 EDT): a clean v2 onboarding
+    // registered the initial epoch seconds before midnight, but Apple rejected
+    // that day's physical activity as intervalTooShort. At midnight the horizon
+    // correctly verified the next day's reserved route while activeRouteID was
+    // still nil. Ordinary rollover requires an active old route and initial
+    // activation requires the route to belong to activeEpochID, so neither
+    // state machine could ever adopt the verified current-day route.
+    func testInitialActivationCrossingMidnightAdoptsVerifiedCurrentDayRoute() async throws {
+        center = RecordingCenter()
+        transport = RevisionAwareTransport(
+            acceptedRevision: currentRevision,
+            owner: owner,
+            usageDate: today
+        )
+        let plan = try store.reconcileMeteringHorizon(MeteringHorizonRequest(
+            ownerChildDeviceID: owner,
+            today: yesterday,
+            generationKey: generationKey(revision: currentRevision),
+            persistedSelectionBytes: selectionBytes,
+            poolMinutes: 120,
+            deviceCapMinutes: 60,
+            authoritativeBaseAcceptedMinutes: 0,
+            now: yesterdayInstant
+        ))
+        let yesterdayRouteID = try XCTUnwrap(plan.routeIDsByUsageDate[yesterday])
+        let todayRouteID = try XCTUnwrap(plan.routeIDsByUsageDate[today])
+        let initial = try store.read()
+        let yesterdayEpochID = try XCTUnwrap(initial.routes[yesterdayRouteID]?.epochID)
+        let todayEpochID = try XCTUnwrap(initial.routes[todayRouteID]?.epochID)
+
+        try store.transaction(expectedOwner: owner) { state in
+            state.activeGenerationID = plan.generationID
+            state.activeEpochID = yesterdayEpochID
+            state.activeRouteID = nil
+            state.epochs[yesterdayEpochID]?.registeredAt = self.yesterdayInstant
+            let yesterdayInstallID = try XCTUnwrap(
+                state.installWork.first { $0.value.routeID == yesterdayRouteID }?.key
+            )
+            state.installWork[yesterdayInstallID]?.authorization = .registered
+            state.installWork[yesterdayInstallID]?.phase = .pendingStart
+            state.installWork[yesterdayInstallID]?.claim = nil
+            state.installWork[yesterdayInstallID]?.retry = MeteringRetryState(
+                attemptCount: 2,
+                nextAttemptAt: self.todayInstant,
+                lastErrorCode: "route_superseded",
+                terminal: .superseded
+            )
+            let yesterdayRegistrationID = try XCTUnwrap(
+                state.registrationWork.first { $0.value.routeID == yesterdayRouteID }?.key
+            )
+            state.registrationWork[yesterdayRegistrationID]?.retry.terminal = .succeeded
+
+            let todayInstallID = try XCTUnwrap(
+                state.installWork.first { $0.value.routeID == todayRouteID }?.key
+            )
+            var todayRoute = try XCTUnwrap(state.routes[todayRouteID])
+            todayRoute.installedSchedule = todayRoute.plannedSchedule
+            todayRoute.installedEvents = todayRoute.plannedEvents
+            state.routes[todayRouteID] = todayRoute
+            state.installWork[todayInstallID]?.authorization = .futurePlanned
+            state.installWork[todayInstallID]?.phase = .verified
+            state.installWork[todayInstallID]?.claim = nil
+            state.installWork[todayInstallID]?.retry = MeteringRetryState(
+                attemptCount: 0,
+                nextAttemptAt: self.todayInstant,
+                lastErrorCode: nil,
+                terminal: .pending
+            )
+            state.ratchets[self.owner] = MeteringOwnerRatchet(
+                ownerChildDeviceID: self.owner,
+                advertisedVersion: 2,
+                localSelection: .v2Pending,
+                registeredV2At: self.yesterdayInstant,
+                dualActiveAt: nil,
+                activatedV2At: nil
+            )
+        }
+        center.seed(
+            DeviceActivityName(
+                try XCTUnwrap(try store.read().routes[todayRouteID]?.activityName)
+            )
+        )
+
+        try await makeDriver().recover(ownerChildDeviceID: owner)
+
+        let state = try store.read()
+        XCTAssertEqual(state.activeGenerationID, plan.generationID)
+        XCTAssertEqual(state.activeEpochID, todayEpochID)
+        XCTAssertEqual(state.activeRouteID, todayRouteID, Self.dump(state))
+        XCTAssertEqual(state.routes[todayRouteID]?.lifecycle, .active)
+        XCTAssertEqual(state.ratchets[owner]?.localSelection, .v2)
+        XCTAssertTrue(
+            state.registrationWork.values.contains {
+                $0.routeID == todayRouteID
+                    && $0.request.reason == .dayRollover
+                    && $0.retry.terminal == .succeeded
+            }
+        )
+        XCTAssertTrue(
+            state.activationWork.values.contains {
+                $0.routeID == todayRouteID && $0.retry.terminal == .succeeded
+            }
+        )
+        XCTAssertEqual(state.routes[yesterdayRouteID]?.lifecycle, .retired)
+        XCTAssertEqual(state.epochs[yesterdayEpochID]?.status, .retired)
+        XCTAssertEqual(state.epochs[yesterdayEpochID]?.retireReason, .dayRollover)
     }
 
     func testStaleDayRescueDoesNotNormalizePausedOrNeverInstalledPrior() async throws {
@@ -265,7 +390,11 @@ final class MeteringSupersededRolloverRecoveryTests: XCTestCase {
             // Give the next scenario a clean store while retaining the same
             // XCTest instance and dependency setup.
             try? FileManager.default.removeItem(at: storeURL)
-            store = DeviceEpochStore(fileURL: storeURL, ownerProvider: { self.owner })
+            store = DeviceEpochStore(
+                fileURL: storeURL,
+                ownerProvider: { self.owner },
+                legacyDefaults: nil
+            )
         }
     }
 
@@ -336,14 +465,19 @@ final class MeteringSupersededRolloverRecoveryTests: XCTestCase {
             XCTAssertFalse(
                 try store.supersedeUnprovenRegistrationRequiredInstall(
                     workID: workID,
-                    owner: owner
+                    owner: owner,
+                    now: todayInstant
                 ),
                 scenario
             )
             XCTAssertEqual(try store.read().installWork[workID], before, scenario)
 
             try? FileManager.default.removeItem(at: storeURL)
-            store = DeviceEpochStore(fileURL: storeURL, ownerProvider: { self.owner })
+            store = DeviceEpochStore(
+                fileURL: storeURL,
+                ownerProvider: { self.owner },
+                legacyDefaults: nil
+            )
         }
     }
 
@@ -413,8 +547,12 @@ final class MeteringSupersededRolloverRecoveryTests: XCTestCase {
         let state = try store.read()
         XCTAssertEqual(state.activeRouteID, replacementRouteID)
         XCTAssertEqual(state.routes[replacementRouteID]?.lifecycle, .active)
-        XCTAssertEqual(state.routes[fixture.currentTodayRouteID]?.lifecycle, .tombstoned)
-        XCTAssertEqual(state.epochs[fixture.currentTodayEpochID]?.status, .retired)
+        XCTAssertTrue(
+            state.routes[fixture.currentTodayRouteID].map { $0.lifecycle == .tombstoned } ?? true
+        )
+        XCTAssertTrue(
+            state.epochs[fixture.currentTodayEpochID].map { $0.status == .retired } ?? true
+        )
         XCTAssertNil(state.v2RouteHandoff)
     }
 
@@ -557,9 +695,15 @@ final class MeteringSupersededRolloverRecoveryTests: XCTestCase {
             laterCenter.startCalls.contains(elapsedActivity),
             "startMonitoring for an elapsed interval always throws invalidDateComponents"
         )
+        let persisted = try store.read()
+        let retiredRoute = try XCTUnwrap(persisted.routes[elapsedRouteID])
+        XCTAssertEqual(retiredRoute.lifecycle, .tombstoned)
+        XCTAssertEqual(persisted.epochs[retiredRoute.epochID]?.status, .retired)
         XCTAssertTrue(
-            results.contains(.deferred(workID: try elapsedInstallWorkID(elapsedRouteID), code: "usageDateElapsed")),
-            "results=\(results)"
+            persisted.installWork.values.contains {
+                $0.routeID == elapsedRouteID && $0.phase == .pendingStop
+            },
+            "an elapsed installed route must become bounded cleanup debt, not an immortal deferred re-arm; results=\(results)"
         )
         // Days that have NOT elapsed are still armed — the guard is surgical.
         XCTAssertFalse(laterCenter.startCalls.isEmpty)

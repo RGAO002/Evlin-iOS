@@ -77,7 +77,7 @@ struct EarnedCascadeConfirmSheet: View {
             // Options
             VStack(spacing: 10) {
                 optionButton(
-                    title: "Apply now",
+                    title: "Apply today",
                     caption: "Updates today's limits right away",
                     filled: true
                 ) {

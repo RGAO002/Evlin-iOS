@@ -176,7 +176,7 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         repairLegacySharedPoolExhaustionIfNeeded(owner: owner)
 
         while true {
-            if settleLeadingInvalidRegistration(owner: owner) {
+            if settleLeadingInvalidNetworkWork(owner: owner) {
                 continue
             }
             guard let claimed = claimFirstDispatchable(owner: owner) else { return }
@@ -432,6 +432,9 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         if (429 == statusCode) || (500...599).contains(statusCode) {
             return .retry(code: errorCode(data: data) ?? "http_\(statusCode)")
         }
+        if statusCode == 409, errorCode(data: data) == "device_identity_changed" {
+            return .retry(code: "device_identity_changed")
+        }
 
         if 200..<300 ~= statusCode || statusCode == 409 {
             if statusCode == 409, errorCode(data: data) == "duplicate" {
@@ -465,6 +468,9 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         if (429 == statusCode) || (500...599).contains(statusCode) {
             return .retry(code: errorCode(data: data) ?? "http_\(statusCode)")
         }
+        if statusCode == 409, errorCode(data: data) == "device_identity_changed" {
+            return .retry(code: "device_identity_changed")
+        }
         if 200..<300 ~= statusCode {
             guard let response = try? JSONDecoder.metering.decode(EpochRegistrationResponseDTO.self, from: data) else {
                 return .terminal(code: "malformed_response")
@@ -495,6 +501,9 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
     static func activationDisposition(data: Data, statusCode: Int) -> EpochActivationHTTPDisposition {
         if (429 == statusCode) || (500...599).contains(statusCode) {
             return .retry(code: errorCode(data: data) ?? "http_\(statusCode)")
+        }
+        if statusCode == 409, errorCode(data: data) == "device_identity_changed" {
+            return .retry(code: "device_identity_changed")
         }
         if 200..<300 ~= statusCode {
             guard let response = try? JSONDecoder.metering.decode(EpochActivationResponseDTO.self, from: data) else {
@@ -577,16 +586,73 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         }
     }
 
-    private func settleLeadingInvalidRegistration(owner: UUID) -> Bool {
+    private func settleLeadingInvalidNetworkWork(owner: UUID) -> Bool {
         guard store.isCurrentOwner(owner) else { return false }
         return (try? store.transaction(expectedOwner: owner) { state in
-            guard let due = state.dueWork(now: clock.now).first,
-                  due.kind == .registration,
-                  let key = state.registrationWork.first(where: { $0.value.workID == due.workID })?.key,
-                  var work = state.registrationWork[key],
-                  work.claim.map({ $0.expiresAt <= clock.now }) ?? true
-            else { return false }
-            return settleInvalidRegistration(&state, key: key, work: &work, owner: owner)
+            let dueWork = state.dueWork(now: clock.now)
+            guard let due = dueWork.first else { return false }
+            switch due.kind {
+            case .registration:
+                guard let key = state.registrationWork.first(where: {
+                    $0.value.workID == due.workID
+                })?.key,
+                var work = state.registrationWork[key],
+                work.claim.map({ $0.expiresAt <= clock.now }) ?? true
+                else { return false }
+                return settleInvalidRegistration(&state, key: key, work: &work, owner: owner)
+            case .activation:
+                let blocksLaterNetworkWork = dueWork.dropFirst().contains { later in
+                    switch later.kind {
+                    case .registration:
+                        guard let registration = state.registrationWork.values.first(where: {
+                            $0.workID == later.workID
+                        }) else { return false }
+                        return !isSuppressedCandidate(registration.epochID, state: state)
+                            && hasNetworkRegistrationAuthorization(
+                                registration,
+                                owner: owner,
+                                state: state
+                            )
+                    case .activation:
+                        guard let activation = state.activationWork.values.first(where: {
+                            $0.workID == later.workID
+                        }) else { return false }
+                        return !isSuppressedCandidate(activation.epochID, state: state)
+                            && hasExactActivationAuthorization(
+                                activation,
+                                owner: owner,
+                                state: state
+                            )
+                    case .sample:
+                        guard let sample = state.sampleWork.values.first(where: {
+                            $0.workID == later.workID
+                        }) else { return false }
+                        return !isSuppressedCandidate(sample.epochID, state: state)
+                            && isSampleDispatchable(sample, owner: owner, state: state)
+                    case .identityCleanup, .rollover, .install, .shield:
+                        return false
+                    }
+                }
+                guard let key = state.activationWork.first(where: {
+                    $0.value.workID == due.workID
+                })?.key,
+                var work = state.activationWork[key],
+                work.ownerChildDeviceID == owner,
+                work.claim.map({ $0.expiresAt <= clock.now }) ?? true,
+                blocksLaterNetworkWork,
+                !hasExactActivationAuthorization(work, owner: owner, state: state)
+                else { return false }
+                work.retry = completedRetry(
+                    from: work.retry,
+                    code: "route_superseded",
+                    terminal: .superseded
+                )
+                work.claim = nil
+                state.activationWork[key] = work
+                return true
+            case .identityCleanup, .rollover, .install, .sample, .shield:
+                return false
+            }
         }) ?? false
     }
 
@@ -947,7 +1013,11 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                         terminal: .rejected
                     )
                     sampleWork.claim = nil
-                } else {
+                } else if state.hasExactSuccessfulActivation(
+                    owner: owner,
+                    epochID: work.epochID,
+                    routeID: route.routeID
+                ) {
                     sampleWork.authorization = .v2Deliverable
                 }
                 state.sampleWork[sampleKey] = sampleWork
@@ -967,8 +1037,8 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             }
             var ratchet = state.ratchets[owner] ?? MeteringOwnerRatchet(
                 ownerChildDeviceID: owner,
-                advertisedVersion: 1,
-                localSelection: .v1,
+                advertisedVersion: 2,
+                localSelection: .v2Pending,
                 registeredV2At: nil,
                 dualActiveAt: nil,
                 activatedV2At: nil
@@ -1048,47 +1118,66 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         claim: MeteringNetworkClaim,
         conflict: EpochRegistrationConflictDTO
     ) async {
-        try? store.transaction(expectedOwner: owner) { state in
-            guard let key = state.registrationWork.first(where: { $0.value.workID == workID })?.key,
-                  var work = state.registrationWork[key],
-                  work.ownerChildDeviceID == owner,
-                  work.claim?.token == claim.token
-            else { return }
-            if settleInvalidRegistrationClaim(&state, key: key, work: &work, owner: owner, claim: claim) {
-                return
-            }
-            guard hasNetworkRegistrationAuthorization(work, owner: owner, state: state),
-                  let route = state.routes[work.routeID],
-                  let epoch = state.epochs[work.epochID],
-                  epoch.authoritativeBaseConflict == nil,
-                  conflict.authoritativeSnapshot.childDeviceID == owner,
-                  conflict.authoritativeSnapshot.usageDate == route.usageDate,
-                  conflict.authoritativeSnapshot.usageDate == epoch.usageDate
-            else { return }
-            let createdReplacement = state.replaceAuthoritativeBaseMismatchCandidate(
-                owner: owner,
-                rejectedEpochID: work.epochID,
-                rejectedRouteID: work.routeID,
-                conflict: conflict,
-                now: clock.now
-            )
-            guard !createdReplacement else { return }
+        do {
+            try store.transaction(expectedOwner: owner) { state in
+                guard let key = state.registrationWork.first(where: { $0.value.workID == workID })?.key,
+                      var work = state.registrationWork[key],
+                      work.ownerChildDeviceID == owner,
+                      work.claim?.token == claim.token
+                else { return }
+                if settleInvalidRegistrationClaim(&state, key: key, work: &work, owner: owner, claim: claim) {
+                    return
+                }
+                guard hasNetworkRegistrationAuthorization(work, owner: owner, state: state),
+                      let route = state.routes[work.routeID],
+                      let epoch = state.epochs[work.epochID],
+                      epoch.authoritativeBaseConflict == nil,
+                      conflict.authoritativeSnapshot.childDeviceID == owner,
+                      conflict.authoritativeSnapshot.usageDate == route.usageDate,
+                      conflict.authoritativeSnapshot.usageDate == epoch.usageDate
+                else { return }
+                let createdReplacement = state.replaceAuthoritativeBaseMismatchCandidate(
+                    owner: owner,
+                    rejectedEpochID: work.epochID,
+                    rejectedRouteID: work.routeID,
+                    conflict: conflict,
+                    now: clock.now
+                )
+                guard !createdReplacement else { return }
 
-            // A consumed correction returns false after terminalizing its
-            // second rejected candidate. Only fall back to the pre-correction
-            // contract when this was an ordinary planned registration with no
-            // exact correction handoff to handle it.
-            guard state.epochs[work.epochID]?.authoritativeBaseConflict == nil else { return }
-            var terminalEpoch = epoch
-            terminalEpoch.authoritativeBaseConflict = conflict
-            state.epochs[work.epochID] = terminalEpoch
-            work.retry = completedRetry(
-                from: work.retry,
-                code: "authoritative_base_mismatch",
-                terminal: .superseded
+                // A consumed correction returns false after terminalizing its
+                // second rejected candidate. Only fall back to the pre-correction
+                // contract when this was an ordinary planned registration with no
+                // exact correction handoff to handle it.
+                guard state.epochs[work.epochID]?.authoritativeBaseConflict == nil else { return }
+                var terminalEpoch = epoch
+                terminalEpoch.authoritativeBaseConflict = conflict
+                state.epochs[work.epochID] = terminalEpoch
+                work.retry = completedRetry(
+                    from: work.retry,
+                    code: "authoritative_base_mismatch",
+                    terminal: .superseded
+                )
+                work.claim = nil
+                state.registrationWork[key] = work
+                terminalizeRegistrationDependents(
+                    &state,
+                    owner: owner,
+                    epochID: work.epochID,
+                    routeID: work.routeID,
+                    registrationCode: "authoritative_base_mismatch"
+                )
+            }
+        } catch {
+            MeteringFlightRecorder.emitError(
+                site: "delivery.baseCorrection",
+                error: error,
+                detail: MeteringFlightRecorder.detail([
+                    ("work", MeteringFlightRecorder.shortID(workID)),
+                    ("owner", MeteringFlightRecorder.shortID(owner)),
+                ]),
+                corrID: workID
             )
-            work.claim = nil
-            state.registrationWork[key] = work
         }
     }
 
@@ -1118,6 +1207,13 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             work.retry = completedRetry(from: work.retry, code: code, terminal: terminal)
             work.claim = nil
             state.registrationWork[key] = work
+            terminalizeRegistrationDependents(
+                &state,
+                owner: owner,
+                epochID: work.epochID,
+                routeID: work.routeID,
+                registrationCode: code
+            )
         }
     }
 
@@ -1172,6 +1268,13 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         work.retry = completedRetry(from: work.retry, code: "route_superseded", terminal: .superseded)
         work.claim = nil
         state.registrationWork[key] = work
+        terminalizeRegistrationDependents(
+            &state,
+            owner: owner,
+            epochID: work.epochID,
+            routeID: work.routeID,
+            registrationCode: "route_superseded"
+        )
         return true
     }
 
@@ -1199,6 +1302,13 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             work.retry = completedRetry(from: work.retry, code: "route_superseded", terminal: .superseded)
             work.claim = nil
             state.registrationWork[key] = work
+            terminalizeRegistrationDependents(
+                &state,
+                owner: owner,
+                epochID: work.epochID,
+                routeID: work.routeID,
+                registrationCode: "route_superseded"
+            )
             return true
         }
         guard let route = state.routes[work.routeID],
@@ -1209,15 +1319,67 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             work.retry = completedRetry(from: work.retry, code: "registration_invalidated", terminal: .rejected)
             work.claim = nil
             state.registrationWork[key] = work
+            terminalizeRegistrationDependents(
+                &state,
+                owner: owner,
+                epochID: work.epochID,
+                routeID: work.routeID,
+                registrationCode: "registration_invalidated"
+            )
             return true
         }
         guard epoch.authoritativeBaseConflict == nil else {
             work.retry = completedRetry(from: work.retry, code: "authoritative_base_conflict", terminal: .rejected)
             work.claim = nil
             state.registrationWork[key] = work
+            terminalizeRegistrationDependents(
+                &state,
+                owner: owner,
+                epochID: work.epochID,
+                routeID: work.routeID,
+                registrationCode: "authoritative_base_conflict"
+            )
             return true
         }
         return false
+    }
+
+    private func terminalizeRegistrationDependents(
+        _ state: inout DeviceEpochStoreState,
+        owner: UUID,
+        epochID: UUID,
+        routeID: UUID,
+        registrationCode: String
+    ) {
+        let sampleCode = registrationCode.hasPrefix("registration_")
+            ? registrationCode
+            : "registration_\(registrationCode)"
+        for (sampleKey, var sampleWork) in state.sampleWork where
+            sampleWork.ownerChildDeviceID == owner
+                && sampleWork.epochID == epochID
+                && sampleWork.routeID == routeID
+                && sampleWork.retry.terminal == .pending {
+            sampleWork.retry = completedRetry(
+                from: sampleWork.retry,
+                code: sampleCode,
+                terminal: .superseded
+            )
+            sampleWork.claim = nil
+            state.sampleWork[sampleKey] = sampleWork
+        }
+        for (activationKey, var activationWork) in state.activationWork where
+            activationWork.ownerChildDeviceID == owner
+                && activationWork.epochID == epochID
+                && activationWork.routeID == routeID
+                && activationWork.retry.terminal == .pending {
+            activationWork.retry = completedRetry(
+                from: activationWork.retry,
+                code: sampleCode,
+                terminal: .superseded
+            )
+            activationWork.claim = nil
+            state.activationWork[activationKey] = activationWork
+        }
     }
 
     private func terminalizeActivation(
@@ -1300,6 +1462,16 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                 : completedRetry(from: work.retry, code: code, terminal: terminal)
             work.claim = nil
             state.activationWork[key] = work
+            if terminal == .succeeded {
+                for (sampleKey, var sampleWork) in state.sampleWork where
+                    sampleWork.ownerChildDeviceID == owner
+                        && sampleWork.epochID == work.epochID
+                        && sampleWork.routeID == work.routeID
+                        && sampleWork.authorization == .waitingForRegistration {
+                    sampleWork.authorization = .v2Deliverable
+                    state.sampleWork[sampleKey] = sampleWork
+                }
+            }
         }
     }
 
@@ -1331,15 +1503,17 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         // the drain loop can only pick it up again once the 60 s lease expires.
         // That is a silent stall, so it gets its own verdict.
         var settled = false
+        var settledTerminal = terminal
+        var settledCode = code
         var routeID: UUID?
         defer {
             MeteringFlightRecorder.emit(
                 kind: .meteringSample,
                 site: "delivery.sample",
-                verdict: settled ? "settled_\(terminal.rawValue)" : "settle_skipped",
+                verdict: settled ? "settled_\(settledTerminal.rawValue)" : "settle_skipped",
                 detail: MeteringFlightRecorder.detail([
                     ("work", MeteringFlightRecorder.shortID(workID)),
-                    ("code", code ?? ""),
+                    ("code", settledCode ?? ""),
                 ]),
                 corrID: routeID ?? workID
             )
@@ -1351,24 +1525,37 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                   work.claim?.token == claim.token
             else { return }
             routeID = work.routeID
-            if let routeID = work.routeID {
-                guard let route = state.routes[routeID],
-                      route.ownerChildDeviceID == owner,
-                      route.lifecycle == .active,
-                      route.epochID == work.epochID,
-                      let epochID = work.epochID,
-                      let epoch = state.epochs[epochID],
-                      epoch.childDeviceID == owner,
-                      epoch.status == .active,
-                      epoch.authoritativeBaseConflict == nil
-                else { return }
-            }
             if let snapshot {
                 guard snapshotMatches(snapshot, owner: owner, usageDate: work.request.usageDate) else { return }
             }
-            work.retry = terminal == .pending
-                ? retryState(after: work.retry, code: code ?? "network_error", now: clock.now)
-                : completedRetry(from: work.retry, code: code, terminal: terminal)
+
+            // A backend response settles the immutable claimed work even if
+            // the local route changed while the request was in flight. For a
+            // retryable response, however, a paused or retired physical lane
+            // can no longer dispatch the work, so terminalize it instead of
+            // leaving a permanent queue barrier.
+            if terminal == .pending, let routeID = work.routeID {
+                let route = state.routes[routeID]
+                let epoch = work.epochID.flatMap { state.epochs[$0] }
+                let stillDispatchable = route?.ownerChildDeviceID == owner
+                    && route?.lifecycle == .active
+                    && route?.epochID == work.epochID
+                    && epoch?.childDeviceID == owner
+                    && epoch?.status == .active
+                    && epoch?.authoritativeBaseConflict == nil
+                if !stillDispatchable {
+                    if epoch?.status == .paused {
+                        settledTerminal = .rejected
+                        settledCode = "accounting_paused"
+                    } else {
+                        settledTerminal = .superseded
+                        settledCode = "route_superseded"
+                    }
+                }
+            }
+            work.retry = settledTerminal == .pending
+                ? retryState(after: work.retry, code: settledCode ?? "network_error", now: clock.now)
+                : completedRetry(from: work.retry, code: settledCode, terminal: settledTerminal)
             work.claim = nil
             state.sampleWork[key] = work
             settled = true
@@ -1529,7 +1716,18 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
                   let route = state.routes[routeID],
                   let epoch = state.epochs[epochID]
             else { return false }
-            return sample.ownerChildDeviceID == owner
+            let pendingCandidateActivation = state.v2RouteHandoff.map {
+                $0.ownerChildDeviceID == owner
+                    && $0.toEpochID == epochID
+                    && $0.toRouteID == routeID
+                    && !state.hasExactSuccessfulActivation(
+                        owner: owner,
+                        epochID: epochID,
+                        routeID: routeID
+                    )
+            } ?? false
+            return !pendingCandidateActivation
+                && sample.ownerChildDeviceID == owner
                 && route.ownerChildDeviceID == owner
                 && route.epochID == epochID
                 && route.lifecycle == .active

@@ -104,7 +104,7 @@ final class MeteringLadderBaseInvariantTests: XCTestCase {
         let fixture = try LadderFixture.healthy(epochBase: 0, poolMinutes: 240)
         defer { fixture.cleanup() }
         try fixture.recordThreshold(100, terminal: .succeeded)
-        try fixture.recordThreshold(225, terminal: .rejected)
+        try fixture.recordThreshold(230, terminal: .rejected)
 
         XCTAssertTrue(try fixture.store.absorbCreditedProgressForRearm(
             routeID: fixture.routeID,
@@ -556,8 +556,11 @@ final class MeteringLadderBaseInvariantTests: XCTestCase {
         let fixture = try LadderFixture.healthy(epochBase: 215, poolMinutes: 240)
         defer { fixture.cleanup() }
 
+        // 2 minutes after arm: outside the FIX-Q calibration grace (90s), but
+        // still earlier than the 5-minute rung's physical-time bound — the
+        // anti-cheat death stamp must survive for this case.
         let outcome = try fixture.store.enqueueAuthorizedV2Callback(
-            fixture.input(threshold: 5, minutesAfterStart: 0),
+            fixture.input(threshold: 5, minutesAfterStart: 2),
             owner: fixture.owner
         )
 
@@ -597,6 +600,73 @@ final class MeteringLadderBaseInvariantTests: XCTestCase {
             })?.phase,
             .pendingStart
         )
+    }
+
+    /// FIX-Q's arm-grace absorption swallows burst bells into the exclusion
+    /// high-water without a death stamp. When the burst reaches the TOP rung
+    /// every one-shot has fired and no future bell can credit — the deaf
+    /// ladder must trigger the same fresh-identity re-cut the death stamp
+    /// used to (iPad 2026-08-06 00:03: 21 bells absorbed up to the terminal
+    /// t40, bar dead until the next manual re-arm).
+    func testGraceAbsorbedWholeLadderMintsFreshIdentityRecovery() throws {
+        let fixture = try LadderFixture.healthy(epochBase: 25, poolMinutes: 65)
+        defer { fixture.cleanup() }
+        let topRung = try XCTUnwrap(
+            try fixture.store.read().routes[fixture.routeID]?
+                .plannedEvents.map(\.thresholdMinutes).max()
+        )
+        try fixture.store.transaction(expectedOwner: fixture.owner) { state in
+            guard var epoch = state.epochs[fixture.epochID] else { return }
+            epoch.lastRawThresholdMinutes = topRung
+            epoch.excludedWhilePausedMinutes = topRung
+            state.epochs[fixture.epochID] = epoch
+        }
+
+        XCTAssertTrue(try fixture.store.repairLadderBaseInvariantIfNeeded(
+            owner: fixture.owner,
+            now: fixture.start.addingTimeInterval(60)
+        ))
+
+        let state = try fixture.store.read()
+        let handoff = try XCTUnwrap(state.v2RouteHandoff)
+        XCTAssertEqual(handoff.fromRouteID, fixture.routeID)
+        XCTAssertNotEqual(handoff.toRouteID, fixture.routeID)
+        XCTAssertEqual(state.routes[handoff.toRouteID]?.ladderBaseMinutes, 25)
+    }
+
+    /// A burst absorbed BELOW the top rung leaves live rungs armed — that
+    /// ladder still credits and must be left alone.
+    func testPartialGraceAbsorptionDoesNotTriggerIdentityRecovery() throws {
+        let fixture = try LadderFixture.healthy(epochBase: 25, poolMinutes: 65)
+        defer { fixture.cleanup() }
+        try fixture.store.transaction(expectedOwner: fixture.owner) { state in
+            guard var epoch = state.epochs[fixture.epochID] else { return }
+            epoch.lastRawThresholdMinutes = 10
+            epoch.excludedWhilePausedMinutes = 10
+            state.epochs[fixture.epochID] = epoch
+        }
+
+        XCTAssertFalse(try fixture.store.repairLadderBaseInvariantIfNeeded(
+            owner: fixture.owner,
+            now: fixture.start.addingTimeInterval(60)
+        ))
+        XCTAssertNil(try fixture.store.read().v2RouteHandoff)
+    }
+
+    // MARK: - Ladder shape (#94)
+
+    func testLadderLeadsWithOneSacrificialMinuteRungThenFiveMinuteSteps() {
+        XCTAssertEqual(
+            MeteringLadderMath.thresholds(remainingMinutes: 40),
+            [1, 5, 10, 15, 20, 25, 30, 35, 40]
+        )
+    }
+
+    func testLadderKeepsFineLeadWithinTheGuardEventBudget() {
+        let cut = MeteringLadderMath.thresholds(remainingMinutes: 240)
+        XCTAssertEqual(cut.first, 1)
+        XCTAssertLessThanOrEqual(cut.count, MeteringLadderMath.guardEventCount)
+        XCTAssertEqual(cut.last, 240)
     }
 }
 

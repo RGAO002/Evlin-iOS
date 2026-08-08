@@ -1,4 +1,5 @@
 import XCTest
+import FamilyControls
 
 @testable import Evlin_iOS
 
@@ -178,7 +179,160 @@ final class PairingV2Tests: XCTestCase {
                        .collectNewChildProfile)
     }
 
+    // MARK: - Pairing metering bootstrap
+
+    @MainActor
+    func test_pairingPreparesPublishesAndRecoversBeforePollingCurrentPolicy() async {
+        let childDeviceID = UUID()
+        var steps: [String] = []
+        var startedDeviceID: UUID?
+
+        let bootstrap = KidJoinMeteringBootstrap(
+            prepareIdentity: { deviceID in
+                XCTAssertEqual(deviceID, childDeviceID)
+                steps.append("prepare")
+            },
+            convergeAppLimitIdentity: { deviceID in
+                XCTAssertEqual(deviceID, childDeviceID)
+                XCTAssertEqual(steps, ["prepare"])
+                steps.append("converge-app-limit")
+            },
+            publishSelection: {
+                XCTAssertEqual(steps, ["prepare", "converge-app-limit"])
+                steps.append("publish")
+                return true
+            },
+            publishMatchedCatalog: {
+                XCTAssertEqual(steps, ["prepare", "converge-app-limit", "publish"])
+                steps.append("publish-matched")
+                return true
+            },
+            recoverMetering: {
+                XCTAssertEqual(
+                    steps,
+                    ["prepare", "converge-app-limit", "publish", "publish-matched"]
+                )
+                steps.append("recover")
+            },
+            startCommandOwner: { deviceID in
+                steps.append("start")
+                startedDeviceID = deviceID
+            }
+        )
+
+        await bootstrap.run(for: childDeviceID)
+
+        XCTAssertEqual(
+            steps,
+            ["prepare", "converge-app-limit", "publish", "publish-matched", "recover", "start"]
+        )
+        XCTAssertEqual(startedDeviceID, childDeviceID)
+    }
+
+    @MainActor
+    func test_pairingStillStartsPolicyOwnerWhenRetainedSelectionIsEmpty() async {
+        let childDeviceID = UUID()
+        var started = false
+
+        let bootstrap = KidJoinMeteringBootstrap(
+            prepareIdentity: { _ in },
+            convergeAppLimitIdentity: { _ in },
+            publishSelection: { false },
+            publishMatchedCatalog: { false },
+            recoverMetering: {},
+            startCommandOwner: { deviceID in
+                XCTAssertEqual(deviceID, childDeviceID)
+                started = true
+            }
+        )
+
+        await bootstrap.run(for: childDeviceID)
+
+        XCTAssertTrue(started)
+    }
+
+    @MainActor
+    func test_pairingStillRecoversWhenMatchedCatalogRepublishFails() async {
+        let childDeviceID = UUID()
+        var recovered = false
+        var started = false
+
+        let bootstrap = KidJoinMeteringBootstrap(
+            prepareIdentity: { _ in },
+            convergeAppLimitIdentity: { _ in },
+            publishSelection: { true },
+            publishMatchedCatalog: { false },
+            recoverMetering: { recovered = true },
+            startCommandOwner: { _ in started = true }
+        )
+
+        await bootstrap.run(for: childDeviceID)
+
+        XCTAssertTrue(recovered)
+        XCTAssertTrue(started)
+    }
+
+    @MainActor
+    func test_repairingUnderANewDevicePublishesSelectionWithoutOldAlias() {
+        let oldDeviceID = UUID()
+        let newDeviceID = UUID()
+        let oldAlias = UUID()
+
+        XCTAssertTrue(AppControlsBackendSync.shouldPublish(
+            deviceID: newDeviceID,
+            selectionSignature: "same-selection",
+            lockedSetAliasKey: oldAlias,
+            publishedDeviceID: oldDeviceID,
+            publishedSignature: "same-selection"
+        ))
+        XCTAssertNil(AppControlsBackendSync.aliasKeyForUpload(
+            deviceID: newDeviceID,
+            lockedSetAliasKey: oldAlias,
+            publishedDeviceID: oldDeviceID
+        ))
+    }
+
+    @MainActor
+    func test_sameDeviceUnchangedSelectionDoesNotRepublish() {
+        let deviceID = UUID()
+        let alias = UUID()
+
+        XCTAssertFalse(AppControlsBackendSync.shouldPublish(
+            deviceID: deviceID,
+            selectionSignature: "same-selection",
+            lockedSetAliasKey: alias,
+            publishedDeviceID: deviceID,
+            publishedSignature: "same-selection"
+        ))
+        XCTAssertEqual(AppControlsBackendSync.aliasKeyForUpload(
+            deviceID: deviceID,
+            lockedSetAliasKey: alias,
+            publishedDeviceID: deviceID
+        ), alias)
+    }
+
+    @MainActor
+    func test_retainedAppControlsSelectionDoesNotOverwriteMeteringSelection() throws {
+        let retained = FamilyActivitySelection()
+        var loaded = false
+
+        let returned = AppControlsBackendSync.retainedSelectionForCatalogUpload(
+            load: {
+                loaded = true
+                return retained
+            }
+        )
+
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(returned, retained)
+    }
+
     // MARK: - Parent invite
+
+    func test_settingsAddChildUsesUntargetedNewChildInvite() {
+        XCTAssertEqual(ParentNewChildPairingPresentation.invitePurpose, .newChild)
+        XCTAssertNil(ParentNewChildPairingPresentation.targetChildProfileID)
+    }
 
     func test_inviteCreated_decodesTheMicrosecondsTheBackendActuallySends() throws {
         // Pydantic emits `...815296+00:00`. Stock .iso8601 throws on that, and
@@ -209,7 +363,7 @@ final class PairingV2Tests: XCTestCase {
     func test_mintDoesNotReplaceACodeTheParentIsStillShowing() async {
         nonisolated(unsafe) var mints = 0
         let model = ParentInviteModel(api: ParentInviteAPI(
-            ensureFamily: {},
+            ensureFamily: { UUID() },
             createInvite: { _, _ in
                 mints += 1
                 return PairingInviteCreated(
@@ -258,6 +412,62 @@ final class PairingV2Tests: XCTestCase {
                                           deviceLabel: nil, resolution: nil)
         XCTAssertEqual(ParentInviteModel.stage(for: expired, showing: invite),
                        .expired)
+    }
+
+    func test_joinedInviteStatusDecodesTheChildDeviceNeededByParentWait() throws {
+        let childDeviceID = UUID()
+        let data = """
+        {"status":"joined","child_device_id":"\(childDeviceID.uuidString)",
+         "child_display_name":"Kid","device_label":"Kid's iPad",
+         "resolution":"invited"}
+        """.data(using: .utf8)!
+
+        let status = try JSONDecoder.pairingV2.decode(
+            PairingInviteStatus.self,
+            from: data
+        )
+
+        XCTAssertEqual(status.childDeviceID, childDeviceID)
+    }
+
+    @MainActor
+    func test_parentInvitePollingHandsTheJoinedDeviceToItsCoordinator() async {
+        let familyID = UUID()
+        let childDeviceID = UUID()
+        let joined = expectation(description: "joined callback")
+        let invite = PairingInviteCreated(
+            inviteID: UUID(),
+            codeDisplay: "483920",
+            qrPayload: "evlin-invite:v2:tok",
+            expiresAt: Date().addingTimeInterval(600)
+        )
+        let model = ParentInviteModel(
+            api: ParentInviteAPI(
+                ensureFamily: { familyID },
+                createInvite: { _, _ in invite },
+                fetchStatus: { _ in
+                    PairingInviteStatus(
+                        status: "joined",
+                        childDisplayName: "Kid",
+                        deviceLabel: "Kid's iPad",
+                        resolution: "invited",
+                        childDeviceID: childDeviceID
+                    )
+                }
+            ),
+            pollInterval: .milliseconds(1)
+        )
+        model.onJoined = { identity in
+            XCTAssertEqual(identity.familyID, familyID)
+            XCTAssertEqual(identity.childDeviceID, childDeviceID)
+            joined.fulfill()
+        }
+
+        await model.mint(purpose: .newChild, target: nil)
+        model.startPolling(invite: invite)
+
+        await fulfillment(of: [joined], timeout: 0.5)
+        model.stopPolling()
     }
 
     // MARK: - install_id migration

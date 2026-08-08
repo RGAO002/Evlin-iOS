@@ -12,12 +12,17 @@ nonisolated enum ParentInviteStage: Equatable, Sendable {
     case failed(message: String)
 }
 
+nonisolated struct ParentInviteJoinedIdentity: Equatable, Sendable {
+    let familyID: UUID
+    let childDeviceID: UUID
+}
+
 /// Network seam. Injected so the model's polling and stage transitions are
 /// testable without a server, and so the real implementation can reuse
 /// `APIClient`'s authenticated request path (single-flight refresh included)
 /// rather than growing a second copy of token handling.
 nonisolated struct ParentInviteAPI: Sendable {
-    let ensureFamily: @Sendable () async throws -> Void
+    let ensureFamily: @Sendable () async throws -> UUID
     let createInvite: @Sendable (PairingInvitePurpose, UUID?) async throws -> PairingInviteCreated
     let fetchStatus: @Sendable (UUID) async throws -> PairingInviteStatus
 }
@@ -34,9 +39,10 @@ final class ParentInviteModel: ObservableObject {
     var api: ParentInviteAPI
     private let pollInterval: Duration
     private var pollTask: Task<Void, Never>?
+    private var familyID: UUID?
 
     /// Called once the kid device has joined, so the host flow can advance.
-    var onJoined: (() -> Void)?
+    var onJoined: ((ParentInviteJoinedIdentity) -> Void)?
     /// Fired as soon as a code exists. Single-device demo uses it to hand the
     /// code to the kid half of the same phone; the two-device flow ignores it.
     var onCodeReady: ((PairingInviteCreated) -> Void)?
@@ -91,7 +97,7 @@ final class ParentInviteModel: ObservableObject {
             // Idempotent: a family born on the parent's account is the anchor
             // the whole flow hangs off, and the endpoint returns the existing
             // one when there already is one.
-            try await api.ensureFamily()
+            familyID = try await api.ensureFamily()
             let invite = try await api.createInvite(purpose, target)
             stage = .showing(invite)
             onCodeReady?(invite)
@@ -112,8 +118,13 @@ final class ParentInviteModel: ObservableObject {
                 else { continue }   // a blip must not kill the watch
                 let next = Self.stage(for: status, showing: invite)
                 self.stage = next
-                if case .joined = next {
-                    self.onJoined?()
+                if case .joined = next,
+                   let familyID = self.familyID,
+                   let childDeviceID = status.childDeviceID {
+                    self.onJoined?(ParentInviteJoinedIdentity(
+                        familyID: familyID,
+                        childDeviceID: childDeviceID
+                    ))
                     return
                 }
                 if case .expired = next { return }
@@ -131,6 +142,14 @@ final class ParentInviteModel: ObservableObject {
 
 extension ParentInviteAPI {
 
+    private struct FamilyResponse: Decodable {
+        let familyID: UUID
+
+        enum CodingKeys: String, CodingKey {
+            case familyID = "family_id"
+        }
+    }
+
     /// Placeholder until the host injects the real client. Every call fails
     /// loudly rather than silently succeeding, so a missing injection shows up
     /// as "couldn't create a code" instead of a screen that never advances.
@@ -145,10 +164,11 @@ extension ParentInviteAPI {
         return ParentInviteAPI(
             ensureFamily: {
                 let request = client.authedRequest(path: "/family/v2", method: "POST")
-                let (_, http) = try await client.authedData(for: request)
+                let (data, http) = try await client.authedData(for: request)
                 guard (200...299).contains(http.statusCode) else {
                     throw PairingV2ClientError(statusCode: http.statusCode)
                 }
+                return try JSONDecoder().decode(FamilyResponse.self, from: data).familyID
             },
             createInvite: { purpose, target in
                 var request = client.authedRequest(path: "/family/v2/invite",

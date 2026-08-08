@@ -40,6 +40,28 @@ struct ProfileRefreshScope: Equatable {
     )
 }
 
+nonisolated enum ProfileRouteIdentityAction: Equatable {
+    case waitForFamily
+    case refreshCurrentProfile
+    case dismissStaleProfile
+}
+
+nonisolated enum ProfileRouteIdentityReconciler {
+    static func action(
+        openChildID: String,
+        liveChildIDs: Set<String>,
+        pairedDeviceOwnerChildID: String?
+    ) -> ProfileRouteIdentityAction {
+        guard !liveChildIDs.isEmpty else { return .waitForFamily }
+        guard liveChildIDs.contains(openChildID) else { return .dismissStaleProfile }
+        if let pairedDeviceOwnerChildID,
+           pairedDeviceOwnerChildID != openChildID {
+            return .dismissStaleProfile
+        }
+        return .refreshCurrentProfile
+    }
+}
+
 private struct ProfileLockCommandAck: Sendable {
     let deviceID: UUID
     let outcome: ManualLockAckOutcome
@@ -79,14 +101,15 @@ struct ProfileView: View {
     @State private var rules: [RuleItem] = []
     @State private var editingRule: RuleItem? = nil
     @State private var showDSTEditor = false
+    @State private var poolEditHandoff = PoolEditPresentationHandoff()
     @State private var dailyLimitMinutes: Int = 120
     /// When non-nil the pool editor persists via the backend (B9).
     /// Nil = no UUID child id → fall back to UserDefaults (legacy path).
     @State private var childProfileUUID: UUID? = nil
     /// Saving indicator shown while putEarnedConfig is in-flight.
     @State private var poolSaving = false
-    /// Pending pool reduction that needs cascade confirmation. Non-nil shows the
-    /// cascade-confirm sheet; the confirmed save proceeds with the stored value.
+    /// Pending pool edit that needs an effective-date choice. Non-nil shows the
+    /// confirmation sheet; the confirmed save proceeds with the stored value.
     @State private var pendingPoolCascade: PoolCascadeState? = nil
     @State private var showProfileMenu = false
     @State private var showEditProfile = false
@@ -96,6 +119,7 @@ struct ProfileView: View {
     @State private var addMode: AddBottomMode? = nil
     @State private var showAddDevicePairing = false
     @State private var addedDeviceKidName = ""
+    @State private var addedDeviceTargetChildID: UUID? = nil
     /// In-profile sub-tab toggle for when an active reflection exists.
     /// The header card's CTA stripe flips between
     ///   `.overview`   — shows Current Tasks / Devices / Rules
@@ -136,6 +160,10 @@ struct ProfileView: View {
     // Local mutable status so the Lock/Unlock button can flip the avatar
     // and pills without requiring a global mutation. See HTML 1029-1034.
     @State private var localStatus: ChildProfile.Status = .unlocked
+    /// Per-device lock truth from each device's own lock-state snapshot.
+    /// `localStatus` stays the any-device-locked aggregate for the big lock
+    /// button; rows and the device tally must not borrow it.
+    @State private var lockedByDeviceID: [UUID: Bool] = [:]
     // Manual provenance across every displayed child device. Automatic sources
     // still drive localStatus but never turn this button into an Unlock action.
     @State private var manualLockState: ManualLockAggregateState = .pending
@@ -617,18 +645,7 @@ struct ProfileView: View {
         }
         .overlay { fabOverlay }
         .fullScreenCover(isPresented: $showAddDevicePairing) {
-            AddDevicePairingFlow(
-                kidName: addedDeviceKidName.isEmpty ? displayChild.name : addedDeviceKidName,
-                targetChildProfileID: UUID(uuidString: displayChild.id),
-                apiClient: apiClient,
-                onDone: {
-                    showAddDevicePairing = false
-                    Task { await familyStore.refresh() }
-                },
-                onCancel: {
-                    showAddDevicePairing = false
-                }
-            )
+            addDevicePairingCover
         }
         .onAppear {
 #if DEBUG
@@ -725,11 +742,85 @@ struct ProfileView: View {
                 profileTab = .reflection
             }
         }
+        .onChange(of: pairedChildID) { _, _ in
+            Task { await reconcileProfileIdentity(refreshFamily: true) }
+        }
+        .onChange(of: familyStore.children.map(\.id)) { _, _ in
+            Task { await reconcileProfileIdentity(refreshFamily: false) }
+        }
         .onDisappear {
             pollTask?.cancel()
             pollTask = nil
             earnedSummaryPollTask?.cancel()
             earnedSummaryPollTask = nil
+        }
+    }
+
+    @MainActor
+    private func reconcileProfileIdentity(refreshFamily: Bool) async {
+        if refreshFamily {
+            await familyStore.refresh()
+        }
+
+        let liveChildren = familyStore.children
+        let ownerChildID = liveChildren.first(where: { dto in
+            dto.devices.contains {
+                $0.device_id.caseInsensitiveCompare(pairedChildID) == .orderedSame
+            }
+        })?.id
+        let action = ProfileRouteIdentityReconciler.action(
+            openChildID: child.id,
+            liveChildIDs: Set(liveChildren.map(\.id)),
+            pairedDeviceOwnerChildID: ownerChildID
+        )
+
+        switch action {
+        case .waitForFamily:
+            return
+        case .dismissStaleProfile:
+            onBack()
+        case .refreshCurrentProfile:
+            guard let liveProfile = familyStore.childProfiles.first(where: {
+                $0.id == child.id
+            }) else { return }
+            localName = liveProfile.name
+            localAge = liveProfile.age
+            localSubtitle = liveProfile.subtitle
+            localAvatarURL = liveProfile.avatarURL
+            localStatus = liveProfile.status
+            syncDevicesFromFamilyStore()
+            if let childProfileID = UUID(uuidString: child.id) {
+                pendingManualLockOperation = ManualLockOperationStore.load(
+                    childProfileID: childProfileID
+                )
+            }
+            if let cachedSummary = familyStore.earnedSummary(forChildID: child.id) {
+                earnedSummary = cachedSummary
+            }
+            await refreshLockState()
+            await refreshEarnedSummary()
+        }
+    }
+
+    @ViewBuilder
+    private var addDevicePairingCover: some View {
+        if let targetChildID = addedDeviceTargetChildID {
+            ParentAddDevicePairingFlow(
+                kidName: addedDeviceKidName.isEmpty ? displayChild.name : addedDeviceKidName,
+                targetChildProfileID: targetChildID,
+                apiClient: apiClient,
+                onDone: {
+                    showAddDevicePairing = false
+                    addedDeviceTargetChildID = nil
+                    Task { await familyStore.refresh() }
+                },
+                onCancel: {
+                    showAddDevicePairing = false
+                    addedDeviceTargetChildID = nil
+                }
+            )
+        } else {
+            EmptyView()
         }
     }
 
@@ -1311,6 +1402,14 @@ struct ProfileView: View {
         return ackByDevice
     }
 
+    /// A row is locked by its OWN device's snapshot when one exists; before
+    /// the first snapshot arrives, fall back to the child-level status so the
+    /// row does not flash "ACTIVE" while the truth is still unknown.
+    private func isDeviceRowLocked(_ deviceID: UUID?) -> Bool {
+        guard let deviceID else { return localStatus != .unlocked }
+        return lockedByDeviceID[deviceID] ?? (localStatus != .unlocked)
+    }
+
     private func manualLockedByDevice(
         from snapshots: [ProfileDeviceLockSnapshot]
     ) -> [UUID: Bool] {
@@ -1361,6 +1460,13 @@ struct ProfileView: View {
             if let automaticState {
                 localStatus = automaticState == .locked ? .locked : .unlocked
             }
+            // Per-device truth for the Enrolled Devices rows. The child-level
+            // aggregate above is any-device-locked by design (right for the
+            // big lock button and the banner), but painting every ROW with it
+            // showed "2 LOCKED" when only the iPad's cap had run out
+            // (2026-08-05): a lock that covers one device must not repaint
+            // its unlocked sibling.
+            lockedByDeviceID = lockedByDevice
         }
         return reducedState
     }
@@ -1592,9 +1698,12 @@ struct ProfileView: View {
                         .font(.custom("Manrope", size: 16).weight(.heavy))
                         .tracking(-0.16)
                         .foregroundStyle(Color.evOnSurface)
+                    let lockedCount = devices.filter { isDeviceRowLocked($0.deviceUUID) }.count
                     EvlinPill(
-                        text: "\(devices.count) \(localStatus == .unlocked ? "active" : "locked")",
-                        tone: localStatus == .unlocked ? .success : .danger,
+                        text: lockedCount > 0
+                            ? "\(lockedCount) locked"
+                            : "\(devices.count) active",
+                        tone: lockedCount > 0 ? .danger : .success,
                         size: .xs
                     )
                     Spacer()
@@ -1633,9 +1742,10 @@ struct ProfileView: View {
                                 iconSystemName: d.iconSystemName,
                                 name: d.name,
                                 detail: d.detail,
-                                locked: localStatus != .unlocked,
+                                locked: isDeviceRowLocked(d.deviceUUID),
                                 timeLeft: deviceTimeLeft,
                                 timePct: deviceRemainingFraction(for: d.deviceUUID),
+                                meteringReady: d.meteringReady,
                                 isLast: idx == devices.count - 1,
                                 onPress: { onOpenDevice(d) }
                             )
@@ -1770,9 +1880,12 @@ struct ProfileView: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(Color.evOutlineVariant.opacity(0.4), lineWidth: 1)
         )
-        .sheet(isPresented: $showDSTEditor) {
+        .sheet(isPresented: $showDSTEditor, onDismiss: {
+            guard let newMinutes = poolEditHandoff.consumeAfterEditorDismissal() else { return }
+            savePool(newMinutes: newMinutes, confirmedCascade: false)
+        }) {
             DailyScreenTimeEditor(currentMinutes: dailyLimitMinutes) { newMinutes in
-                savePool(newMinutes: newMinutes, confirmedCascade: false)
+                poolEditHandoff.submit(minutes: newMinutes)
             }
         }
     }
@@ -1794,8 +1907,10 @@ struct ProfileView: View {
                         child: displayChild,
                         mode: $addMode,
                         onAddDevice: {
+                            guard let childID = UUID(uuidString: displayChild.id) else { return }
                             addMode = nil
                             addedDeviceKidName = displayChild.name
+                            addedDeviceTargetChildID = childID
                             showAddDevicePairing = true
                         }
                     )
@@ -1992,17 +2107,20 @@ struct ProfileView: View {
     }
 
     /// Save the daily pool (earned-time budget) via putEarnedConfig.
-    /// When the new value is lower than the current pool AND confirmation has not
-    /// yet been given, gate behind the cascade-confirm sheet (R10/R11/R12).
+    /// Every changed value requires an explicit today/tomorrow choice. Both
+    /// increases and decreases have user-visible same-day effects.
     ///
     /// - Parameters:
     ///   - newMinutes:       The requested new pool value in minutes.
     ///   - confirmedCascade: Pass `true` when re-calling after the user confirms.
     private func savePool(newMinutes: Int, confirmedCascade: Bool, effective: String = "today") {
-        // Gate: if lowering the pool without confirmation, show the confirm sheet.
-        // ProfileView doesn't hold per-device cap data, so we construct a
-        // "generic reduction" decision that always triggers confirmation.
-        if !confirmedCascade && newMinutes < dailyLimitMinutes {
+        // ProfileView doesn't hold per-device cap data, so this result carries
+        // no affected-item rows; the sheet is an effective-date chooser here.
+        if !confirmedCascade,
+           PoolEditConfirmationPolicy.requiresEffectiveDateChoice(
+               currentMinutes: dailyLimitMinutes,
+               newMinutes: newMinutes
+           ) {
             let decision = EarnedCascadeDecision.Result(
                 needsConfirmation: true,
                 affectedDevices: [],
@@ -2161,107 +2279,6 @@ private struct ProfileComingSoonSheet: View {
     }
 }
 
-/// Pairing v2: the parent SHOWS a code and the new device scans it. The invite
-/// carries the target child, so that device is told whose it is becoming and is
-/// never asked for a name this family already has.
-private struct AddDevicePairingFlow: View {
-    let kidName: String
-    let targetChildProfileID: UUID?
-    let onDone: () -> Void
-    let onCancel: () -> Void
-
-    @StateObject private var model: ParentInviteModel
-    @State private var paired = false
-
-    init(
-        kidName: String,
-        targetChildProfileID: UUID?,
-        apiClient: APIClient,
-        onDone: @escaping () -> Void,
-        onCancel: @escaping () -> Void
-    ) {
-        self.kidName = kidName
-        self.targetChildProfileID = targetChildProfileID
-        self.onDone = onDone
-        self.onCancel = onCancel
-        // Built here rather than injected on appear: the step mints as soon as
-        // it appears and would otherwise race its own configuration.
-        _model = StateObject(wrappedValue: ParentInviteModel(
-            api: .live(client: apiClient)
-        ))
-    }
-
-    var body: some View {
-        NavigationStack {
-            Group {
-                if paired {
-                    AddDeviceSuccessStep(kidName: kidName, onDone: onDone)
-                } else {
-                    ParentInviteStep(
-                        model: model,
-                        purpose: targetChildProfileID == nil ? .newChild : .addDevice,
-                        targetChildProfileID: targetChildProfileID,
-                        targetChildName: kidName,
-                        // Reached from Profile, not onboarding.
-                        showsOnboardingProgress: false
-                    )
-                    .onAppear { model.onJoined = { paired = true } }
-                }
-            }
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button(paired ? "Done" : "Cancel") {
-                        if paired {
-                            onDone()
-                        } else {
-                            onCancel()
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-private struct AddDeviceSuccessStep: View {
-    let kidName: String
-    let onDone: () -> Void
-
-    private var name: String {
-        let trimmed = kidName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "your kid" : trimmed
-    }
-
-    var body: some View {
-        OnboardingV2ScreenContainer(
-            role: .parent,
-            phase: "Device added",
-            stepIndex: 1,
-            stepTotal: 1,
-            title: "Device added",
-            subtitle: nil,
-            dotsCount: 1,
-            dotsCurrent: 0,
-            content: {
-                VStack(spacing: Spacing.xl) {
-                    OnboardingV2SuccessCheck(role: .parent, size: 62)
-                    Text("Connected to \(name)").onboardingV2TitleL()
-                    Text("This device is now linked. You can return to \(name)'s profile.")
-                        .onboardingV2Body()
-                        .multilineTextAlignment(.center)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, Spacing.section)
-            },
-            footer: {
-                OnboardingV2PrimaryButton("Done", role: .parent) {
-                    onDone()
-                }
-            }
-        )
-    }
-}
-
 private struct ProfileAddMenu: View {
     let child: ChildProfile
     @Binding var mode: AddBottomMode?
@@ -2280,8 +2297,8 @@ private struct ProfileAddMenu: View {
                   sub: "New chore or homework for \(child.name)"),
             .init(id: .rule, icon: "shield", label: "Add Rule",
                   sub: "New screen-time or routine rule"),
-            .init(id: .device, icon: "iphone", label: "Add Device",
-                  sub: "Pair another phone or tablet"),
+            .init(id: .device, icon: "iphone", label: "Add/Recover Device",
+                  sub: "Pair/Repair another phone or tablet"),
         ]
     }
 
@@ -2370,7 +2387,7 @@ private struct PoolCascadeSheetHost: View {
             .sheet(item: $pending) { state in
                 EarnedCascadeConfirmSheet(
                     result: state.decision,
-                    summary: "Lowering the daily pool may reduce device and app limits.",
+                    summary: "Choose when the new daily screen time limit should take effect.",
                     onApply: { effective in onSave(state.newMinutes, effective) },
                     onCancel: { pending = nil }
                 )

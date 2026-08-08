@@ -10,6 +10,10 @@ nonisolated enum DatedRouteInstallResult: Equatable, Sendable {
     case deferred(workID: UUID, code: String)
 }
 
+private enum DatedRouteInstallerError: Error, Equatable {
+    case postAbsorbConfigurationUnavailable
+}
+
 /// Process-local coordinator whose operations remain MainActor-isolated, while
 /// destruction avoids the MainActor back-deployment deinit shim. Short-lived
 /// test and recovery instances otherwise double-free in that shim.
@@ -46,7 +50,8 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
             if due.authorization == .registrationRequired {
                 let superseded = try store.supersedeUnprovenRegistrationRequiredInstall(
                     workID: due.workID,
-                    owner: ownerChildDeviceID
+                    owner: ownerChildDeviceID,
+                    now: clock.now
                 )
                 let result = DatedRouteInstallResult.deferred(
                     workID: due.workID,
@@ -162,14 +167,27 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
     /// one has failed to advance.
     private func isStuckPlanned(_ route: MeteringCallbackRoute, now: Date) -> Bool {
         guard route.lifecycle == .planned else { return false }
-        guard let openedAt = route.plannedSchedule.intervalStartAt,
-              now >= openedAt
-        else { return false }
-        return now.timeIntervalSince(route.createdAt) > Self.plannedWindowStuckGraceSeconds
+        let openedAt: Date
+        if let explicitStart = route.plannedSchedule.intervalStartAt {
+            openedAt = explicitStart
+        } else {
+            guard let timeZone = TimeZone(
+                identifier: route.plannedSchedule.timezoneIdentifier
+            ), let canonicalStart = try? MeteringDatedSchedule.canonicalStart(
+                usageDate: route.usageDate,
+                timeZone: timeZone
+            ) else { return false }
+            openedAt = canonicalStart
+        }
+        guard now >= openedAt else { return false }
+        // A future route may be created days before its window opens. It has
+        // only been stuck since both the route existed and the window was open.
+        let eligibleSince = max(route.createdAt, openedAt)
+        return now.timeIntervalSince(eligibleSince) > Self.plannedWindowStuckGraceSeconds
     }
 
     private func stopOrphanedV2Activities(ownerChildDeviceID owner: UUID) throws {
-        let state = try store.read()
+        var state = try store.read()
         guard state.ownerChildDeviceID == owner else { return }
         // An install owner may be between daemon mutation and durable adoption.
         // Let that lease finish before performing global orphan reconciliation.
@@ -179,10 +197,29 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
                 && $0.claim != nil
         }) else { return }
         let now = clock.now
-        let stuck = state.routes.values.filter {
-            $0.ownerChildDeviceID == owner && isStuckPlanned($0, now: now)
+        let stuckCandidates = state.routes.values.filter { route in
+            guard route.ownerChildDeviceID == owner,
+                  isStuckPlanned(route, now: now)
+            else { return false }
+            let installs = state.installWork.values.filter {
+                $0.ownerChildDeviceID == owner && $0.routeID == route.routeID
+            }
+            guard installs.count == 1, let install = installs.first else { return false }
+            switch install.phase {
+            case .pendingStart, .starting, .installed:
+                return true
+            case .verified, .dualActive, .active, .pendingStop, .stopped:
+                return false
+            }
         }
-        for route in stuck {
+        var retiredStuckNames = Set<String>()
+        for route in stuckCandidates {
+            guard try store.retireStuckPlannedRoute(
+                routeID: route.routeID,
+                owner: owner,
+                now: now
+            ) else { continue }
+            retiredStuckNames.insert(route.activityName)
             // A stuck route was silent for 14 hours once. It never will be again.
             MeteringFlightRecorder.emit(
                 kind: .meteringWork,
@@ -197,11 +234,12 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
                 corrID: route.routeID
             )
         }
-        let stuckNames = Set(stuck.map(\.activityName))
+        if !retiredStuckNames.isEmpty {
+            state = try store.read()
+        }
         let desiredNames = Set(state.routes.values.compactMap { route -> String? in
             guard route.ownerChildDeviceID == owner,
                   route.lifecycle == .planned || route.lifecycle == .active,
-                  !stuckNames.contains(route.activityName),
                   state.generations[route.generationID]?.retiredAt == nil
             else { return nil }
             return route.activityName
@@ -489,10 +527,7 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
             // priced against the OLD base. Arming those would recreate BUG 1 on
             // the successful path: the daemon holding a ladder the store has
             // already re-priced.
-            let armed = try expectedConfigurationAfterAbsorb(
-                routeID: route.routeID,
-                fallback: expected
-            )
+            let armed = try expectedConfigurationAfterAbsorb(routeID: route.routeID)
             try center.startMonitoring(activity, during: armed.schedule, events: armed.events)
             guard try store.recordInstalledRoute(workID: claimed.work.workID, token: claimed.claim.token, owner: owner, now: clock.now) else {
                 return ClaimedReconcileOutcome(result: .deferred(workID: claimed.work.workID, code: "claimLost"), stopFilling: false)
@@ -509,7 +544,13 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
             return ClaimedReconcileOutcome(result: .verified(workID: claimed.work.workID), stopFilling: false)
         } catch {
             let isExcessive = (error as? DeviceActivityCenter.MonitoringError) == .excessiveActivities
-            let code = isExcessive ? "excessiveActivities" : "startFailed"
+            let isPostAbsorbConfigurationFailure =
+                (error as? DatedRouteInstallerError) == .postAbsorbConfigurationUnavailable
+            let code = isExcessive
+                ? "excessiveActivities"
+                : isPostAbsorbConfigurationFailure
+                    ? "postAbsorbConfigurationUnavailable"
+                    : "startFailed"
 #if DEBUG
             if isExcessive {
                 let activityNames = center.activities
@@ -569,19 +610,22 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
     }
 
     /// Re-reads the route after `absorbCreditedProgressForRearm` and rebuilds the
-    /// configuration from the ladder it left behind. Falls back to the
-    /// pre-absorb configuration when the route or its expected configuration
-    /// cannot be rebuilt — arming the previous shape is strictly better than
-    /// arming nothing, and the coverage probe catches the mismatch.
+    /// configuration from the ladder it left behind. A failed re-read must defer
+    /// the install: the pre-absorb shape is now false, and verifying the daemon
+    /// against that same false shape would certify a ladder the durable ledger no
+    /// longer describes.
     private func expectedConfigurationAfterAbsorb(
-        routeID: UUID,
-        fallback: (schedule: DeviceActivitySchedule, events: [DeviceActivityEvent.Name: DeviceActivityEvent])
+        routeID: UUID
     ) throws -> (schedule: DeviceActivitySchedule, events: [DeviceActivityEvent.Name: DeviceActivityEvent]) {
-        guard let state = try? store.read(),
-              let refreshed = state.routes[routeID],
-              let rebuilt = try? expectedConfiguration(for: refreshed, state: state)
-        else { return fallback }
-        return rebuilt
+        do {
+            let state = try store.read()
+            guard let refreshed = state.routes[routeID] else {
+                throw DatedRouteInstallerError.postAbsorbConfigurationUnavailable
+            }
+            return try expectedConfiguration(for: refreshed, state: state)
+        } catch {
+            throw DatedRouteInstallerError.postAbsorbConfigurationUnavailable
+        }
     }
 
     private func expectedConfiguration(for route: MeteringCallbackRoute, state: DeviceEpochStoreState) throws -> (schedule: DeviceActivitySchedule, events: [DeviceActivityEvent.Name: DeviceActivityEvent]) {

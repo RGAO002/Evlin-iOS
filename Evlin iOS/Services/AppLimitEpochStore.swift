@@ -201,6 +201,78 @@ nonisolated final class AppLimitEpochStore: @unchecked Sendable {
         }
     }
 
+    struct PairingOwnerReplacement: Equatable, Sendable {
+        let oldOwner: UUID?
+        let oldActivityNames: Set<String>
+    }
+
+    /// Converges a stale per-app root after the kid device has adopted a new
+    /// backend identity. The current owner mirror is the authority for this
+    /// narrow recovery path; rules and callback provenance from another device
+    /// must never be carried into the new identity.
+    func convergeOwnerAfterPairing(
+        expectedOwner: UUID
+    ) throws -> PairingOwnerReplacement? {
+        try withLock {
+            guard ownerProvider() == expectedOwner else {
+                throw AppLimitEpochStoreError.ownerMismatch
+            }
+
+            let url = try resolvedFileURL()
+            var priorData = try fileIO.read(from: url)
+            let priorState: AppLimitEpochStoreState
+            if let data = priorData {
+                do {
+                    let decoded = try Self.decoder.decode(
+                        AppLimitEpochStoreState.self,
+                        from: data
+                    )
+                    guard decoded.schemaVersion <= AppLimitEpochStoreState.currentSchemaVersion else {
+                        throw AppLimitEpochStoreError.unsupportedSchema(decoded.schemaVersion)
+                    }
+                    try validate(decoded)
+                    priorState = decoded
+                } catch let storeError as AppLimitEpochStoreError {
+                    if case .unsupportedSchema = storeError {
+                        throw storeError
+                    }
+                    try quarantine(data, at: url)
+                    priorData = nil
+                    priorState = AppLimitEpochStoreState()
+                } catch {
+                    try quarantine(data, at: url)
+                    priorData = nil
+                    priorState = AppLimitEpochStoreState()
+                }
+            } else {
+                priorState = AppLimitEpochStoreState()
+            }
+
+            guard priorState.ownerChildDeviceID != expectedOwner else {
+                return nil
+            }
+
+            let oldActivityNames = Set(
+                priorState.slots.values.compactMap { $0.armProvenance?.activityName }
+            )
+            let replacement = AppLimitEpochStoreState(
+                storeRevision: 1,
+                ownerChildDeviceID: expectedOwner
+            )
+            try persist(
+                replacement,
+                replacing: priorData,
+                expectedOwner: expectedOwner,
+                at: url
+            )
+            legacyDefaults?.removeObject(forKey: Self.legacyRulesKey)
+            return PairingOwnerReplacement(
+                oldOwner: priorState.ownerChildDeviceID,
+                oldActivityNames: oldActivityNames
+            )
+        }
+    }
+
     func requiresOwnerForIdentityTeardown() throws -> Bool {
         try withLock {
             let url = try resolvedFileURL()

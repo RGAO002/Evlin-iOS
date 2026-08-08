@@ -10,6 +10,7 @@ struct EvlinPINGateView: View {
     let store: EvlinPINStore
     let onUnlocked: () -> Void
     let onCancel: () -> Void
+    var onPINAuthenticated: ((String) -> Void)? = nil
 
     private enum Phase { case enter, confirm }
 
@@ -18,11 +19,23 @@ struct EvlinPINGateView: View {
     @State private var firstEntry = ""
     @State private var error: String?
     @State private var shake = false
+    @State private var pinStateRevision = 0
+    @State private var checkingRemoteReset = true
 
-    private var isFirstRun: Bool { !store.isSet() }
+    private var isFirstRun: Bool {
+        _ = pinStateRevision
+        return !store.isSet()
+    }
     private let maxLen = 8
     private let minLen = 4
-    private var canSubmit: Bool { pin.count >= minLen }
+    private var canSubmit: Bool { pin.count >= minLen && !checkingRemoteReset }
+
+    static func syncablePIN(
+        enteredPIN: String,
+        authenticated: Bool
+    ) -> String? {
+        authenticated ? enteredPIN : nil
+    }
 
     private var title: String {
         if !isFirstRun { return "Enter parent PIN" }
@@ -80,6 +93,15 @@ struct EvlinPINGateView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(EvlinKidColors.surface2.ignoresSafeArea())
+        .task {
+            if await ParentPINSyncCoordinator.reconcileRemoteReset() {
+                pin = ""
+                firstEntry = ""
+                phase = .enter
+                pinStateRevision += 1
+            }
+            checkingRemoteReset = false
+        }
     }
 
     private var dots: some View {
@@ -117,7 +139,9 @@ struct EvlinPINGateView: View {
             }
             .buttonStyle(KeypadKeyStyle(restingFill: .clear, restingText: EvlinKidColors.ink3))
         case "done":
-            Button { if canSubmit { submit() } } label: {
+            Button {
+                if canSubmit { Task { await submit() } }
+            } label: {
                 Image(systemName: "checkmark")
                     .font(.system(size: 22, weight: .bold))
                     .foregroundStyle(canSubmit ? .white : EvlinKidColors.ink3)
@@ -141,10 +165,30 @@ struct EvlinPINGateView: View {
         error = nil
     }
 
-    private func submit() {
+    private func submit() async {
         error = nil
         if !isFirstRun {
-            if store.verify(pin) { onUnlocked() } else { fail("Wrong PIN.") }
+            checkingRemoteReset = true
+            let cleared = await ParentPINSyncCoordinator.reconcileRemoteReset()
+            checkingRemoteReset = false
+            if cleared {
+                pin = ""
+                firstEntry = ""
+                phase = .enter
+                pinStateRevision += 1
+                error = "This PIN was cleared. Create a new one."
+                return
+            }
+            let authenticated = store.verify(pin)
+            if let verifiedPIN = Self.syncablePIN(
+                enteredPIN: pin,
+                authenticated: authenticated
+            ) {
+                onPINAuthenticated?(verifiedPIN)
+                onUnlocked()
+            } else {
+                fail("Wrong PIN.")
+            }
             return
         }
         switch phase {
@@ -156,7 +200,12 @@ struct EvlinPINGateView: View {
             guard pin == firstEntry else {
                 phase = .enter; firstEntry = ""; fail("PINs don't match."); return
             }
-            do { try store.setPIN(pin); onUnlocked() }
+            do {
+                try store.setPIN(pin)
+                ParentPINSyncCoordinator.captureNewPIN(pin)
+                onPINAuthenticated?(pin)
+                onUnlocked()
+            }
             catch EvlinPINStore.PINError.invalidLength {
                 phase = .enter; firstEntry = ""; fail("PIN must be 4–8 digits.")
             } catch { phase = .enter; firstEntry = ""; fail("Couldn't save PIN. Try again.") }

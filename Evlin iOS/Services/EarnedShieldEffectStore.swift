@@ -316,6 +316,30 @@ nonisolated final class EarnedShieldEffectStore: @unchecked Sendable {
     }
 
     func release(operationID: UUID, expectedOwner: UUID) throws {
+        try release(
+            operationID: operationID,
+            expectedOwner: expectedOwner,
+            permitsPreparedEnvelope: false
+        )
+    }
+
+    /// Identity retirement captures the exact operation before it retires the
+    /// route. A crash may leave that operation at `.prepared` even though its
+    /// reference was committed, so cleanup must be able to retire it without
+    /// first applying a lock owned by the identity being removed.
+    func retireForIdentityCleanup(operationID: UUID, expectedOwner: UUID) throws {
+        try release(
+            operationID: operationID,
+            expectedOwner: expectedOwner,
+            permitsPreparedEnvelope: true
+        )
+    }
+
+    private func release(
+        operationID: UUID,
+        expectedOwner: UUID,
+        permitsPreparedEnvelope: Bool
+    ) throws {
         try withPersistenceLock {
             var envelopes = try loadEnvelopes()
             guard var envelope = envelopes[operationID] else {
@@ -330,7 +354,9 @@ nonisolated final class EarnedShieldEffectStore: @unchecked Sendable {
             case .conflicted:
                 throw EarnedShieldEffectError.casConflict(operationID)
             case .prepared:
-                throw EarnedShieldEffectError.authorizationChanged
+                guard permitsPreparedEnvelope else {
+                    throw EarnedShieldEffectError.authorizationChanged
+                }
             case .applied, .releasePending:
                 break
             }
@@ -706,7 +732,12 @@ nonisolated final class EarnedShieldEffectStore: @unchecked Sendable {
             throw EarnedShieldEffectError.durableReadbackMismatch
         }
         defaults.set(data, forKey: key)
-        guard defaults.synchronize(), defaults.data(forKey: key) == data else {
+        // `synchronize()` is only a legacy flush hint and can return false even
+        // when the App-Group bytes are already readable. Exact readback is the
+        // durability gate; treating the hint as authority wedges recovery in
+        // `releasePending` on real devices.
+        _ = defaults.synchronize()
+        guard defaults.data(forKey: key) == data else {
             throw EarnedShieldEffectError.durableReadbackMismatch
         }
     }

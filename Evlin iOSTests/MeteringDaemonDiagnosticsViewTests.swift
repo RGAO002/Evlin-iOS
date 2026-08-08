@@ -5,6 +5,40 @@ import XCTest
 @testable import Evlin_iOS
 
 final class MeteringDaemonDiagnosticsViewTests: XCTestCase {
+    func test_v2HorizonStartsPendingAndCannotArmLegacyLadder() throws {
+        let owner = UUID()
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("metering-v2-pending-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+
+        let store = DeviceEpochStore(fileURL: storeURL, ownerProvider: { owner })
+        let selectionBytes = try JSONEncoder().encode(FamilyActivitySelection())
+        let key = MeteringGenerationKey(
+            protocolVersion: 2,
+            childDeviceID: owner,
+            canonicalTimezone: "America/New_York",
+            policyRevision: "v2-only-fixture",
+            measurementSelectionDigest: MeteringEpochContract.selectionDigest(
+                persistedBytes: selectionBytes
+            ),
+            enforcementSetID: UUID()
+        )
+
+        _ = try store.reconcileMeteringHorizon(.init(
+            ownerChildDeviceID: owner,
+            today: "2026-07-30",
+            generationKey: key,
+            persistedSelectionBytes: selectionBytes,
+            poolMinutes: 120,
+            deviceCapMinutes: 60,
+            authoritativeBaseAcceptedMinutes: 0,
+            now: Date(timeIntervalSince1970: 1_785_420_000)
+        ))
+
+        XCTAssertEqual(try store.read().ratchets[owner]?.localSelection, .v2Pending)
+        XCTAssertFalse(EarnedBudgetScheduler.canInstallLegacyLadder(localSelection: .v2Pending))
+    }
+
     func testSnapshotExposesIdentityProtocolCountsAndLatestMismatch() {
         let owner = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
         let otherOwner = UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!
@@ -117,9 +151,118 @@ final class MeteringDaemonDiagnosticsViewTests: XCTestCase {
         let request = try XCTUnwrap(requests.first { $0.activityName == activityName })
         XCTAssertEqual(request.namespace, MeteringRouteNamespace.prefix)
         XCTAssertEqual(request.reason, .manual)
-        XCTAssertEqual(request.expected.events.count, 12)
+        // 12 five-minute rungs to the 60-minute cap, plus the #94 t1 sacrifice.
+        XCTAssertEqual(request.expected.events.count, 13)
+        XCTAssertTrue(request.expected.events.contains { $0.threshold == "minute=1" })
         XCTAssertTrue(request.expected.events.contains { $0.threshold == "minute=5" })
         XCTAssertTrue(request.expected.events.contains { $0.threshold == "minute=60" })
+    }
+
+    func testManualInspectionRequestsIncludePendingEarnedRouteBeforeActivation() throws {
+        let owner = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let start = Date(timeIntervalSince1970: 1_768_665_600)
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("metering-daemon-pending-view-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+
+        let store = DeviceEpochStore(fileURL: storeURL, ownerProvider: { owner })
+        let selectionBytes = try JSONEncoder().encode(FamilyActivitySelection())
+        let key = MeteringGenerationKey(
+            protocolVersion: 2,
+            childDeviceID: owner,
+            canonicalTimezone: "America/New_York",
+            policyRevision: "pending-diagnostic-fixture",
+            measurementSelectionDigest: MeteringEpochContract.selectionDigest(
+                persistedBytes: selectionBytes
+            ),
+            enforcementSetID: UUID()
+        )
+        let plan = try store.reconcileMeteringHorizon(.init(
+            ownerChildDeviceID: owner,
+            today: "2026-01-17",
+            generationKey: key,
+            persistedSelectionBytes: selectionBytes,
+            poolMinutes: 120,
+            deviceCapMinutes: 60,
+            authoritativeBaseAcceptedMinutes: 0,
+            now: start
+        ))
+        let routeID = try XCTUnwrap(plan.routeIDsByUsageDate["2026-01-17"])
+        try store.transaction(expectedOwner: owner) { state in
+            state.activeGenerationID = plan.generationID
+            state.activeEpochID = state.routes[routeID]?.epochID
+        }
+        let state = try store.read()
+        let activityName = try XCTUnwrap(state.routes[routeID]?.activityName)
+        XCTAssertEqual(state.routes[routeID]?.lifecycle, .planned)
+
+        let requests = MeteringDaemonDiagnosticsSnapshot.manualInspectionRequests(
+            entries: [],
+            ownerChildDeviceID: owner,
+            state: state
+        )
+
+        let request = try XCTUnwrap(requests.first { $0.activityName == activityName })
+        XCTAssertEqual(request.namespace, MeteringRouteNamespace.prefix)
+        XCTAssertEqual(request.reason, .manual)
+        XCTAssertTrue(request.expected.events.contains { $0.threshold == "minute=5" })
+    }
+
+    func testPendingWorkEvidenceReportsRegistrationAndInstallRetryForSelectedRoute() throws {
+        let owner = UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!
+        let start = Date(timeIntervalSince1970: 1_768_665_600)
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("metering-daemon-work-view-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+
+        let store = DeviceEpochStore(fileURL: storeURL, ownerProvider: { owner })
+        let selectionBytes = try JSONEncoder().encode(FamilyActivitySelection())
+        let key = MeteringGenerationKey(
+            protocolVersion: 2,
+            childDeviceID: owner,
+            canonicalTimezone: "America/New_York",
+            policyRevision: "pending-work-diagnostic-fixture",
+            measurementSelectionDigest: MeteringEpochContract.selectionDigest(
+                persistedBytes: selectionBytes
+            ),
+            enforcementSetID: UUID()
+        )
+        let plan = try store.reconcileMeteringHorizon(.init(
+            ownerChildDeviceID: owner,
+            today: "2026-01-17",
+            generationKey: key,
+            persistedSelectionBytes: selectionBytes,
+            poolMinutes: 120,
+            deviceCapMinutes: 60,
+            authoritativeBaseAcceptedMinutes: 0,
+            now: start
+        ))
+        let routeID = try XCTUnwrap(plan.routeIDsByUsageDate["2026-01-17"])
+        try store.transaction(expectedOwner: owner) { state in
+            state.activeGenerationID = plan.generationID
+            state.activeEpochID = state.routes[routeID]?.epochID
+            state.activeRouteID = routeID
+            state.routes[routeID]?.lifecycle = .active
+            let installKey = try XCTUnwrap(state.installWork.keys.first {
+                state.installWork[$0]?.routeID == routeID
+            })
+            state.installWork[installKey]?.retry.attemptCount = 2
+            state.installWork[installKey]?.retry.lastErrorCode = "verificationFailed"
+            state.installWork[installKey]?.retry.nextAttemptAt = start.addingTimeInterval(60)
+        }
+
+        let evidence = try XCTUnwrap(
+            MeteringDaemonPendingWorkEvidence.derive(
+                ownerChildDeviceID: owner,
+                state: try store.read()
+            )
+        )
+
+        XCTAssertEqual(evidence.routeID, routeID)
+        XCTAssertEqual(evidence.installPhase, ActivityInstallPhase.pendingStart.rawValue)
+        XCTAssertEqual(evidence.installAttempts, 2)
+        XCTAssertEqual(evidence.installLastErrorCode, "verificationFailed")
+        XCTAssertEqual(evidence.registrationTerminal, MeteringWorkTerminal.pending.rawValue)
     }
 
     func testDiagnosticViewSourceHasNoMeteringOrLockMutationCalls() throws {

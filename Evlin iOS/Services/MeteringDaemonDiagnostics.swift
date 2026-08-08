@@ -307,6 +307,7 @@ nonisolated struct MeteringDaemonNamespaceCount: Equatable, Sendable {
 
 nonisolated enum MeteringDaemonActivationStage: String, Equatable, Sendable {
     case v1
+    case v2Pending = "v2_pending"
     case dualActiveIncomplete = "dual_active_incomplete"
     case dualActiveAwaitingActivation = "dual_active_awaiting_activation"
     case v2Ready = "v2_ready"
@@ -349,6 +350,8 @@ nonisolated struct MeteringDaemonActivationEvidence: Equatable, Sendable {
         switch input.localSelection {
         case .v1:
             stage = .v1
+        case .v2Pending:
+            stage = .v2Pending
         case .dualActive:
             let installed = input.installPhase == .verified
                 || input.installPhase == .dualActive
@@ -450,7 +453,7 @@ nonisolated struct MeteringDaemonActivationEvidence: Equatable, Sendable {
         }
     }
 
-    private static func selectedRoute(
+    fileprivate static func selectedRoute(
         state: DeviceEpochStoreState,
         ownerChildDeviceID: UUID,
         localSelection: MeteringLocalProtocolSelection
@@ -474,6 +477,85 @@ nonisolated struct MeteringDaemonActivationEvidence: Equatable, Sendable {
                 && $0.lifecycle != .tombstoned
         }
         return matches.count == 1 ? matches[0] : nil
+    }
+}
+
+/// Read-only view of the three work items that must settle before a v2 route
+/// can become active. This exists so a pending route can be diagnosed without
+/// inferring its cause from an absent daemon activity.
+nonisolated struct MeteringDaemonPendingWorkEvidence: Equatable, Sendable {
+    let routeID: UUID
+    let installAuthorization: String
+    let installPhase: String
+    let installAttempts: Int
+    let installLastErrorCode: String?
+    let installNextAttemptAt: Date
+    let installTerminal: String
+    let registrationAttempts: Int?
+    let registrationLastErrorCode: String?
+    let registrationNextAttemptAt: Date?
+    let registrationTerminal: String?
+    let activationAttempts: Int?
+    let activationLastErrorCode: String?
+    let activationNextAttemptAt: Date?
+    let activationTerminal: String?
+
+    static func derive(
+        ownerChildDeviceID: UUID?,
+        state: DeviceEpochStoreState?
+    ) -> Self? {
+        guard let ownerChildDeviceID,
+              let state,
+              state.ownerChildDeviceID == ownerChildDeviceID,
+              let ratchet = state.ratchets[ownerChildDeviceID],
+              let route = MeteringDaemonActivationEvidence.selectedRoute(
+                  state: state,
+                  ownerChildDeviceID: ownerChildDeviceID,
+                  localSelection: ratchet.localSelection
+              ),
+              let install = state.installWork.values
+                  .filter({
+                      $0.ownerChildDeviceID == ownerChildDeviceID
+                          && $0.routeID == route.routeID
+                  })
+                  .sorted(by: { $0.createdAt > $1.createdAt })
+                  .first
+        else { return nil }
+
+        let registration = state.registrationWork.values
+            .filter {
+                $0.ownerChildDeviceID == ownerChildDeviceID
+                    && $0.epochID == route.epochID
+                    && $0.routeID == route.routeID
+            }
+            .sorted { $0.createdAt > $1.createdAt }
+            .first
+        let activation = state.activationWork.values
+            .filter {
+                $0.ownerChildDeviceID == ownerChildDeviceID
+                    && $0.epochID == route.epochID
+                    && $0.routeID == route.routeID
+            }
+            .sorted { $0.createdAt > $1.createdAt }
+            .first
+
+        return Self(
+            routeID: route.routeID,
+            installAuthorization: install.authorization.rawValue,
+            installPhase: install.phase.rawValue,
+            installAttempts: install.retry.attemptCount,
+            installLastErrorCode: install.retry.lastErrorCode,
+            installNextAttemptAt: install.retry.nextAttemptAt,
+            installTerminal: install.retry.terminal.rawValue,
+            registrationAttempts: registration?.retry.attemptCount,
+            registrationLastErrorCode: registration?.retry.lastErrorCode,
+            registrationNextAttemptAt: registration?.retry.nextAttemptAt,
+            registrationTerminal: registration?.retry.terminal.rawValue,
+            activationAttempts: activation?.retry.attemptCount,
+            activationLastErrorCode: activation?.retry.lastErrorCode,
+            activationNextAttemptAt: activation?.retry.nextAttemptAt,
+            activationTerminal: activation?.retry.terminal.rawValue
+        )
     }
 }
 
@@ -549,24 +631,30 @@ nonisolated struct MeteringDaemonDiagnosticsSnapshot: Equatable, Sendable {
         }
         if let ownerChildDeviceID,
            let state,
-           let activeEarned = activeEarnedInspectionRequest(
+           let selectedEarned = selectedEarnedInspectionRequest(
                ownerChildDeviceID: ownerChildDeviceID,
                state: state
            ) {
-            requestsByActivity[activeEarned.activityName] = activeEarned
+            requestsByActivity[selectedEarned.activityName] = selectedEarned
         }
         return requestsByActivity.values.sorted { $0.activityName < $1.activityName }
     }
 
-    private static func activeEarnedInspectionRequest(
+    /// This includes the selected planned route as well as an active route.
+    /// A pending route is precisely the state we need to inspect when v2
+    /// activation has not yet completed; restricting manual inspection to
+    /// `.active` hid that failure mode behind unrelated per-app journal rows.
+    private static func selectedEarnedInspectionRequest(
         ownerChildDeviceID: UUID,
         state: DeviceEpochStoreState
     ) -> MeteringDaemonInspectionRequest? {
         guard state.ownerChildDeviceID == ownerChildDeviceID,
-              let routeID = state.activeRouteID,
-              let route = state.routes[routeID],
-              route.ownerChildDeviceID == ownerChildDeviceID,
-              route.lifecycle == .active,
+              let route = MeteringDaemonActivationEvidence.selectedRoute(
+                  state: state,
+                  ownerChildDeviceID: ownerChildDeviceID,
+                  localSelection: state.ratchets[ownerChildDeviceID]?.localSelection ?? .v1
+              ),
+              route.lifecycle == .planned || route.lifecycle == .active,
               let generation = state.generations[route.generationID],
               let timeZone = TimeZone(identifier: route.plannedSchedule.timezoneIdentifier),
               let selection = try? JSONDecoder().decode(

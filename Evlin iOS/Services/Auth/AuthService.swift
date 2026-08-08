@@ -276,7 +276,15 @@ final class AuthService {
             defaults.removeObject(forKey: key)
         }
         LocalAliasStore.shared.removeAllAliases()
+        DefaultLockGroupStore.clearAllListsForIdentityTeardown()
         EarnedTimeStore.shared.removeAll()
+        // FamilyControls selection tokens + the kid-device Parent PIN are
+        // identity-scoped too. Without these a NEW account inherits the old
+        // family's App Controls picks and its PIN gate.
+        Task { @MainActor in
+            ScreenTimeManager.shared.clearSelectionForIdentityTeardown()
+        }
+        EvlinPINStore.shared.clear()
         APIClient.resetClientInstallID()
     }
 

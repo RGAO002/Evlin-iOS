@@ -71,6 +71,19 @@ final class ChatAuthedRequestTests: XCTestCase {
             "authedRequest must omit Authorization when no token is stored")
     }
 
+    /// A parent action must never leave its UI in an indefinite loading state
+    /// because a reachable-but-stalled backend request inherited URLSession's
+    /// long default timeout.
+    func test_authedRequest_applies_explicit_bounded_timeout() {
+        let req = Self.client.authedRequest(
+            path: "/family/children/example/devices/example",
+            method: "DELETE",
+            timeoutInterval: 15
+        )
+
+        XCTAssertEqual(req.timeoutInterval, 15)
+    }
+
     // MARK: - FeedbackService uses authedRequest
 
     /// FeedbackService.submit now builds its request via APIClient.authedRequest,

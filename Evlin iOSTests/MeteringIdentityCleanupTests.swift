@@ -90,6 +90,147 @@ final class MeteringIdentityCleanupTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: storeURL), firstBytes)
     }
 
+    func testCleanupWithoutTargetCanBeAdoptedOnceByNewPairing() throws {
+        let oldOwner = try XCTUnwrap(currentOwner)
+        let newOwner = UUID()
+        let now = Date(timeIntervalSince1970: 1_784_419_200)
+        try seedOwner(oldOwner, now: now)
+        let workID = try store.prepareIdentityCleanup(
+            oldOwner: oldOwner,
+            newOwner: nil,
+            oldFallbackKeys: [],
+            now: now
+        )
+        try acknowledgeEveryCapturedEffect(workID: workID)
+        XCTAssertTrue(try store.markIdentityCleanupSucceeded(workID: workID))
+
+        XCTAssertTrue(
+            try store.adoptIdentityCleanupTarget(
+                workID: workID,
+                newOwner: newOwner
+            )
+        )
+        let adopted = try XCTUnwrap(store.read().identityCleanupWork)
+        XCTAssertEqual(adopted.workID, workID)
+        XCTAssertEqual(adopted.newOwnerChildDeviceID, newOwner)
+        XCTAssertFalse(adopted.ownerMirrorTransitionAcknowledged)
+        XCTAssertEqual(adopted.retry.terminal, .pending)
+        XCTAssertFalse(
+            try store.adoptIdentityCleanupTarget(
+                workID: workID,
+                newOwner: newOwner
+            )
+        )
+    }
+
+    func testCleanupAlreadyTargetingAnotherOwnerCannotBeAdopted() throws {
+        let oldOwner = try XCTUnwrap(currentOwner)
+        let assignedOwner = UUID()
+        let differentOwner = UUID()
+        let now = Date(timeIntervalSince1970: 1_784_419_200)
+        try seedOwner(oldOwner, now: now)
+        let workID = try store.prepareIdentityCleanup(
+            oldOwner: oldOwner,
+            newOwner: assignedOwner,
+            oldFallbackKeys: [],
+            now: now
+        )
+
+        XCTAssertThrowsError(
+            try store.adoptIdentityCleanupTarget(
+                workID: workID,
+                newOwner: differentOwner
+            )
+        ) {
+            XCTAssertEqual($0 as? DeviceEpochStoreError, .ownerMismatch)
+        }
+        XCTAssertEqual(
+            try store.read().identityCleanupWork?.newOwnerChildDeviceID,
+            assignedOwner
+        )
+    }
+
+    func testPrepareAtomicallyTerminatesAnInFlightOldOwnerHandoff() throws {
+        let oldOwner = try XCTUnwrap(currentOwner)
+        let newOwner = UUID()
+        let now = Date(timeIntervalSince1970: 1_784_419_200)
+        try seedOwner(oldOwner, now: now)
+        try store.transaction(expectedOwner: oldOwner) { state in
+            let fromRoute = try XCTUnwrap(state.routes.values.min {
+                $0.usageDate < $1.usageDate
+            })
+            let fromGenerationID = fromRoute.generationID
+            let fromEpochID = fromRoute.epochID
+            let fromRouteID = fromRoute.routeID
+            state.activeGenerationID = fromGenerationID
+            state.activeEpochID = fromEpochID
+            state.activeRouteID = fromRouteID
+            state.epochs[fromEpochID]?.status = .active
+            state.routes[fromRouteID]?.lifecycle = .active
+            let toRoute = try XCTUnwrap(state.routes.values.first {
+                $0.routeID != fromRouteID && $0.lifecycle == .planned
+            })
+            let alreadyStoppedRoute = try XCTUnwrap(state.routes.values.first {
+                $0.routeID != fromRouteID
+                    && $0.routeID != toRoute.routeID
+                    && $0.lifecycle == .planned
+            })
+            let stoppedAt = now.addingTimeInterval(-60)
+            state.routes[alreadyStoppedRoute.routeID]?.lifecycle = .tombstoned
+            state.tombstones[alreadyStoppedRoute.routeID] = MeteringRouteTombstone(
+                routeID: alreadyStoppedRoute.routeID,
+                activityName: alreadyStoppedRoute.activityName,
+                eventNames: alreadyStoppedRoute.plannedEvents.map(\.eventName),
+                ownerChildDeviceID: oldOwner,
+                usageDate: alreadyStoppedRoute.usageDate,
+                epochID: alreadyStoppedRoute.epochID,
+                generationID: alreadyStoppedRoute.generationID,
+                canonicalDayEnd: now.addingTimeInterval(86_400),
+                stopAcknowledgedAt: stoppedAt,
+                referencedWorkIDs: [],
+                retainedUntil: nil
+            )
+            state.v2RouteHandoff = V2RouteHandoff(
+                handoffID: UUID(),
+                ownerChildDeviceID: oldOwner,
+                fromGenerationID: fromGenerationID,
+                fromEpochID: fromEpochID,
+                fromRouteID: fromRouteID,
+                toGenerationID: toRoute.generationID,
+                toEpochID: toRoute.epochID,
+                toRouteID: toRoute.routeID,
+                phase: .preparing,
+                priorRouteInputClosedAt: nil,
+                registrationAcknowledgedAt: nil,
+                activationAcknowledgedAt: nil,
+                priorStopAcknowledgedAt: nil,
+                createdAt: now
+            )
+        }
+
+        let workID = try store.prepareIdentityCleanup(
+            oldOwner: oldOwner,
+            newOwner: newOwner,
+            oldFallbackKeys: [],
+            now: now.addingTimeInterval(1)
+        )
+
+        let prepared = try store.read()
+        XCTAssertEqual(prepared.identityCleanupWork?.workID, workID)
+        XCTAssertNil(prepared.v2RouteHandoff)
+        XCTAssertNil(prepared.activeGenerationID)
+        XCTAssertNil(prepared.activeEpochID)
+        XCTAssertNil(prepared.activeRouteID)
+        XCTAssertTrue(prepared.routes.values.allSatisfy { $0.lifecycle == .tombstoned })
+        XCTAssertTrue(prepared.epochs.values.allSatisfy {
+            $0.status == .retired && $0.retireReason == .identityRecovery
+        })
+        XCTAssertEqual(
+            prepared.tombstones.values.filter { $0.stopAcknowledgedAt != nil }.count,
+            1
+        )
+    }
+
     func testWrongCleanupWorkIDCannotMutateAfterOwnerMirrorChanges() throws {
         let oldOwner = try XCTUnwrap(currentOwner)
         let newOwner = UUID()
@@ -189,6 +330,7 @@ final class MeteringIdentityCleanupTests: XCTestCase {
         let handedOff = try store.read()
         XCTAssertEqual(handedOff.ownerChildDeviceID, newOwner)
         XCTAssertNil(handedOff.identityCleanupWork)
+        XCTAssertNil(handedOff.pendingRegistrationRecovery)
         XCTAssertTrue(handedOff.generations.isEmpty)
         XCTAssertTrue(handedOff.epochs.isEmpty)
         XCTAssertTrue(handedOff.routes.isEmpty)
@@ -285,6 +427,82 @@ final class MeteringIdentityCleanupTests: XCTestCase {
         XCTAssertEqual(cleanup.retry.terminal, .pending)
         XCTAssertTrue(cleanup.stopAcknowledgedActivityNames.isEmpty)
         XCTAssertEqual(center.stopCalls, 1)
+    }
+
+    @MainActor
+    func testRecoveryTreatsPersistedShieldCASConflictAsSettledAndContinuesCleanup() async throws {
+        let oldOwner = try XCTUnwrap(currentOwner)
+        let newOwner = UUID()
+        let now = Date(timeIntervalSince1970: 1_784_419_200)
+        try seedOwner(oldOwner, now: now)
+        let shieldOperationID = UUID()
+        try seedShieldReference(owner: oldOwner, operationID: shieldOperationID, now: now)
+        let workID = try store.prepareIdentityCleanup(
+            oldOwner: oldOwner,
+            newOwner: newOwner,
+            oldFallbackKeys: [],
+            now: now
+        )
+        let activityNames = try XCTUnwrap(store.read().identityCleanupWork).oldActivityNames
+        let center = IdentityCleanupCenter(activityNames: activityNames)
+        try store.identityCleanupTransaction(workID: workID) { _, cleanup in
+            cleanup.clearedUsageDates = Set(cleanup.oldUsageDates)
+        }
+        currentOwner = newOwner
+        let driver = makeRecoveryDriver(
+            center: center,
+            now: now,
+            releaseShield: { operationID, owner in
+                XCTAssertEqual(operationID, shieldOperationID)
+                XCTAssertEqual(owner, oldOwner)
+                throw EarnedShieldEffectError.casConflict(operationID)
+            }
+        )
+
+        try await driver.recover(ownerChildDeviceID: newOwner)
+
+        XCTAssertNil(try store.read().identityCleanupWork)
+        XCTAssertEqual(try store.read().ownerChildDeviceID, newOwner)
+        XCTAssertEqual(Set(center.stoppedNames), Set(activityNames))
+    }
+
+    @MainActor
+    func testRecoveryDoesNotSwallowUnrelatedShieldRetirementFailure() async throws {
+        let oldOwner = try XCTUnwrap(currentOwner)
+        let newOwner = UUID()
+        let now = Date(timeIntervalSince1970: 1_784_419_200)
+        try seedOwner(oldOwner, now: now)
+        let shieldOperationID = UUID()
+        try seedShieldReference(owner: oldOwner, operationID: shieldOperationID, now: now)
+        let workID = try store.prepareIdentityCleanup(
+            oldOwner: oldOwner,
+            newOwner: newOwner,
+            oldFallbackKeys: [],
+            now: now
+        )
+        let activityNames = try XCTUnwrap(store.read().identityCleanupWork).oldActivityNames
+        let center = IdentityCleanupCenter(activityNames: activityNames)
+        try store.identityCleanupTransaction(workID: workID) { _, cleanup in
+            cleanup.clearedUsageDates = Set(cleanup.oldUsageDates)
+        }
+        currentOwner = newOwner
+        let driver = makeRecoveryDriver(
+            center: center,
+            now: now,
+            releaseShield: { _, _ in throw URLError(.cannotWriteToFile) }
+        )
+
+        do {
+            try await driver.recover(ownerChildDeviceID: newOwner)
+            XCTFail("unrelated shield retirement errors must remain retryable")
+        } catch {
+            XCTAssertEqual(error as? URLError, URLError(.cannotWriteToFile))
+        }
+
+        let cleanup = try XCTUnwrap(store.read().identityCleanupWork)
+        XCTAssertEqual(cleanup.workID, workID)
+        XCTAssertFalse(cleanup.releasedShieldOperationIDs.contains(shieldOperationID))
+        XCTAssertEqual(center.stopCalls, 0)
     }
 
     private func acknowledgeEveryCapturedEffect(workID: UUID) throws {

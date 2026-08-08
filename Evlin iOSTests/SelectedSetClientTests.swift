@@ -200,26 +200,28 @@ final class SelectedSetClientTests: XCTestCase {
         XCTAssertNil(ManualLockButtonIntent.from(state: .mixed, retryIntent: nil))
     }
 
-    func test_manualButtonIntent_mixedAndPendingNeverExposeRetryTap() {
+    func test_manualButtonIntent_inFlightStaysDisabled_butFailedOperationIsRetryable() {
         XCTAssertNil(ManualLockButtonIntent.from(state: .pending, retryIntent: nil))
-        XCTAssertNil(
+        XCTAssertEqual(
             ManualLockButtonIntent.from(
                 state: .unlocked,
                 retryIntent: .unlockSelectedForChild
             ),
-            "Any persisted unresolved operation must remain automatic-only"
+            .unlockSelectedForChild
         )
-        XCTAssertNil(
+        XCTAssertEqual(
             ManualLockButtonIntent.from(
                 state: .pending,
                 retryIntent: .lockSelectedForChild
-            )
+            ),
+            .lockSelectedForChild
         )
-        XCTAssertNil(
+        XCTAssertEqual(
             ManualLockButtonIntent.from(
                 state: .mixed,
                 retryIntent: .unlockSelectedForChild
-            )
+            ),
+            .unlockSelectedForChild
         )
     }
 
@@ -584,7 +586,7 @@ final class SelectedSetClientTests: XCTestCase {
         XCTAssertFalse(presentation.allowsTap)
     }
 
-    func test_manualButtonPresentation_afterTimeout_staysDisabledForAutomaticRecovery() {
+    func test_manualButtonPresentation_afterFailure_exposesRetryAction() {
         let presentation = ManualLockButtonPresentation.from(
             state: .mixed,
             childName: "Sam",
@@ -592,9 +594,9 @@ final class SelectedSetClientTests: XCTestCase {
             retryIntent: .unlockSelectedForChild
         )
 
-        XCTAssertEqual(presentation.title, "Updating Sam's devices")
+        XCTAssertEqual(presentation.title, "Retry unlocking Sam's devices")
         XCTAssertEqual(presentation.systemImage, "arrow.triangle.2.circlepath")
-        XCTAssertFalse(presentation.allowsTap)
+        XCTAssertTrue(presentation.allowsTap)
     }
 
     // MARK: - 1. DeviceLockStateResponse decode

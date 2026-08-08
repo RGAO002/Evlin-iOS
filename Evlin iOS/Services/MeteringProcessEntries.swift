@@ -261,14 +261,12 @@ final class AppLimitEffectRecoveryDriver {
                     source: "app_lifecycle_recovery",
                     appliedAt: now
                 ) { [usageStore, shieldPersistence] callback in
-                    try AppLimitCallbackLocalLedger.record(callback, store: usageStore)
-                    guard callback.effectKind == .enforcement else { return }
-                    let updated = LimitShieldLogic.applyingLimit(
-                        to: try shieldPersistence.load(),
-                        callback: callback,
+                    try AppLimitEffectLocalPersistence.persist(
+                        callback,
+                        usageStore: usageStore,
+                        shieldPersistence: shieldPersistence,
                         now: now
                     )
-                    try shieldPersistence.persist(updated)
                 }
                 guard receipt != nil else { continue }
                 if claim.effect.key.effectKind == .enforcement {
@@ -292,6 +290,14 @@ final class AppLimitEffectRecoveryDriver {
 @MainActor
 final class AppMeteringEntry {
     static let shared = AppMeteringEntry()
+
+    /// Injected by the app target (the DeviceActivity extension compiles this
+    /// file but not MeteringWatchdog). Fired after a recovery pass whose
+    /// active route differs from the one before it — e.g. the conservative
+    /// resume after a reflection mints a fresh route, and without an
+    /// immediate check the parent sees SYNCING until the 5-min watchdog
+    /// throttle expires or the first sample lands (~10 min of usage).
+    var onActiveRouteChanged: (@Sendable (UUID?) async -> Void)?
 
     private let defaults: UserDefaults?
     private let store: DeviceEpochStore
@@ -351,11 +357,16 @@ final class AppMeteringEntry {
             transport: transport,
             clock: clock
         )
+        let routeBefore = (try? store.read())?.activeRouteID
         do {
             try await driver.recover(ownerChildDeviceID: configuration.owner)
         } catch {
             print("[AppMeteringEntry] recovery failed: \(error)")
             MeteringFlightRecorder.emitError(site: "app.recover", error: error)
+        }
+        let routeAfter = (try? store.read())?.activeRouteID
+        if routeAfter != routeBefore {
+            await onActiveRouteChanged?(routeAfter)
         }
     }
 
@@ -443,9 +454,21 @@ nonisolated final class DAMMeteringEntry: @unchecked Sendable {
     func recoverIfConfigured(
         projectShields: ([String: ShieldRecord]) -> Void = { _ in }
     ) async {
+        await recoverMeteringIfConfigured()
+        await recoverShieldEffectsIfConfigured(projectShields: projectShields)
+    }
+
+    /// The DeviceActivity extension must be able to finish this path inside its
+    /// synchronous callback lifetime. Keep the callback-journal import and the
+    /// existing recovery sender independent of MainActor-only shield projection.
+    func recoverMeteringIfConfigured() async {
         guard let configuration = MeteringProcessConfiguration.load(defaults: defaults) else {
             return
         }
+        await deliverPendingCallbacks(
+            owner: configuration.owner,
+            baseURL: configuration.baseURL
+        )
         let driver = MeteringProductionComposition.makeRecoveryDriver(
             baseURL: configuration.baseURL,
             role: .deviceActivityMonitor,
@@ -461,6 +484,53 @@ nonisolated final class DAMMeteringEntry: @unchecked Sendable {
             NSLog("[DAMMeteringEntry] network recovery failed: %@", String(describing: error))
             MeteringFlightRecorder.emitError(site: "dam.recover", error: error)
         }
+    }
+
+    /// Import and deliver already-authorized callback work without touching
+    /// DeviceActivityCenter. A threshold callback has only a short synchronous
+    /// lifetime; spending it on daemon reconciliation can strand a valid sample
+    /// until the child opens the host app.
+    func deliverPendingCallbacksIfConfigured() async {
+        guard let configuration = MeteringProcessConfiguration.load(defaults: defaults) else {
+            return
+        }
+        await deliverPendingCallbacks(
+            owner: configuration.owner,
+            baseURL: configuration.baseURL
+        )
+    }
+
+    private func deliverPendingCallbacks(owner: UUID, baseURL: URL) async {
+        do {
+            _ = try await callbackJournal.submitPendingTransport(
+                owner: owner,
+                baseURL: baseURL,
+                transport: transport,
+                recordedAt: clock.now
+            )
+        } catch {
+            MeteringFlightRecorder.emitError(
+                site: "dam.callbackJournal.transport",
+                error: error
+            )
+        }
+        await replayCallbacks(owner: owner)
+        let delivery = MeteringEpochDelivery(
+            baseURL: baseURL,
+            store: store,
+            transport: transport,
+            clock: clock
+        )
+        await delivery.drain(owner: owner, importLegacyWork: false)
+    }
+
+    @MainActor
+    func recoverShieldEffectsIfConfigured(
+        projectShields: ([String: ShieldRecord]) -> Void = { _ in }
+    ) async {
+        guard let configuration = MeteringProcessConfiguration.load(defaults: defaults) else {
+            return
+        }
         do {
             try recoverShieldEffects(
                 expectedOwner: configuration.owner,
@@ -469,6 +539,24 @@ nonisolated final class DAMMeteringEntry: @unchecked Sendable {
         } catch {
             NSLog("[DAMMeteringEntry] shield recovery failed: %@", String(describing: error))
             MeteringFlightRecorder.emitError(site: "dam.shieldRecover", error: error)
+        }
+    }
+
+    private func replayCallbacks(owner: UUID) async {
+        do {
+            let replayStore = store
+            let replayJournal = callbackJournal
+            _ = try await Task.detached(priority: .utility) {
+                try replayJournal.replay(
+                    into: replayStore,
+                    owner: owner
+                )
+            }.value
+        } catch {
+            MeteringFlightRecorder.emitError(
+                site: "dam.callbackJournal",
+                error: error
+            )
         }
     }
 

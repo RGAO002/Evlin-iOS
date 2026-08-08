@@ -7,10 +7,18 @@ nonisolated enum EarnedV2CallbackJournalError: Error {
     case durableReadbackMismatch
 }
 
+nonisolated struct EarnedV2CallbackTransportReceipt: Codable, Equatable, Sendable {
+    let clientSampleID: String
+    let statusCode: Int
+    let verdict: String
+    let recordedAt: Date
+}
+
 nonisolated struct EarnedV2CallbackJournalEntry: Codable, Equatable, Sendable {
     let ownerChildDeviceID: UUID
     let input: MeteringAuthorizedCallbackInput
     let work: EpochSampleWork
+    var transportReceipt: EarnedV2CallbackTransportReceipt?
 
     var key: String {
         work.request.clientSampleID
@@ -84,7 +92,8 @@ nonisolated final class EarnedV2CallbackJournal: @unchecked Sendable {
             let candidate = EarnedV2CallbackJournalEntry(
                 ownerChildDeviceID: work.ownerChildDeviceID,
                 input: input,
-                work: work
+                work: work,
+                transportReceipt: nil
             )
             if let existing = entries.first(where: { $0.key == candidate.key }) {
                 return existing.work
@@ -109,6 +118,102 @@ nonisolated final class EarnedV2CallbackJournal: @unchecked Sendable {
                     return $0.key < $1.key
                 }
         }
+    }
+
+    /// Sends immutable, already-authorized callback facts before attempting a
+    /// full epoch-root rewrite. The backend idempotency key makes a later root
+    /// replay safe: it may POST the same sample again, but it cannot count it
+    /// twice. Work waiting for registration stays on the normal ordered queue.
+    @discardableResult
+    func submitPendingTransport(
+        owner: UUID,
+        baseURL: URL,
+        transport: any MeteringHTTPTransport,
+        recordedAt: Date = Date()
+    ) async throws -> Int {
+        let snapshot = try withLock { try load() }
+        var committed = 0
+
+        for entry in snapshot where
+            entry.ownerChildDeviceID == owner
+                && entry.transportReceipt == nil
+                && entry.work.authorization == .v2Deliverable
+                && entry.work.request.lane == .v2
+                && entry.work.request.deviceID == owner {
+            var request = try MeteringEpochRequests.sample(
+                baseURL: baseURL,
+                ownerChildDeviceID: owner,
+                body: entry.work.request
+            )
+            request.timeoutInterval = 4
+
+            let data: Data
+            let response: URLResponse
+            do {
+                (data, response) = try await transport.data(for: request)
+            } catch {
+                MeteringFlightRecorder.emitError(
+                    site: "dam.callbackJournal.transport",
+                    error: error
+                )
+                continue
+            }
+
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let disposition = MeteringEpochDelivery.sampleDisposition(
+                data: data,
+                statusCode: statusCode
+            )
+            let verdict: String
+            switch disposition {
+            case let .accepted(snapshot):
+                verdict = snapshot.childDeviceID == owner
+                    && snapshot.usageDate == entry.work.request.usageDate
+                    ? "accepted"
+                    : "terminal:snapshot_mismatch"
+            case .acceptedDuplicate:
+                verdict = "accepted_duplicate"
+            case let .terminal(code, snapshot):
+                if let snapshot,
+                   (snapshot.childDeviceID != owner
+                    || snapshot.usageDate != entry.work.request.usageDate) {
+                    verdict = "terminal:snapshot_mismatch"
+                } else {
+                    verdict = "terminal:\(code)"
+                }
+            case .retry:
+                continue
+            }
+
+            let receipt = EarnedV2CallbackTransportReceipt(
+                clientSampleID: entry.work.request.clientSampleID,
+                statusCode: statusCode,
+                verdict: verdict,
+                recordedAt: recordedAt
+            )
+            if try commitTransportReceipt(
+                receipt,
+                expectedEntry: entry,
+                owner: owner
+            ) {
+                committed += 1
+            }
+            MeteringFlightRecorder.emit(
+                kind: .meteringSample,
+                site: "dam.callbackJournal.transport",
+                verdict: verdict,
+                detail: MeteringFlightRecorder.detail([
+                    ("sample", entry.work.request.clientSampleID),
+                    ("status", String(statusCode)),
+                ]),
+                nums: ScreenTimeEvent.Nums(
+                    used: entry.work.request.estimatedMinutes,
+                    threshold: entry.work.request.thresholdMinutes
+                ),
+                corrID: entry.work.routeID ?? entry.work.workID
+            )
+        }
+        return committed
     }
 
     /// Re-authorize every durable fact against the current root. A stale owner
@@ -155,13 +260,38 @@ nonisolated final class EarnedV2CallbackJournal: @unchecked Sendable {
         return try result!.get()
     }
 
+    private func commitTransportReceipt(
+        _ receipt: EarnedV2CallbackTransportReceipt,
+        expectedEntry: EarnedV2CallbackJournalEntry,
+        owner: UUID
+    ) throws -> Bool {
+        try withLock {
+            var entries = try load()
+            guard let index = entries.firstIndex(where: { $0.key == expectedEntry.key }),
+                  entries[index].ownerChildDeviceID == owner,
+                  entries[index].input == expectedEntry.input,
+                  entries[index].work == expectedEntry.work
+            else { return false }
+            if entries[index].transportReceipt != nil { return false }
+            entries[index].transportReceipt = receipt
+            try persist(entries)
+            guard let readback = try load().first(where: { $0.key == expectedEntry.key })?
+                .transportReceipt,
+                  readback == receipt
+            else {
+                throw EarnedV2CallbackJournalError.durableReadbackMismatch
+            }
+            return true
+        }
+    }
+
     private func load() throws -> [EarnedV2CallbackJournalEntry] {
         switch storage {
         case let .file(url, legacyDefaults):
             if FileManager.default.fileExists(atPath: url.path) {
                 return try decode(Data(contentsOf: url))
             }
-            let migrated = try loadDefaults(legacyDefaults)
+            let migrated = try legacyDefaults.map(loadDefaults) ?? []
             if !migrated.isEmpty {
                 try persistFile(migrated, to: url)
                 legacyDefaults?.removeObject(forKey: Self.storageKey)
@@ -332,6 +462,12 @@ nonisolated final class EarnedMeteringCallback: @unchecked Sendable {
                 callback,
                 expectedOwnerChildDeviceID: expectedOwnerChildDeviceID
             )
+        }
+        // Apple may re-fire a one-shot event after its exact sample has already
+        // settled. The epoch work receipt is authoritative; recreating the
+        // sidecar here would POST the same clientSampleID on every callback.
+        guard work.retry.terminal == .pending else {
+            return .queued(sampleWorkID: work.workID)
         }
         do {
             let persisted = try journal.enqueue(input: input, work: work)

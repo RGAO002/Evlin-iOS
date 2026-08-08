@@ -63,6 +63,7 @@ nonisolated final class AppLimitProvenanceStore: @unchecked Sendable {
         case missingCurrentRule
         case ownerMismatch
         case staleArm
+        case physicalRecoveryExhausted
     }
 
     private let store: AppLimitEpochStore
@@ -112,7 +113,61 @@ nonisolated final class AppLimitProvenanceStore: @unchecked Sendable {
             )
             if let existing = slot.armProvenance,
                existing.replacementKey == key {
-                return Resolution(provenance: existing, replaced: false)
+                guard existing.physicalEventsConsumedAt != nil else {
+                    return Resolution(provenance: existing, replaced: false)
+                }
+                let replacementAttempt = existing.physicalReplacementAttemptCount ?? 0
+                guard replacementAttempt < 2 else {
+                    throw ProvenanceError.physicalRecoveryExhausted
+                }
+
+                let acceptedRaw = max(
+                    0,
+                    existing.lastRawThresholdMinutes - existing.ignoredWhilePausedMinutes
+                )
+                let (acceptedBase, overflow) = existing.baseAcceptedMinutes
+                    .addingReportingOverflow(acceptedRaw)
+                guard !overflow, acceptedBase < existing.budgetMinutes else {
+                    throw ProvenanceError.physicalRecoveryExhausted
+                }
+
+                // Preserve the physical-time already earned by this policy arm.
+                // Resetting the anchor to `now` makes Apple's inherited immediate
+                // events look impossible again and can wedge the bar forever.
+                let preservedStart = existing.startedAt.addingTimeInterval(
+                    TimeInterval(acceptedRaw * 60)
+                )
+                if replacementAttempt == 1 {
+                    // The first replacement is allowed immediately. If Apple
+                    // consumes that replacement too, wait until the complete
+                    // remaining budget is physically plausible before minting
+                    // one final bounded identity. Polling may retry this check,
+                    // but it cannot create identities while the check is false.
+                    guard MeteringCallbackPhysicalTime.allows(
+                        adjustedEstimateMinutes: existing.budgetMinutes,
+                        baseAcceptedMinutes: acceptedBase,
+                        startedAt: preservedStart,
+                        observedAt: now
+                    ) else {
+                        throw ProvenanceError.physicalRecoveryExhausted
+                    }
+                }
+
+                let armID = armIDProvider()
+                var replacement = existing
+                replacement.startedAt = preservedStart
+                replacement.baseAcceptedMinutes = acceptedBase
+                replacement.lastRawThresholdMinutes = 0
+                replacement.ignoredWhilePausedMinutes = 0
+                replacement.predecessorIgnoredWhilePausedMinutes = existing.ignoredWhilePausedMinutes
+                replacement.monitorStartPending = true
+                replacement.physicalEventsConsumedAt = nil
+                replacement.physicalReplacementAttemptCount = replacementAttempt + 1
+                replacement.activityName = Self.activityName(armID: armID)
+                replacement.armID = armID
+                slot.armProvenance = replacement
+                state.slots[canonicalRule.id] = slot
+                return Resolution(provenance: replacement, replaced: true)
             }
 
             let armID = armIDProvider()
@@ -156,7 +211,11 @@ nonisolated final class AppLimitProvenanceStore: @unchecked Sendable {
                   current.replacementKey == provenance.replacementKey
             else { throw ProvenanceError.staleArm }
 
-            current.startedAt = startedAt
+            // A physical replacement inherits the original elapsed-time anchor.
+            // Only a genuinely new policy arm records the scheduler attempt time.
+            if current.physicalReplacementAttemptCount == nil {
+                current.startedAt = startedAt
+            }
             slot.armProvenance = current
             state.slots[provenance.ruleID] = slot
             return current
@@ -236,6 +295,8 @@ nonisolated final class AppLimitProvenanceStore: @unchecked Sendable {
                 pausedAt: provenance.pausedAt,
                 monitorStartPending: false,
                 predecessorIgnoredWhilePausedMinutes: provenance.ignoredWhilePausedMinutes,
+                physicalEventsConsumedAt: nil,
+                physicalReplacementAttemptCount: nil,
                 activityName: provenance.activityName,
                 armID: provenance.armID
             )

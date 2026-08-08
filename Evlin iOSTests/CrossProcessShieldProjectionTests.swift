@@ -30,6 +30,34 @@ final class CrossProcessShieldProjectionTests: XCTestCase {
         )
     }
 
+    func testPersistedShieldDecodeRejectsCorruptBlobInsteadOfTreatingItAsEmpty() throws {
+        XCTAssertNil(ShieldSourceLogic.decodePersistedShields(Data("not-a-shield-dictionary".utf8)))
+
+        let record = makeBroadRecord(key: "all", tier: .all, webOpen: false)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode([record.recordKey: record])
+
+        XCTAssertEqual(
+            ShieldSourceLogic.decodePersistedShields(data)?[record.recordKey],
+            record
+        )
+    }
+
+    func testMonitorExtensionFailsClosedWhenPersistedShieldBlobCannotDecode() throws {
+        let extensionSource = try sourceText(
+            "EvlinDeviceActivityMonitor/DeviceActivityMonitorExtension.swift"
+        )
+
+        XCTAssertTrue(
+            extensionSource.contains("private func loadShields() -> [String: ShieldRecord]?")
+        )
+        XCTAssertFalse(
+            extensionSource.contains("let decoded = decodeShields(from: data) else { return [:] }")
+        )
+        XCTAssertTrue(extensionSource.contains("shield_decode_failed_fail_closed"))
+    }
+
     private func makeBroadRecord(
         key: String,
         tier: ShieldTier,

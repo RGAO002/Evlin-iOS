@@ -3,6 +3,45 @@ import XCTest
 
 final class ChildEditFormMappingTests: XCTestCase {
 
+    func test_deviceDetail_usesLatestServerRecordForSameDevice() {
+        let stale = EnrolledDeviceDTO(
+            device_id: "device-1",
+            mode: "child",
+            label: "iPhone",
+            device_model: nil,
+            platform: "iOS",
+            os_version: nil,
+            display: nil,
+            last_seen_at: nil,
+            online: true,
+            is_self: false,
+            parent_pin_status: "not_set",
+            parent_pin: nil
+        )
+        let refreshed = EnrolledDeviceDTO(
+            device_id: "device-1",
+            mode: "child",
+            label: "iPhone",
+            device_model: nil,
+            platform: "iOS",
+            os_version: nil,
+            display: nil,
+            last_seen_at: "now",
+            online: true,
+            is_self: false,
+            parent_pin_status: "available",
+            parent_pin: "0462"
+        )
+
+        XCTAssertEqual(
+            ParentSettingsPresentation.latestDevice(
+                initial: stale,
+                refreshedDevices: [refreshed]
+            ),
+            refreshed
+        )
+    }
+
     func test_createBody_maps_age_to_birth_year() {
         let body = ChildCRUDMapper.createBody(name: "Sam", age: 8, referenceYear: 2026)
         XCTAssertEqual(body.display_name, "Sam")
@@ -113,6 +152,37 @@ final class ChildEditFormMappingTests: XCTestCase {
         XCTAssertEqual(
             ParentSettingsPresentation.childrenDevicesSummary(childCount: 1, deviceCount: 1),
             "1 child · 1 child device"
+        )
+    }
+
+    func test_removing_open_device_detail_pops_only_that_detail() {
+        XCTAssertNil(
+            ParentSettingsPresentation.deviceDetailSelectionAfterRemoval(
+                selectedDeviceID: "removed-device",
+                removedDeviceID: "removed-device"
+            )
+        )
+        XCTAssertEqual(
+            ParentSettingsPresentation.deviceDetailSelectionAfterRemoval(
+                selectedDeviceID: "other-device",
+                removedDeviceID: "removed-device"
+            ),
+            "other-device"
+        )
+    }
+
+    func test_removed_device_detail_requests_native_dismissal() {
+        XCTAssertTrue(
+            DeviceDetailDismissalPolicy.shouldDismiss(
+                selectedDeviceID: nil,
+                detailDeviceID: "removed-device"
+            )
+        )
+        XCTAssertFalse(
+            DeviceDetailDismissalPolicy.shouldDismiss(
+                selectedDeviceID: "removed-device",
+                detailDeviceID: "removed-device"
+            )
         )
     }
 

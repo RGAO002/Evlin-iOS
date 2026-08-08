@@ -1390,7 +1390,40 @@ struct EnrolledDeviceDTO: Codable, Sendable, Equatable, Identifiable {
     let last_seen_at: String?
     let online: Bool
     let is_self: Bool
+    let parent_pin_status: String?
+    let parent_pin: String?
+    let metering_ready: Bool?
     var id: String { device_id }
+
+    init(
+        device_id: String,
+        mode: String,
+        label: String?,
+        device_model: String?,
+        platform: String?,
+        os_version: String?,
+        display: String?,
+        last_seen_at: String?,
+        online: Bool,
+        is_self: Bool,
+        parent_pin_status: String? = nil,
+        parent_pin: String? = nil,
+        metering_ready: Bool? = nil
+    ) {
+        self.device_id = device_id
+        self.mode = mode
+        self.label = label
+        self.device_model = device_model
+        self.platform = platform
+        self.os_version = os_version
+        self.display = display
+        self.last_seen_at = last_seen_at
+        self.online = online
+        self.is_self = is_self
+        self.parent_pin_status = parent_pin_status
+        self.parent_pin = parent_pin
+        self.metering_ready = metering_ready
+    }
 }
 
 struct ChildDTO: Codable, Sendable, Equatable, Identifiable {
@@ -2141,6 +2174,33 @@ extension APIClient {
         try await authedJSON(path: "/me/profile", method: "GET")
     }
 
+    /// GET /me/export — everything Evlin stores for this account and family,
+    /// as JSON (Beta Participation Agreement §5.4(a) review right). Returns the
+    /// raw bytes so the caller can hand them straight to a share sheet.
+    /// 🔑 get_current_account.
+    func fetchDataExport() async throws -> Data {
+        let req = authedRequest(path: "/me/export", method: "GET")
+        let (data, http) = try await authedData(for: req)
+        guard (200..<300).contains(http.statusCode) else {
+            throw APIError.serverError(http.statusCode)
+        }
+        return data
+    }
+
+    /// DELETE /auth/account — permanently delete the signed-in parent account.
+    /// The backend transfers family ownership when other parents remain, and
+    /// cascades the whole family when this is the last one. Throws on any
+    /// non-2xx so the caller can keep the local data until the server confirms.
+    /// 🔑 get_current_account.
+    func deleteAccount() async throws {
+        var req = authedRequest(path: "/auth/account", method: "DELETE")
+        req.httpBody = try JSONSerialization.data(withJSONObject: ["confirm": true])
+        let (_, http) = try await authedData(for: req)
+        guard (200..<300).contains(http.statusCode) else {
+            throw APIError.serverError(http.statusCode)
+        }
+    }
+
     /// GET /me/agreement — which Beta Participation Agreement version this
     /// account has acknowledged (nil = never). Drives the parent-root launch
     /// gate. 🔑 get_current_account.
@@ -2295,6 +2355,34 @@ extension APIClient {
     /// DELETE /family/children/{id} — archive a child profile.
     func deleteChild(id: String) async throws {
         let req = authedRequest(path: "/family/children/\(id)", method: "DELETE")
+        let (_, http) = try await authedData(for: req)
+        guard (200..<300).contains(http.statusCode) else {
+            throw APIError.serverError(http.statusCode)
+        }
+    }
+
+    /// End one child device's enrollment while preserving its server history.
+    /// The removed K device receives the existing terminal 410 cleanup path the
+    /// next time it connects; this request itself is parent-authenticated.
+    func removeChildDevice(childID: String, deviceID: String) async throws {
+        let req = authedRequest(
+            path: "/family/children/\(childID)/devices/\(deviceID)",
+            method: "DELETE",
+            timeoutInterval: 15
+        )
+        let (_, http) = try await authedData(for: req)
+        guard (200..<300).contains(http.statusCode) else {
+            throw APIError.serverError(http.statusCode)
+        }
+    }
+
+    /// Parent-authenticated recovery exit for a stale or unrecoverable PIN.
+    func clearChildDeviceParentPIN(childID: String, deviceID: String) async throws {
+        let req = authedRequest(
+            path: "/family/children/\(childID)/devices/\(deviceID)/parent-pin",
+            method: "DELETE",
+            timeoutInterval: 15
+        )
         let (_, http) = try await authedData(for: req)
         guard (200..<300).contains(http.statusCode) else {
             throw APIError.serverError(http.statusCode)
@@ -2850,11 +2938,26 @@ extension APIClient {
         let confirm_cascade: Bool
     }
 
+    struct AffectedAppLimitDTO: Decodable {
+        let rule_id: UUID
+        let child_device_id: UUID
+        let bundle_id: String
+        let current_budget_minutes: Int
+        let new_budget_minutes: Int
+    }
+
     struct ScreenTimeCapResponseDTO: Decodable {
         let status: String?
         let cap_minutes: Int?
         let effective_date: String?
         let command_ids: [String]?
+        /// Present only on the `needs_confirmation` DRY RUN — nothing was
+        /// written. Callers MUST branch on `status`; treating this response as
+        /// success is what made "lower the cap" silently no-op while the UI
+        /// claimed the app limits had been adjusted (2026-08-07).
+        let affected_app_limits: [AffectedAppLimitDTO]?
+
+        var needsConfirmation: Bool { status == "needs_confirmation" }
     }
 
     @discardableResult
@@ -3076,8 +3179,20 @@ extension APIClient {
             URLQueryItem(name: "family_id_q", value: familyID.uuidString),
         ]
         let path = comps.string ?? "/parent/app-limits?child_device_id=\(childDeviceID.uuidString)"
-        let envelope: AppLimitRuleListResponseDTO = try await authedJSONAppLimit(
-            path: path, method: "GET")
+        // A per-app rule can be disabled and recreated with a new budget in the
+        // same minute. This screen is a live control surface, so a cached list
+        // can show the disabled predecessor (for example 15/20 after 15/30
+        // became authoritative). Always fetch the current active-rule view.
+        var request = authedRequest(path: path, method: "GET")
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        let (data, http) = try await authedData(for: request)
+        guard (200..<300).contains(http.statusCode) else {
+            throw APIError.serverError(http.statusCode)
+        }
+        let envelope = try Self.appLimitDateDecoder.decode(
+            AppLimitRuleListResponseDTO.self,
+            from: data
+        )
         return envelope.rules
     }
 }
@@ -3288,10 +3403,19 @@ extension APIClient {
         try await Self.sharedRefresher.refreshedToken()
     }
 
-    func authedRequest(path: String, method: String = "GET") -> URLRequest {
+    func authedRequest(
+        path: String,
+        method: String = "GET",
+        timeoutInterval: TimeInterval? = nil
+    ) -> URLRequest {
         let url = URL(string: "\(baseURL)\(path)")!
         var req = URLRequest(url: url)
         req.httpMethod = method
+        if let timeoutInterval {
+            // Parent actions must surface a recoverable error instead of leaving
+            // their controls indefinitely busy when a backend connection stalls.
+            req.timeoutInterval = timeoutInterval
+        }
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let access = KeychainStore.shared.load()?.accessToken {
             req.setValue("Bearer \(access)", forHTTPHeaderField: "Authorization")

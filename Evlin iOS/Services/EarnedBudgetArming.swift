@@ -215,6 +215,34 @@ enum EarnedBudgetArming {
             || lifecycle?.retiringActivityNames.isEmpty == false
             || lifecycle?.breadcrumbActivityNames.isEmpty == false
             || lifecycle?.scalarActiveActivityName != nil
+        if let epochStore,
+           let cleanup = try? epochStore.read().identityCleanupWork,
+           cleanup.newOwnerChildDeviceID == nil {
+            // Pairing writes evlin.childId before this entry runs. The durable
+            // cleanup envelope, not the mutable mirror, decides whether this
+            // pairing may complete a prior no-owner teardown. The backend can
+            // legitimately reuse the same device row after sign-out, so an
+            // equal old/new UUID still has to adopt and finish the teardown.
+            do {
+                _ = try epochStore.adoptIdentityCleanupTarget(
+                    workID: cleanup.workID,
+                    newOwner: childID,
+                    now: now
+                )
+                readinessStore.clearAuthoritativeStateReadiness()
+                appGroupDefaults?.set(next, forKey: "evlin.childId")
+                appGroupDefaults?.synchronize()
+                try epochStore.identityCleanupTransaction(workID: cleanup.workID) { _, work in
+                    work.ownerMirrorTransitionAcknowledged = true
+                }
+            } catch {
+                // The cleanup envelope is the authority for this transition.
+                // Do not write a new mirror if it cannot be adopted exactly.
+                readinessStore.clearAuthoritativeStateReadiness()
+                return
+            }
+            return
+        }
         if current != next,
            let epochStore,
            let oldOwner = current.flatMap(UUID.init(uuidString:)) {
@@ -267,6 +295,15 @@ enum EarnedBudgetArming {
         }
         appGroupDefaults?.set(next, forKey: "evlin.childId")
         appGroupDefaults?.synchronize()
+        if let epochStore {
+            do {
+                _ = try epochStore.claimInitialOwner(childID)
+            } catch {
+                // Keep readiness closed. A later recovery pass may retry the
+                // exact first claim, but must not arm against an unowned root.
+                readinessStore.clearAuthoritativeStateReadiness()
+            }
+        }
     }
 
     nonisolated static func canArmAuthoritativeState(
@@ -288,40 +325,77 @@ enum EarnedBudgetArming {
     /// Returns true when a transition was detected and state was torn down.
     @discardableResult
     static func reconcileIdentityTransition(
-        epochStore: DeviceEpochStore? = .shared
+        epochStore: DeviceEpochStore? = .shared,
+        standardDefaults: UserDefaults = .standard,
+        appGroupDefaults: UserDefaults? = UserDefaults(
+            suiteName: EarnedTimeStore.appGroupSuiteName
+        ),
+        readinessStore: EarnedTimeStore = .shared
     ) -> Bool {
-        guard let currentRaw = UserDefaults.standard.string(
+        guard let currentRaw = standardDefaults.string(
                 forKey: CommandPoller.childDeviceIDDefaultsKey),
               !currentRaw.isEmpty
         else { return false }
         let current = canonicalDeviceIdentity(currentRaw) ?? currentRaw
 
-        let suite = UserDefaults(suiteName: "group.com.evlin.ios")
-        let ownerRaw = suite?.string(forKey: identityOwnerKey)
+        let explicitOwnerRaw = appGroupDefaults?.string(forKey: identityOwnerKey)
+        let mirroredOwnerRaw = appGroupDefaults?.string(forKey: "evlin.childId")
+        let ownerRaw: String?
+        if isSameDeviceIdentity(explicitOwnerRaw, currentRaw),
+           let mirroredOwnerRaw,
+           !isSameDeviceIdentity(mirroredOwnerRaw, currentRaw) {
+            // A prior transition persisted the marker but failed before the
+            // durable owner mirror moved. The mirror still owns the epoch
+            // store and is the only valid cleanup authority.
+            ownerRaw = mirroredOwnerRaw
+        } else {
+            ownerRaw = explicitOwnerRaw ?? mirroredOwnerRaw
+        }
         if isSameDeviceIdentity(ownerRaw, currentRaw) {
-            if ownerRaw != current {
-                suite?.set(current, forKey: identityOwnerKey)
+            if explicitOwnerRaw != current {
+                appGroupDefaults?.set(current, forKey: identityOwnerKey)
             }
             return false
         }
 
-        guard let ownerRaw, !ownerRaw.isEmpty else { return false }
+        guard let ownerRaw, !ownerRaw.isEmpty else {
+            if let currentID = UUID(uuidString: currentRaw) {
+                mirrorChildIdentity(
+                    currentID,
+                    appGroupDefaults: appGroupDefaults,
+                    readinessStore: readinessStore,
+                    epochStore: epochStore
+                )
+            }
+            appGroupDefaults?.set(current, forKey: identityOwnerKey)
+            return false
+        }
         let owner = canonicalDeviceIdentity(ownerRaw) ?? ownerRaw
 
         if let currentID = UUID(uuidString: currentRaw) {
             mirrorChildIdentity(
                 currentID,
-                appGroupDefaults: suite,
-                readinessStore: .shared,
+                appGroupDefaults: appGroupDefaults,
+                readinessStore: readinessStore,
                 epochStore: epochStore
             )
+            guard isSameDeviceIdentity(
+                appGroupDefaults?.string(forKey: "evlin.childId"),
+                currentRaw
+            ) else {
+                appGroupDefaults?.set(owner, forKey: identityOwnerKey)
+                return false
+            }
         } else {
-            stopLegacyMonitoring(defaults: suite, epochStore: epochStore ?? .shared)
-            suite?.removeObject(forKey: "evlin.childId")
-            suite?.synchronize()
-            EarnedTimeStore.shared.clearUsageStateForIdentityChange()
+            stopLegacyMonitoring(
+                defaults: appGroupDefaults,
+                epochStore: epochStore ?? .shared
+            )
+            appGroupDefaults?.removeObject(forKey: "evlin.childId")
+            appGroupDefaults?.synchronize()
+            readinessStore.clearUsageStateForIdentityChange()
         }
-        suite?.set(current, forKey: identityOwnerKey)
+        appGroupDefaults?.set(current, forKey: identityOwnerKey)
         CommandDeliveryDiagnostics.record(
             CommandDeliveryDiagnostics.keyEarnedIdentityTransition,
             "teardown owner=\(owner) current=\(current)"

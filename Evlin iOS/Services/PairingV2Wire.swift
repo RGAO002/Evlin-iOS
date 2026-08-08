@@ -159,13 +159,31 @@ nonisolated struct PairingInviteCreated: Codable, Equatable, Sendable {
 nonisolated struct PairingInviteStatus: Codable, Equatable, Sendable {
     /// "pending" | "joined" | "expired"
     let status: String
+    /// Exact device the kid committed. The parent readiness screen must poll
+    /// this id; a bare "joined" status cannot identify its target.
+    let childDeviceID: UUID?
     let childDisplayName: String?
     let deviceLabel: String?
     /// Which branch the kid device took: "restore" or "invited".
     let resolution: String?
 
+    init(
+        status: String,
+        childDisplayName: String?,
+        deviceLabel: String?,
+        resolution: String?,
+        childDeviceID: UUID? = nil
+    ) {
+        self.status = status
+        self.childDeviceID = childDeviceID
+        self.childDisplayName = childDisplayName
+        self.deviceLabel = deviceLabel
+        self.resolution = resolution
+    }
+
     enum CodingKeys: String, CodingKey {
         case status
+        case childDeviceID = "child_device_id"
         case childDisplayName = "child_display_name"
         case deviceLabel = "device_label"
         case resolution

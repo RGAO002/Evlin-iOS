@@ -123,7 +123,7 @@ nonisolated enum ManualLockButtonIntent: String, Codable, Equatable, Sendable {
         state: ManualLockAggregateState,
         retryIntent: ManualLockButtonIntent?
     ) -> ManualLockButtonIntent? {
-        guard retryIntent == nil else { return nil }
+        if let retryIntent { return retryIntent }
         switch state {
         case .unlocked: return .lockSelectedForChild
         case .locked: return .unlockSelectedForChild
@@ -432,8 +432,18 @@ nonisolated struct ManualLockButtonPresentation: Equatable {
         requestActive: Bool = false,
         retryIntent: ManualLockButtonIntent? = nil
     ) -> ManualLockButtonPresentation {
-        if requestActive || retryIntent != nil {
+        if requestActive {
             return updating(childName: childName)
+        }
+
+        if let retryIntent {
+            let action = retryIntent.wantsLocked ? "locking" : "unlocking"
+            return ManualLockButtonPresentation(
+                title: "Retry \(action) \(childName)'s devices",
+                systemImage: "arrow.triangle.2.circlepath",
+                tone: retryIntent.wantsLocked ? .lock : .unlock,
+                allowsTap: true
+            )
         }
 
         switch state {

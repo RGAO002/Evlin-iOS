@@ -16,6 +16,9 @@ import Foundation
 // `overCapExisting` but is NOT added to `selectable`.
 
 enum EarnedAppOptions {
+    /// Runtime fallback kept here so metering targets do not depend on the
+    /// SwiftUI-only device-app fixtures.
+    private static let fallbackLimitOptions = [15, 20, 30, 45, 60, 90, 120]
 
     struct Result: Equatable {
         /// Options the parent may select for a new or changed limit.
@@ -47,9 +50,9 @@ enum EarnedAppOptions {
         if let policy = policyOptions {
             base = policy
         } else {
-            // DeviceAppsMockData.limitOptionsBase is the offline fallback
-            // (release values only — the DEBUG 1-minute is injected below).
-            base = DeviceAppsMockData.limitOptionsBase
+            // Release fallback values only; the DEBUG 1-minute option is
+            // injected below for tests.
+            base = fallbackLimitOptions
         }
 
         // Filter to ≤ cap and deduplicate while preserving order.
@@ -129,6 +132,36 @@ enum EarnedCapOptions {
     static func compute(policyCapOptions: [Int]?, poolMinutes: Int) -> [Int] {
         guard let options = policyCapOptions else { return [] }
         return options.filter { $0 <= poolMinutes }
+    }
+}
+
+// MARK: - Pool editor presentation handoff
+
+/// Carries a saved pool value across dismissal of the editor sheet. SwiftUI
+/// cannot reliably present the cascade sheet while the editor sheet is still
+/// being dismissed, so the parent consumes this value from `onDismiss`.
+struct PoolEditPresentationHandoff {
+    private(set) var pendingMinutes: Int?
+
+    mutating func submit(minutes: Int) {
+        pendingMinutes = minutes
+    }
+
+    mutating func consumeAfterEditorDismissal() -> Int? {
+        defer { pendingMinutes = nil }
+        return pendingMinutes
+    }
+}
+
+/// Daily Screen Time edits always need an explicit effective date. Raising a
+/// limit is just as date-sensitive as lowering it: applying it immediately can
+/// resume usage today, while applying it tomorrow must preserve today's rule.
+enum PoolEditConfirmationPolicy {
+    static func requiresEffectiveDateChoice(
+        currentMinutes: Int,
+        newMinutes: Int
+    ) -> Bool {
+        currentMinutes != newMinutes
     }
 }
 

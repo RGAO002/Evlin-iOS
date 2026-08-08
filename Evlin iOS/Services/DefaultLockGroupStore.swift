@@ -53,6 +53,16 @@ enum DefaultLockGroupStore {
         }
     }
 
+    /// Identity teardown: drop EVERY saved list (not just the default lock
+    /// group). Saved lists carry opaque tokens scoped to the family and the
+    /// authorization epoch that picked them; surviving an account switch they
+    /// pre-populate App Controls with dead tokens that arm silent monitors
+    /// (WhatsApp 2026-08-06: catalog kept re-uploading a prior family's token,
+    /// so every per-app limit watched an app that no longer existed for iOS).
+    static func clearAllListsForIdentityTeardown() {
+        defaults?.removeObject(forKey: listKey)
+    }
+
     static func removeApp(_ token: ApplicationToken) {
         var s = load()
         s.applicationTokens.remove(token)

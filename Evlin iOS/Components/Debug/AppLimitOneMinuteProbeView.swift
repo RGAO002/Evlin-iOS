@@ -60,6 +60,12 @@ struct AppLimitOneMinuteProbeView: View {
 
     @State private var selection = FamilyActivitySelection(includeEntireCategory: false)
     @State private var pickerShown = false
+    /// Picker-free path: the FamilyActivityPicker sheet dismisses itself on
+    /// some hosts (kid-root poller rebuilds, 2026-08-06), so the probe can
+    /// also borrow an already-captured catalog token by bundle id.
+    @State private var injectedToken: ApplicationToken? = nil
+    @State private var injectedBundleID = "net.whatsapp.whatsapp"
+    @State private var injectedStatus = "(picker selection)"
     @State private var running = false
     @State private var status = "Select one unused app."
     @State private var refreshTick = 0
@@ -74,7 +80,41 @@ struct AppLimitOneMinuteProbeView: View {
         defaults?.string(forKey: Self.ruleIDKey).flatMap(UUID.init(uuidString:))
     }
 
+    private var probeTokens: Set<ApplicationToken> {
+        if let injectedToken { return [injectedToken] }
+        return selection.applicationTokens
+    }
+
     var body: some View {
+        Section {
+            TextField("bundle id", text: $injectedBundleID)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            Button {
+                if let token = LocalAliasStore.shared.applicationToken(
+                    forLookupKey: injectedBundleID
+                ) {
+                    injectedToken = token
+                    injectedStatus = "using catalog token for \(injectedBundleID)"
+                } else {
+                    injectedToken = nil
+                    injectedStatus = "no catalog token for \(injectedBundleID)"
+                }
+            } label: {
+                Label("Use catalog token (no picker)", systemImage: "square.and.arrow.down")
+            }
+            Button {
+                injectedToken = nil
+                injectedStatus = "(picker selection)"
+            } label: {
+                Label("Clear injected token", systemImage: "xmark.circle")
+            }
+            .disabled(injectedToken == nil)
+            probeRow("token source", injectedStatus)
+        } header: {
+            Text("Probe token source")
+        }
+
         Section {
             Picker("Topology", selection: $topologyMode) {
                 Text("Legacy").tag(AppLimitTopologyProbeMode.legacyWindow)
@@ -87,7 +127,7 @@ struct AppLimitOneMinuteProbeView: View {
             } label: {
                 Label("Arm \(topologyMode.rawValue) 1-minute probe", systemImage: "scope")
             }
-            .disabled(running || selection.applicationTokens.count != 1 || topologyProbeIsActive)
+            .disabled(running || probeTokens.count != 1 || topologyProbeIsActive)
 
             Button(role: .destructive) {
                 stopTopologyProbe()
@@ -122,7 +162,7 @@ struct AppLimitOneMinuteProbeView: View {
             } label: {
                 Label("Arm real 1-minute limit", systemImage: "timer")
             }
-            .disabled(running || selection.applicationTokens.count != 1)
+            .disabled(running || probeTokens.count != 1)
 
             Button {
                 refreshTick += 1
@@ -165,8 +205,8 @@ struct AppLimitOneMinuteProbeView: View {
 
     private func runTopologyProbe() {
         do {
-            guard selection.applicationTokens.count == 1,
-                  let token = selection.applicationTokens.first
+            guard probeTokens.count == 1,
+                  let token = probeTokens.first
             else { throw AppLimitProbeError.exactlyOneAppRequired }
             guard let owner = MeteringOwnerMirror.current() else {
                 throw AppLimitProbeError.missingOwner
@@ -233,8 +273,8 @@ struct AppLimitOneMinuteProbeView: View {
         running = true
         defer { running = false }
         do {
-            guard selection.applicationTokens.count == 1,
-                  let token = selection.applicationTokens.first
+            guard probeTokens.count == 1,
+                  let token = probeTokens.first
             else { throw AppLimitProbeError.exactlyOneAppRequired }
             guard MeteringOwnerMirror.current() != nil else {
                 throw AppLimitProbeError.missingOwner

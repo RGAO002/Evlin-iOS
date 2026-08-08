@@ -68,15 +68,29 @@ enum FamilyGoneDetector {
             _ = await ActiveLockStore.shared.unblockAll()
         }
 
+        // 1b. Lift deletion protection. `denyAppRemoval` is device-WIDE: left
+        //     applied after the family is gone it blocks removing ANY app —
+        //     Evlin included — and there is no longer an account that could
+        //     command this device to release it. The kid Sign out path already
+        //     does this (BigKidRootView.performKidSignOut); the remote teardown
+        //     must match or a deleted account strands the phone.
+        ScreenTimeManager.shared.setDeletionProtectionEnabled(false)
+
         // 2. Clear the reflection sticky so a stale held RID can't make the
         //    reconciler re-apply a lock on a later (spurious) poll.
         appGroupDefaults?.removeObject(forKey: "evlin.reflectionLockSticky")
 
         // 3. Reset kid pairing state. Drop the child device id (the key every
         //    poller reads) + the family id so the kid app stops polling a dead
-        //    family. Leave `appMode`/`onboardingComplete` so the device returns
-        //    to a clean unpaired shell rather than crash-looping.
+        //    family. The Keychain mirror and opaque Screen Time selection must
+        //    go too: a device its parent deliberately removed must not revive
+        //    the old identity or carry the old family's tokens into setup.
+        ScreenTimeManager.shared.clearSelectionForIdentityTeardown()
+        DefaultLockGroupStore.clearAllListsForIdentityTeardown()
+        LocalAliasStore.shared.removeAllAliases()
+        DeviceIdentity.shared.clear()
         defaults.removeObject(forKey: CommandPoller.childDeviceIDDefaultsKey)
         defaults.removeObject(forKey: "evlin.familyID")
+        defaults.set(false, forKey: "onboardingComplete")
     }
 }

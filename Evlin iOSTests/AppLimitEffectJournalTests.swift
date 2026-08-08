@@ -993,6 +993,38 @@ final class AppLimitEffectJournalTests: XCTestCase {
         ))
     }
 
+    func testProductionLocalPersistenceCommitsUsageAndShieldBeforeProjection() throws {
+        let harness = try makeHarness()
+        let callback = try acceptedCallback(
+            harness.fixture,
+            kind: .enforcement,
+            threshold: harness.fixture.rule.budgetMinutes
+        )
+        let usageStore = EarnedTimeStore(suiteName: harness.suiteName)
+        let shieldPersistence = AppLimitShieldPersistence(
+            store: harness.defaults,
+            storageKey: shieldStorageKey
+        )
+
+        try AppLimitEffectLocalPersistence.persist(
+            callback,
+            usageStore: usageStore,
+            shieldPersistence: shieldPersistence,
+            now: referenceDate
+        )
+
+        XCTAssertEqual(
+            usageStore.appLimitReportedMinutes(
+                ruleID: callback.rule.id,
+                usageDate: callback.provenance.usageDate
+            ),
+            callback.adjustedEstimateMinutes
+        )
+        XCTAssertNotNil(
+            try shieldPersistence.load()[LimitShieldLogic.recordKey(for: callback.rule)]
+        )
+    }
+
     private func makeHarness(
         additionalRule: AppLimitRule? = nil
     ) throws -> JournalHarness {
@@ -1017,14 +1049,12 @@ final class AppLimitEffectJournalTests: XCTestCase {
         usageStore: EarnedTimeStore,
         shieldPersistence: AppLimitShieldPersistence
     ) throws {
-        try AppLimitCallbackLocalLedger.record(callback, store: usageStore)
-        guard callback.effectKind == .enforcement else { return }
-        let updated = LimitShieldLogic.applyingLimit(
-            to: try shieldPersistence.load(),
-            callback: callback,
+        try AppLimitEffectLocalPersistence.persist(
+            callback,
+            usageStore: usageStore,
+            shieldPersistence: shieldPersistence,
             now: referenceDate
         )
-        try shieldPersistence.persist(updated)
     }
 
     private func acceptedCallback(

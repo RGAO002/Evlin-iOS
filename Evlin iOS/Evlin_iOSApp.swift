@@ -50,6 +50,13 @@ struct Evlin_iOSApp: App {
         // EvlinShieldConfig lock screen can render it (the extension can't
         // read this app's asset catalog). Versioned + cheap.
         EvlinShieldIconPublisher.publish()
+        // When a recovery pass swaps the active route (reflection/task resume
+        // mints a fresh one), file the first watchdog verdict immediately —
+        // the 5-min throttle would otherwise leave the parent on SYNCING
+        // until the next check or the first settled sample (~10 min).
+        AppMeteringEntry.shared.onActiveRouteChanged = { _ in
+            await MeteringWatchdog.shared.run(trigger: "route_change")
+        }
     }
 
     var body: some Scene {
@@ -87,6 +94,7 @@ struct Evlin_iOSApp: App {
                     }
                 )
                 .onAppear {
+                    Task { await ParentPINSyncCoordinator.runForeground() }
                     refreshParentPushRegistrationIfNeeded()
                     startPollerIfPaired()
                     armEarnedBudgetIfReady()
@@ -99,6 +107,7 @@ struct Evlin_iOSApp: App {
                 .onChange(of: scenePhase) { _, phase in
                     switch phase {
                     case .active:
+                        Task { await ParentPINSyncCoordinator.runForeground() }
                         refreshParentPushRegistrationIfNeeded()
                         startPollerIfPaired()
                         armEarnedBudgetIfReady()
@@ -111,6 +120,10 @@ struct Evlin_iOSApp: App {
                     case .background:
                         startBackgroundPollerIfPaired()
                         DeviceIdentity.shared.capture()
+                        // Flush on the way out, not only on the way in: the
+                        // lines written during this session are the ones that
+                        // explain whatever happens while the app is away.
+                        Task { await ScreenTimeEventUploader.uploadPending() }
                     case .inactive:
                         break
                     @unknown default: break
@@ -572,6 +585,31 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             await CommandPoller.shared.pollOnceForCurrentDevice(
                 recoveryReason: .silentRemoteNotification
             )
+            // #96: a silent wake is the backend's only way to reach a closed
+            // app. The state-invalidated broadcast above only helps when a
+            // foreground poller is alive to hear it — in a background wake
+            // nothing is. Run one explicit metering recovery pass so a
+            // starving device re-paves its dated horizon, finishes wedged
+            // work, and crosses midnight without the kid opening the app.
+            _ = try? await MeteringProductionComposition.recoverFromSharedConfiguration(
+                role: .app
+            )
+            // Per-app owner recovery rides the same wake. The earned pool got
+            // this leg with #96; per-app was left off it, so a `set_limit`
+            // ingested here sat as `accepted_needs_owner` until someone opened
+            // Evlin — the "must open the app to arm a limit" complaint of
+            // 2026-08-07, twice on real hardware (iPhone 02:44, iPad 05:41).
+            await AppLimitRecoveryTrigger.foreground()
+            // Watchdog on the same wake: reds (revoked authorization, stuck
+            // handoffs) otherwise wait for a foreground that may be days out.
+            // The hourly starvation kick makes this a steady background pulse.
+            await MeteringWatchdog.shared.runIfDue(trigger: "background_push")
+            // Ship the flight recorder too. Until now `uploadPending` had a
+            // single call site — the foreground scene transition — so the
+            // black box was blind for exactly the stretches worth diagnosing:
+            // whenever the kid was not looking at Evlin. Samples and command
+            // acks always flowed in the background; the diagnostics did not.
+            await ScreenTimeEventUploader.uploadPending()
             completionHandler(.newData)
         }
     }

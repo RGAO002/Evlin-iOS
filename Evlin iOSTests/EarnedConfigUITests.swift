@@ -79,6 +79,44 @@ func exerciseDeviceCapSaveGate(
 
 final class EarnedConfigUITests: XCTestCase {
 
+    func testDailyScreenTimeEditRequiresEffectiveDateChoiceWhenRaised() {
+        XCTAssertTrue(
+            PoolEditConfirmationPolicy.requiresEffectiveDateChoice(
+                currentMinutes: 60,
+                newMinutes: 120
+            )
+        )
+    }
+
+    func testDailyScreenTimeEditRequiresEffectiveDateChoiceWhenLowered() {
+        XCTAssertTrue(
+            PoolEditConfirmationPolicy.requiresEffectiveDateChoice(
+                currentMinutes: 120,
+                newMinutes: 60
+            )
+        )
+    }
+
+    func testDailyScreenTimeEditDoesNotRequireChoiceWhenValueIsUnchanged() {
+        XCTAssertFalse(
+            PoolEditConfirmationPolicy.requiresEffectiveDateChoice(
+                currentMinutes: 120,
+                newMinutes: 120
+            )
+        )
+    }
+
+    func testPoolEditWaitsForEditorDismissalBeforeRequestingCascadePresentation() {
+        var handoff = PoolEditPresentationHandoff()
+
+        handoff.submit(minutes: 60)
+
+        XCTAssertEqual(handoff.pendingMinutes, 60)
+        XCTAssertEqual(handoff.consumeAfterEditorDismissal(), 60)
+        XCTAssertNil(handoff.pendingMinutes)
+        XCTAssertNil(handoff.consumeAfterEditorDismissal())
+    }
+
     // -------------------------------------------------------------------------
     // MARK: App option generation
     // -------------------------------------------------------------------------

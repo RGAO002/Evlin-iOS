@@ -5,6 +5,28 @@ import ManagedSettings
 import XCTest
 @testable import Evlin_iOS
 
+private final class AppLimitTestOwnerBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue: UUID?
+
+    init(_ value: UUID?) {
+        storedValue = value
+    }
+
+    var value: UUID? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedValue
+        }
+        set {
+            lock.lock()
+            storedValue = newValue
+            lock.unlock()
+        }
+    }
+}
+
 final class AppLimitEpochStoreTests: XCTestCase {
     private var directoryURL: URL!
     private var fileURL: URL!
@@ -506,6 +528,47 @@ final class AppLimitEpochStoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
         try fileIO.remove(at: fileURL)
         XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+    }
+
+    func testPairingConvergesAStaleOwnerRootToTheCurrentDevice() throws {
+        let oldOwner = UUID(uuidString: "20000000-0000-0000-0000-000000000042")!
+        let newOwner = UUID(uuidString: "20000000-0000-0000-0000-000000000043")!
+        let ownerBox = AppLimitTestOwnerBox(oldOwner)
+        let store = AppLimitEpochStore(
+            fileURL: fileURL,
+            lock: ActiveLockPersistenceLock.shared,
+            fileIO: DurableAppLimitEpochFileIO(),
+            ownerProvider: { ownerBox.value },
+            legacyDefaults: nil
+        )
+        let ruleID = UUID(uuidString: "10000000-0000-0000-0000-000000000043")!
+        _ = try store.transaction(source: .poll, expectedOwner: oldOwner) { state in
+            state.slots[ruleID] = makeSetSlot(ruleID: ruleID, token: 1, source: .poll)
+        }
+
+        // Pairing has already made the new device mirror authoritative. The
+        // app-limit root must not remain bound to the prior backend device.
+        ownerBox.value = newOwner
+        let replacement = try store.convergeOwnerAfterPairing(expectedOwner: newOwner)
+
+        XCTAssertEqual(replacement?.oldOwner, oldOwner)
+        let state = try store.read()
+        XCTAssertEqual(state.ownerChildDeviceID, newOwner)
+        XCTAssertTrue(state.slots.isEmpty)
+    }
+
+    func testPairingDoesNotClearAnAlreadyCurrentOwnerRoot() throws {
+        let owner = UUID(uuidString: "20000000-0000-0000-0000-000000000044")!
+        let ruleID = UUID(uuidString: "10000000-0000-0000-0000-000000000044")!
+        let store = makeStore(owner: owner)
+        _ = try store.transaction(source: .poll, expectedOwner: owner) { state in
+            state.slots[ruleID] = makeSetSlot(ruleID: ruleID, token: 1, source: .poll)
+        }
+
+        let replacement = try store.convergeOwnerAfterPairing(expectedOwner: owner)
+
+        XCTAssertNil(replacement)
+        XCTAssertNotNil(try store.read().slots[ruleID])
     }
 
     func testIdentityTeardownRequiresOwnerForLastMutationSourceOnlyRoot() throws {

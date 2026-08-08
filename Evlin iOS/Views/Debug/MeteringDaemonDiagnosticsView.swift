@@ -19,6 +19,7 @@ struct MeteringDaemonDiagnosticsView: View {
         state: nil,
         entries: []
     )
+    @State private var pendingWork: MeteringDaemonPendingWorkEvidence?
 
     var body: some View {
         List {
@@ -41,6 +42,31 @@ struct MeteringDaemonDiagnosticsView: View {
                 row("install phase", activationEvidence.installPhase?.rawValue ?? "missing")
                 row("activation ack", activationEvidence.activationAcknowledged ? "yes" : "NO")
                 row("exact daemon readback", activationEvidence.exactDaemonReadback ? "match" : "NO")
+            }
+
+            if let pendingWork {
+                Section("Selected route work") {
+                    row("route", pendingWork.routeID.uuidString)
+                    row("install", "\(pendingWork.installPhase) / \(pendingWork.installAuthorization)")
+                    row("install retry", retryText(
+                        attempts: pendingWork.installAttempts,
+                        terminal: pendingWork.installTerminal,
+                        error: pendingWork.installLastErrorCode,
+                        nextAttemptAt: pendingWork.installNextAttemptAt
+                    ))
+                    row("registration retry", optionalRetryText(
+                        attempts: pendingWork.registrationAttempts,
+                        terminal: pendingWork.registrationTerminal,
+                        error: pendingWork.registrationLastErrorCode,
+                        nextAttemptAt: pendingWork.registrationNextAttemptAt
+                    ))
+                    row("activation retry", optionalRetryText(
+                        attempts: pendingWork.activationAttempts,
+                        terminal: pendingWork.activationTerminal,
+                        error: pendingWork.activationLastErrorCode,
+                        nextAttemptAt: pendingWork.activationNextAttemptAt
+                    ))
+                }
             }
 
             Section("Daemon operations") {
@@ -141,6 +167,30 @@ struct MeteringDaemonDiagnosticsView: View {
         }
     }
 
+    private func retryText(
+        attempts: Int,
+        terminal: String,
+        error: String?,
+        nextAttemptAt: Date
+    ) -> String {
+        "attempts=\(attempts) terminal=\(terminal) error=\(error ?? "none") next=\(nextAttemptAt.formatted(.iso8601))"
+    }
+
+    private func optionalRetryText(
+        attempts: Int?,
+        terminal: String?,
+        error: String?,
+        nextAttemptAt: Date?
+    ) -> String {
+        guard let attempts, let terminal, let nextAttemptAt else { return "missing" }
+        return retryText(
+            attempts: attempts,
+            terminal: terminal,
+            error: error,
+            nextAttemptAt: nextAttemptAt
+        )
+    }
+
     @MainActor
     private func refreshReadbacks() async {
         refreshing = true
@@ -172,6 +222,10 @@ struct MeteringDaemonDiagnosticsView: View {
             ownerChildDeviceID: owner,
             state: state,
             entries: entries
+        )
+        pendingWork = MeteringDaemonPendingWorkEvidence.derive(
+            ownerChildDeviceID: owner,
+            state: state
         )
         exportText = String(data: journal.exportData(), encoding: .utf8) ?? "{}"
     }

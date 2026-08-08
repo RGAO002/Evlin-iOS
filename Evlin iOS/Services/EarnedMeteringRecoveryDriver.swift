@@ -56,7 +56,10 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
         } else {
             let effectStore = EarnedShieldEffectStore(epochStore: store)
             self.releaseIdentityShield = { operationID, owner in
-                try effectStore.release(operationID: operationID, expectedOwner: owner)
+                try effectStore.retireForIdentityCleanup(
+                    operationID: operationID,
+                    expectedOwner: owner
+                )
             }
         }
         self.resetRolloverEffect = resetRolloverEffect ?? { _, _ in
@@ -126,10 +129,17 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
         // caller's owner may be the stale identity that triggered recovery.
         guard store.isCurrentOwner(effectiveOwner) else { return }
         _ = try store.reconcileEpochStartsFromSuccessfulRegistrations(owner: effectiveOwner)
+        try settlePausedRouteSamples(owner: effectiveOwner)
+        try abandonElapsedCandidateHandoffIfNeeded(owner: effectiveOwner)
         try cancelBackwardPreparingHandoffIfNeeded(owner: effectiveOwner)
         try yieldSupersededCanonicalRolloverIfNeeded(owner: effectiveOwner)
         try markElapsedActivePriorAbsentIfNeeded(owner: effectiveOwner)
+        try adoptCurrentDayAfterElapsedInitialRouteIfNeeded(owner: effectiveOwner)
         try prepareCanonicalRolloverIfNeeded(owner: effectiveOwner)
+        // A terminal same-day candidate may still own the handoff slot when
+        // midnight prepares the next dated route. Clear only a proven-dead
+        // candidate before the rollover tries to claim that single slot.
+        try abandonTerminalSupersededCandidate(owner: effectiveOwner)
         try detachCommittedHandoffForPreparedRolloverIfNeeded(owner: effectiveOwner)
         // Detached committed predecessors are cleanup debt, not rollover
         // authority. Retry their named stops even when the rollover network
@@ -175,7 +185,21 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
         // BUG 1 self-heal, before anything arms: a device already carrying a
         // base that outgrew its ladder must be re-cut here, otherwise the
         // installer below faithfully re-arms the over-running rungs.
-        _ = try store.repairLadderBaseInvariantIfNeeded(owner: effectiveOwner, now: clock.now)
+        //
+        // #85 (P1-3): bounded. The repair can prescribe a candidate the
+        // backend keeps superseding (iPhone 2026-08-05 03:12–03:22: 30 fresh
+        // epochs across 18 routes in ten minutes, one every drain). Until the
+        // rung-placement root cause lands, a burst of recent repair corpses
+        // parks the repair with a durable red verdict instead of minting the
+        // next corpse.
+        if Self.isLadderRepairStorming(state: try store.read(), now: clock.now) {
+            MeteringFlightRecorder.emitFailure(
+                site: "recovery.ladderRepair",
+                verdict: "repair_storm_parked"
+            )
+        } else {
+            _ = try store.repairLadderBaseInvariantIfNeeded(owner: effectiveOwner, now: clock.now)
+        }
         try prepareReplacementIfNeeded(owner: effectiveOwner)
         await delivery.drain(owner: effectiveOwner)
         _ = try installer.reconcile(ownerChildDeviceID: effectiveOwner)
@@ -524,6 +548,165 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
         }
     }
 
+    /// Recovers the one midnight shape ordinary rollover cannot represent: the
+    /// initial v2 epoch registered just before midnight, but its physical route
+    /// never became active because the remaining interval was too short.
+    ///
+    /// There is no active predecessor to roll over from, so the normal rollover
+    /// machine cannot start. Adopt only the already-verified route reserved for
+    /// the current canonical day, then let the unchanged registration and
+    /// activation pipeline establish authority. Every guard below is part of
+    /// the transition proof; this is not a general stale-day fallback.
+    private func adoptCurrentDayAfterElapsedInitialRouteIfNeeded(owner: UUID) throws {
+        let activeActivities = Set(center.activities.map(\.rawValue))
+        let adopted: (from: String, to: String, routeID: UUID)? = try store.transaction(
+            expectedOwner: owner
+        ) { state in
+            guard state.activeRouteID == nil,
+                  state.v2RouteHandoff == nil,
+                  state.rolloverEffectsWork?.retry.terminal != .pending,
+                  state.ratchets[owner]?.localSelection == .v2Pending,
+                  let generationID = state.activeGenerationID,
+                  let generation = state.generations[generationID],
+                  generation.childDeviceID == owner,
+                  generation.retiredAt == nil,
+                  let priorEpochID = state.activeEpochID,
+                  var priorEpoch = state.epochs[priorEpochID],
+                  priorEpoch.childDeviceID == owner,
+                  priorEpoch.status == .active,
+                  priorEpoch.retiredAt == nil,
+                  priorEpoch.registeredAt != nil,
+                  let canonicalToday = MeteringEpochContract.canonicalUsageDate(
+                      at: clock.now,
+                      timezoneIdentifier: generation.canonicalTimezone
+                  ),
+                  priorEpoch.usageDate < canonicalToday
+            else { return nil }
+
+            let priorRoutes = state.routes.values.filter {
+                $0.ownerChildDeviceID == owner
+                    && $0.generationID == generationID
+                    && $0.epochID == priorEpochID
+                    && $0.lifecycle == .planned
+            }
+            guard priorRoutes.count == 1,
+                  var priorRoute = priorRoutes.first,
+                  !activeActivities.contains(priorRoute.activityName),
+                  priorRoute.installedSchedule == nil,
+                  priorRoute.installedEvents == nil
+            else { return nil }
+            let priorInstalls = state.installWork.filter {
+                $0.value.ownerChildDeviceID == owner
+                    && $0.value.routeID == priorRoute.routeID
+            }
+            guard priorInstalls.count == 1,
+                  let priorInstall = priorInstalls.first?.value,
+                  priorInstall.authorization == .registered,
+                  priorInstall.phase == .pendingStart,
+                  priorInstall.claim == nil,
+                  priorInstall.retry.terminal == .superseded,
+                  priorInstall.retry.lastErrorCode == "route_superseded"
+            else { return nil }
+            let priorRegistrations = state.registrationWork.values.filter {
+                $0.ownerChildDeviceID == owner
+                    && $0.epochID == priorEpochID
+                    && $0.routeID == priorRoute.routeID
+                    && $0.request.reason == .initial
+                    && $0.retry.terminal == .succeeded
+            }
+            guard priorRegistrations.count == 1,
+                  !state.activationWork.values.contains(where: {
+                      $0.routeID == priorRoute.routeID
+                          && $0.retry.terminal == .succeeded
+                  })
+            else { return nil }
+
+            let currentRoutes = state.routes.values.filter {
+                $0.ownerChildDeviceID == owner
+                    && $0.generationID == generationID
+                    && $0.usageDate == canonicalToday
+                    && $0.lifecycle == .planned
+            }
+            guard currentRoutes.count == 1,
+                  let currentRoute = currentRoutes.first,
+                  activeActivities.contains(currentRoute.activityName),
+                  currentRoute.installedSchedule == currentRoute.plannedSchedule,
+                  currentRoute.installedEvents == currentRoute.plannedEvents,
+                  let currentEpoch = state.epochs[currentRoute.epochID],
+                  currentEpoch.childDeviceID == owner,
+                  currentEpoch.status == .active,
+                  currentEpoch.retiredAt == nil,
+                  currentEpoch.usageDate == canonicalToday
+            else { return nil }
+            let currentInstalls = state.installWork.filter {
+                $0.value.ownerChildDeviceID == owner
+                    && $0.value.routeID == currentRoute.routeID
+            }
+            guard currentInstalls.count == 1,
+                  let currentInstallID = currentInstalls.first?.key,
+                  var currentInstall = state.installWork[currentInstallID],
+                  currentInstall.authorization == .futurePlanned,
+                  currentInstall.phase == .verified,
+                  currentInstall.claim == nil,
+                  currentInstall.retry.terminal == .pending,
+                  !state.registrationWork.values.contains(where: {
+                      $0.epochID == currentEpoch.epochID
+                          || $0.routeID == currentRoute.routeID
+                  }),
+                  !state.activationWork.values.contains(where: {
+                      $0.epochID == currentEpoch.epochID
+                          || $0.routeID == currentRoute.routeID
+                  }),
+                  let timeZone = TimeZone(identifier: currentEpoch.canonicalTimezone),
+                  currentEpoch.startedAt == (try MeteringDatedSchedule.canonicalStart(
+                      usageDate: canonicalToday,
+                      timeZone: timeZone
+                  ))
+            else { return nil }
+
+            priorRoute.lifecycle = .retired
+            state.routes[priorRoute.routeID] = priorRoute
+            priorEpoch.status = .retired
+            priorEpoch.retiredAt = clock.now
+            priorEpoch.retireReason = .dayRollover
+            state.epochs[priorEpochID] = priorEpoch
+
+            currentInstall.authorization = .registrationRequired
+            state.installWork[currentInstallID] = currentInstall
+            let registrationID = UUID()
+            state.registrationWork[registrationID] = EpochRegistrationWork(
+                workID: registrationID,
+                ownerChildDeviceID: owner,
+                epochID: currentEpoch.epochID,
+                routeID: currentRoute.routeID,
+                request: registrationRequest(
+                    epoch: currentEpoch,
+                    reason: .dayRollover,
+                    startedAt: currentEpoch.startedAt
+                ),
+                claim: nil,
+                retry: pendingRetry(),
+                createdAt: clock.now
+            )
+            state.activeEpochID = currentEpoch.epochID
+            return (priorEpoch.usageDate, canonicalToday, currentRoute.routeID)
+        }
+        guard let adopted else { return }
+        MeteringFlightRecorder.emit(
+            kind: .meteringDay,
+            site: "recovery.initialMidnight",
+            verdict: "adopted_verified_current_day",
+            detail: MeteringFlightRecorder.detail([
+                ("route", MeteringFlightRecorder.shortID(adopted.routeID)),
+            ]),
+            corrID: adopted.routeID,
+            transition: ScreenTimeEvent.Transition(
+                before: adopted.from,
+                after: adopted.to
+            )
+        )
+    }
+
     private func collectCompletedHandoff(owner: UUID) throws {
         try store.transaction(expectedOwner: owner) { state in
             guard state.v2RouteHandoff?.phase == .committed,
@@ -798,6 +981,31 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                runtime.timezone == generation.canonicalTimezone,
                runtime.policyRevision == generation.policyRevision {
                 targetGeneration = generation
+            } else if runtime.usageDate == priorEpoch.usageDate,
+                      runtime.timezone == generation.canonicalTimezone {
+                // Same day, drifted policy revision. The strict path below only
+                // handles a DAY change, so this case used to fall through and
+                // return — leaving the epoch paused forever. That is exactly
+                // what a fresh pairing produces: the epoch registers during
+                // onboarding, the pool config is written moments later, and the
+                // revision no longer matches, so clearing the onboarding
+                // reflection could never resume the pool (2026-08-07, real
+                // device: paused from 19:24 until an unrelated config change
+                // minted a new epoch at 19:27).
+                //
+                // Resume onto the generation that matches the live policy when
+                // one exists; otherwise resume on the current generation. Both
+                // beat staying paused, and the desired-policy machinery re-paves
+                // afterwards either way.
+                targetGeneration = state.generations.values
+                    .filter {
+                        $0.childDeviceID == owner
+                            && $0.retiredAt == nil
+                            && $0.canonicalTimezone == runtime.timezone
+                            && $0.policyRevision == runtime.policyRevision
+                    }
+                    .sorted { $0.createdAt > $1.createdAt }
+                    .first ?? generation
             } else {
                 guard priorEpoch.usageDate < runtime.usageDate,
                       let desired = state.desiredPolicy,
@@ -1168,25 +1376,27 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                   route.usageDate == epoch.usageDate,
                   let timeZone = TimeZone(identifier: epoch.canonicalTimezone)
             else { return }
-            guard !state.registrationWork.values.contains(where: {
-                $0.epochID == work.newEpochID && $0.routeID == work.newRouteID
-                    && ($0.retry.terminal == .pending || $0.retry.terminal == .succeeded)
-            }) else { return }
             let startedAt = try MeteringDatedSchedule.canonicalStart(
                 usageDate: epoch.usageDate,
                 timeZone: timeZone
             )
+            let request = registrationRequest(
+                epoch: epoch,
+                reason: .dayRollover,
+                startedAt: startedAt
+            )
+            guard !state.registrationWork.values.contains(where: {
+                $0.epochID == work.newEpochID
+                    && $0.routeID == work.newRouteID
+                    && $0.request == request
+            }) else { return }
             let registrationID = UUID()
             state.registrationWork[registrationID] = EpochRegistrationWork(
                 workID: registrationID,
                 ownerChildDeviceID: owner,
                 epochID: work.newEpochID,
                 routeID: work.newRouteID,
-                request: registrationRequest(
-                    epoch: epoch,
-                    reason: .dayRollover,
-                    startedAt: startedAt
-                ),
+                request: request,
                 claim: nil,
                 retry: pendingRetry(),
                 createdAt: clock.now
@@ -1365,7 +1575,25 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
         current = try requiredIdentityCleanup(workID: cleanup.workID)
         for operationID in current.oldShieldOperationIDs
             where !current.releasedShieldOperationIDs.contains(operationID) {
-            try releaseIdentityShield(operationID, current.oldOwnerChildDeviceID)
+            do {
+                try releaseIdentityShield(operationID, current.oldOwnerChildDeviceID)
+            } catch EarnedShieldEffectError.casConflict(let conflictedOperationID)
+                where conflictedOperationID == operationID {
+                // The effect store persists `.conflicted` before raising this
+                // error and leaves the newer lock record byte-for-byte intact.
+                // For an identity being retired, that is a safe terminal
+                // outcome: retrying can never make the obsolete earned source
+                // authoritative again and must not block adoption forever.
+                MeteringFlightRecorder.emit(
+                    kind: .meteringDay,
+                    site: "recovery.identity_cleanup",
+                    verdict: "shield_conflict_preserved_newer_record",
+                    detail: MeteringFlightRecorder.detail([
+                        ("operation", MeteringFlightRecorder.shortID(operationID)),
+                    ]),
+                    corrID: operationID
+                )
+            }
             try store.identityCleanupTransaction(workID: current.workID) { _, work in
                 guard work.oldShieldOperationIDs.contains(operationID) else { return }
                 work.releasedShieldOperationIDs.insert(operationID)
@@ -1403,6 +1631,120 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
               cleanup.workID == workID
         else { throw DeviceEpochStoreError.ownerMismatch }
         return cleanup
+    }
+
+    /// #53 (FIX-0c): a non-committed handoff whose CANDIDATE's day has already
+    /// ended can never cut over — its dated schedule is gone — yet it owns the
+    /// single handoff slot. Every path out is then guarded shut: the rollover
+    /// effect leg only adopts a slot holding its own handoffID, the cross-day
+    /// resume mint requires the slot empty, and the abandon sweeps demand a
+    /// TERMINAL rejection the never-registered candidate does not have (iPad
+    /// 2026-08-05: pinned on yesterday all night). An elapsed day IS terminal
+    /// evidence — no network verdict can revive a route whose window is over.
+    /// Retire the candidate exactly like the cross-day resume replacement does
+    /// and free the slot; the next gate reconcile or rollover then re-plans
+    /// the current day through its normal path.
+    private func abandonElapsedCandidateHandoffIfNeeded(owner: UUID) throws {
+        var abandoned: (route: UUID, from: String, to: String)?
+        try store.transaction(expectedOwner: owner) { state in
+            guard let handoff = state.v2RouteHandoff,
+                  handoff.ownerChildDeviceID == owner,
+                  handoff.phase != .committed,
+                  state.activeRouteID == handoff.fromRouteID,
+                  var targetRoute = state.routes[handoff.toRouteID],
+                  var targetEpoch = state.epochs[handoff.toEpochID],
+                  targetRoute.ownerChildDeviceID == owner,
+                  targetRoute.epochID == targetEpoch.epochID,
+                  targetRoute.lifecycle == .planned
+                      || targetRoute.lifecycle == .active,
+                  targetEpoch.retiredAt == nil,
+                  !state.hasExactSuccessfulActivation(
+                      owner: owner,
+                      epochID: targetEpoch.epochID,
+                      routeID: targetRoute.routeID
+                  ),
+                  let timeZone = TimeZone(identifier: targetEpoch.canonicalTimezone),
+                  MeteringDatedSchedule.hasElapsed(
+                      usageDate: targetRoute.usageDate,
+                      timeZone: timeZone,
+                      now: clock.now
+                  ),
+                  let installKey = uniqueInstallKey(for: targetRoute.routeID, in: state),
+                  let install = state.installWork[installKey],
+                  let dayEnd = state.canonicalDayEnd(
+                      usageDate: targetRoute.usageDate,
+                      timeZoneIdentifier: targetEpoch.canonicalTimezone
+                  )
+            else { return }
+
+            targetEpoch.status = .retired
+            targetEpoch.retiredAt = clock.now
+            targetEpoch.retireReason = .activationSuperseded
+            state.epochs[targetEpoch.epochID] = targetEpoch
+            targetRoute.lifecycle = .tombstoned
+            state.routes[targetRoute.routeID] = targetRoute
+            let wasNeverInstalled = install.phase == .pendingStart
+            state.tombstones[targetRoute.routeID] = MeteringRouteTombstone(
+                routeID: targetRoute.routeID,
+                activityName: targetRoute.activityName,
+                eventNames: targetRoute.plannedEvents.map(\.eventName),
+                ownerChildDeviceID: owner,
+                usageDate: targetRoute.usageDate,
+                epochID: targetEpoch.epochID,
+                generationID: targetRoute.generationID,
+                canonicalDayEnd: dayEnd,
+                stopAcknowledgedAt: wasNeverInstalled ? clock.now : nil,
+                referencedWorkIDs: [],
+                retainedUntil: nil
+            )
+            state.installWork[installKey]?.claim = nil
+            state.installWork[installKey]?.phase =
+                wasNeverInstalled ? .stopped : .pendingStop
+            if wasNeverInstalled {
+                state.installWork[installKey]?.retry.terminal = .superseded
+                state.installWork[installKey]?.retry.lastErrorCode = "candidate_day_elapsed"
+            }
+            for (key, var work) in state.registrationWork
+            where work.routeID == targetRoute.routeID
+                && work.retry.terminal == .pending {
+                work.claim = nil
+                work.retry.terminal = .superseded
+                work.retry.lastErrorCode = "candidate_day_elapsed"
+                state.registrationWork[key] = work
+            }
+            for (key, var work) in state.activationWork
+            where work.routeID == targetRoute.routeID
+                && work.retry.terminal == .pending {
+                work.claim = nil
+                work.retry.terminal = .superseded
+                work.retry.lastErrorCode = "candidate_day_elapsed"
+                state.activationWork[key] = work
+            }
+            state.v2RouteHandoff = nil
+            abandoned = (
+                targetRoute.routeID,
+                targetRoute.usageDate,
+                MeteringEpochContract.canonicalUsageDate(
+                    at: clock.now,
+                    timezoneIdentifier: targetEpoch.canonicalTimezone
+                ) ?? ""
+            )
+        }
+        guard let abandoned else { return }
+        MeteringFlightRecorder.emit(
+            kind: .meteringDay,
+            site: "recovery.elapsedCandidateAbandon",
+            verdict: "abandoned",
+            detail: MeteringFlightRecorder.detail([
+                ("route", MeteringFlightRecorder.shortID(abandoned.route)),
+                ("code", "candidate_day_elapsed"),
+            ]),
+            corrID: abandoned.route,
+            transition: ScreenTimeEvent.Transition(
+                before: abandoned.from,
+                after: abandoned.to
+            )
+        )
     }
 
     private func prepareReplacementIfNeeded(owner: UUID) throws {
@@ -1483,7 +1825,9 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
     private func promoteVerifiedCandidate(owner: UUID) throws {
         try store.transaction(expectedOwner: owner) { state in
             guard let ratchet = state.ratchets[owner] else { return }
-            if ratchet.localSelection == .v1 {
+            if ratchet.localSelection == .v1
+                || ratchet.localSelection == .v2Pending
+                || ratchet.localSelection == .dualActive {
                 guard let candidate = initialCandidate(in: state, owner: owner),
                       let installKey = uniqueInstallKey(for: candidate.routeID, in: state),
                       state.installWork[installKey]?.phase == .verified,
@@ -1493,7 +1837,7 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                 state.installWork[installKey]?.phase = .dualActive
                 var updated = ratchet
                 updated.localSelection = .dualActive
-                updated.dualActiveAt = clock.now
+                updated.dualActiveAt = updated.dualActiveAt ?? clock.now
                 state.ratchets[owner] = updated
                 enqueueActivationIfNeeded(route: candidate, owner: owner, state: &state)
                 return
@@ -1589,6 +1933,7 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
     }
 
     private func recoverTerminalInitialActivation(owner: UUID) throws {
+        var recoveryVerdict: (String, UUID, String)?
         try store.transaction(expectedOwner: owner) { state in
             guard var ratchet = state.ratchets[owner], ratchet.localSelection == .dualActive,
                   let candidate = initialDualActiveCandidate(in: state, owner: owner),
@@ -1600,19 +1945,174 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                   let installKey = uniqueInstallKey(for: candidate.routeID, in: state),
                   state.installWork[installKey]?.phase == .dualActive
             else { return }
+
+            let errorCode = activation.retry.lastErrorCode ?? "unknown_activation_error"
+            let requiresFreshIdentity = errorCode == "activation_route_mismatch"
+                || errorCode == "activation_policy_not_current"
+                || errorCode == "activation_enforcement_set_not_current"
+                || (errorCode == "activation_epoch_not_current"
+                    && activation.retry.attemptCount > 0)
+            if requiresFreshIdentity {
+                guard retireTerminalInitialActivationCandidate(
+                    state: &state,
+                    owner: owner,
+                    candidate: candidate,
+                    activation: activation,
+                    installKey: installKey,
+                    errorCode: errorCode
+                ) else { return }
+                recoveryVerdict = ("retired_for_replan", candidate.routeID, errorCode)
+                return
+            }
+
+            let canRetrySamePhysicalIdentity = errorCode == "epoch_not_active"
+                || errorCode == "epoch_paused"
+                || (errorCode == "activation_epoch_not_current"
+                    && activation.retry.attemptCount == 0)
+            guard canRetrySamePhysicalIdentity else {
+                recoveryVerdict = ("terminal_requires_attention", candidate.routeID, errorCode)
+                return
+            }
             state.routes[candidate.routeID]?.lifecycle = .planned
             state.installWork[installKey]?.phase = .verified
-            if activation.retry.lastErrorCode == "epoch_not_active" || activation.retry.lastErrorCode == "epoch_paused" {
+            if errorCode == "epoch_not_active" || errorCode == "epoch_paused" {
                 // The first activation never commits v2 while the gate is
                 // closed. Keep v1 countable and leave this epoch durably
                 // paused; Task 17 may create a distinct conservative epoch
                 // only after it receives a later authoritative open state.
                 state.epochs[candidate.epochID]?.status = .paused
             }
-            ratchet.localSelection = .v1
+            // V2-only builds never silently fall back to the legacy ladder.
+            // Re-open this verified candidate as pending v2 activation and let
+            // the normal delivery retry policy drive the next attempt.
+            state.routes[candidate.routeID]?.lifecycle = .planned
+            state.installWork[installKey]?.phase = .verified
+            var retriedActivation = activation
+            retriedActivation.claim = nil
+            retriedActivation.retry = MeteringRetryState(
+                attemptCount: activation.retry.attemptCount + 1,
+                nextAttemptAt: MeteringRetryPolicy.nextAttempt(
+                    after: activation.retry.attemptCount + 1,
+                    now: clock.now
+                ),
+                lastErrorCode: activation.retry.lastErrorCode,
+                terminal: .pending
+            )
+            if let activationKey = state.activationWork.first(where: {
+                $0.value.workID == activation.workID
+            })?.key {
+                state.activationWork[activationKey] = retriedActivation
+            }
+            ratchet.localSelection = .v2Pending
+            ratchet.advertisedVersion = max(ratchet.advertisedVersion, 2)
             ratchet.dualActiveAt = nil
             state.ratchets[owner] = ratchet
         }
+
+        if let recoveryVerdict {
+            MeteringFlightRecorder.emit(
+                kind: .meteringDay,
+                site: "recovery.initial_activation",
+                verdict: recoveryVerdict.0,
+                detail: MeteringFlightRecorder.detail([
+                    ("route", MeteringFlightRecorder.shortID(recoveryVerdict.1)),
+                    ("error", recoveryVerdict.2),
+                ]),
+                corrID: recoveryVerdict.1
+            )
+        }
+    }
+
+    private func retireTerminalInitialActivationCandidate(
+        state: inout DeviceEpochStoreState,
+        owner: UUID,
+        candidate: MeteringCallbackRoute,
+        activation: EpochActivationWork,
+        installKey: UUID,
+        errorCode: String
+    ) -> Bool {
+        guard state.ownerChildDeviceID == owner,
+              state.v2RouteHandoff == nil,
+              state.activeRouteID == nil,
+              state.activeGenerationID == candidate.generationID,
+              state.activeEpochID == candidate.epochID,
+              var route = state.routes[candidate.routeID],
+              route.lifecycle == .active,
+              var epoch = state.epochs[candidate.epochID],
+              epoch.childDeviceID == owner,
+              epoch.status != .retired,
+              state.generations[candidate.generationID]?.childDeviceID == owner,
+              uniqueInstallKey(for: candidate.routeID, in: state) == installKey,
+              state.installWork[installKey]?.phase == .dualActive,
+              activation.ownerChildDeviceID == owner,
+              activation.epochID == candidate.epochID,
+              activation.routeID == candidate.routeID,
+              activation.retry.terminal != .pending,
+              activation.retry.terminal != .succeeded,
+              let dayEnd = state.canonicalDayEnd(
+                  usageDate: route.usageDate,
+                  timeZoneIdentifier: epoch.canonicalTimezone
+              )
+        else { return false }
+
+        epoch.status = .retired
+        epoch.retiredAt = clock.now
+        epoch.retireReason = .activationSuperseded
+        state.epochs[epoch.epochID] = epoch
+        state.generations[route.generationID]?.retiredAt = clock.now
+        route.lifecycle = .tombstoned
+        state.routes[route.routeID] = route
+
+        for (key, var sample) in state.sampleWork where sample.routeID == route.routeID {
+            guard sample.retry.terminal == .pending else { continue }
+            sample.claim = nil
+            sample.retry.terminal = .superseded
+            sample.retry.lastErrorCode = errorCode
+            state.sampleWork[key] = sample
+        }
+        state.deferredCallbacks = state.deferredCallbacks.filter {
+            $0.value.routeID != route.routeID
+        }
+        state.installWork[installKey]?.claim = nil
+        state.installWork[installKey]?.phase = .pendingStop
+
+        let relatedWorkIDs = Set(
+            state.registrationWork.values.filter {
+                $0.epochID == epoch.epochID && $0.routeID == route.routeID
+            }.map(\.workID)
+                + state.activationWork.values.filter {
+                    $0.epochID == epoch.epochID && $0.routeID == route.routeID
+                }.map(\.workID)
+                + state.sampleWork.values.filter {
+                    $0.epochID == epoch.epochID && $0.routeID == route.routeID
+                }.map(\.workID)
+                + state.installWork.values.filter {
+                    $0.routeID == route.routeID
+                }.map(\.workID)
+        )
+        state.tombstones[route.routeID] = MeteringRouteTombstone(
+            routeID: route.routeID,
+            activityName: route.activityName,
+            eventNames: route.plannedEvents.map(\.eventName),
+            ownerChildDeviceID: owner,
+            usageDate: route.usageDate,
+            epochID: epoch.epochID,
+            generationID: route.generationID,
+            canonicalDayEnd: dayEnd,
+            stopAcknowledgedAt: nil,
+            referencedWorkIDs: relatedWorkIDs,
+            retainedUntil: nil
+        )
+        state.activeGenerationID = nil
+        state.activeEpochID = nil
+        state.activeRouteID = nil
+        if var ratchet = state.ratchets[owner] {
+            ratchet.localSelection = .v2Pending
+            ratchet.advertisedVersion = max(ratchet.advertisedVersion, 2)
+            ratchet.dualActiveAt = nil
+            state.ratchets[owner] = ratchet
+        }
+        return true
     }
 
     private func promoteAcknowledgedActivation(owner: UUID) throws {
@@ -1844,7 +2344,18 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
             let registrationStillUsable = candidateRegistrations.contains {
                 $0.retry.terminal == .pending || $0.retry.terminal == .succeeded
             }
-            let activationSucceeded = state.activationWork.values.contains {
+            let candidateActivations = state.activationWork.values.filter {
+                $0.epochID == handoff.toEpochID
+                    && $0.routeID == handoff.toRouteID
+            }
+            let activationTerminated = candidateActivations.contains {
+                $0.retry.terminal != .pending
+                    && $0.retry.terminal != .succeeded
+            }
+            let activationStillUsable = candidateActivations.contains {
+                $0.retry.terminal == .pending || $0.retry.terminal == .succeeded
+            }
+            let activationSucceeded = candidateActivations.contains {
                 $0.epochID == handoff.toEpochID
                     && $0.routeID == handoff.toRouteID
                     && $0.retry.terminal == .succeeded
@@ -1859,11 +2370,42 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                     && $0.lifecycle == .planned
                     && state.epochs[$0.epochID]?.status == .active
             }
-            guard registrationTerminated,
-                  !registrationStillUsable,
+            let hasPreparedNextDayRollover: Bool = {
+                guard let rollover = state.rolloverEffectsWork,
+                      rollover.ownerChildDeviceID == owner,
+                      rollover.retry.terminal == .pending,
+                      rollover.oldEpochID == handoff.fromEpochID,
+                      rollover.oldRouteID == handoff.fromRouteID,
+                      candidateRoute.usageDate < rollover.toUsageDate,
+                      let nextRoute = state.routes[rollover.newRouteID],
+                      nextRoute.epochID == rollover.newEpochID,
+                      nextRoute.usageDate == rollover.toUsageDate,
+                      nextRoute.lifecycle == .planned || nextRoute.lifecycle == .active
+                else { return false }
+                return true
+            }()
+            let registrationFailed = registrationTerminated && !registrationStillUsable
+            let activationFailedAfterRegistration = candidateRegistrations.contains {
+                $0.retry.terminal == .succeeded
+            } && activationTerminated && !activationStillUsable
+            // A terminal registration proves the backend never accepted this candidate, so the
+            // prior route is safe to resume. After registration, only a successor may take over.
+            guard registrationFailed || activationFailedAfterRegistration,
                   !activationSucceeded,
-                  hasNewerCandidate
+                  registrationFailed || hasNewerCandidate || hasPreparedNextDayRollover
             else { return }
+
+            for (key, var sample) in state.sampleWork
+            where sample.routeID == candidateRoute.routeID
+                && sample.retry.terminal == .pending {
+                sample.claim = nil
+                sample.retry.terminal = .superseded
+                sample.retry.lastErrorCode = "cross_day_candidate_superseded"
+                state.sampleWork[key] = sample
+            }
+            state.deferredCallbacks = state.deferredCallbacks.filter {
+                $0.value.routeID != candidateRoute.routeID
+            }
 
             candidateEpoch.status = .retired
             candidateEpoch.retiredAt = clock.now
@@ -1881,7 +2423,9 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                 generationID: candidateRoute.generationID,
                 canonicalDayEnd: dayEnd,
                 stopAcknowledgedAt: nil,
-                referencedWorkIDs: [],
+                referencedWorkIDs: Set(state.sampleWork.values.filter {
+                    $0.routeID == candidateRoute.routeID
+                }.map(\.workID)),
                 retainedUntil: nil
             )
             state.installWork[candidateInstallKey]?.phase = .pendingStop
@@ -2100,8 +2644,83 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
         state.activationWork.values.contains { $0.routeID == routeID && $0.retry.terminal == .succeeded }
     }
 
+    /// #85 (P1-3): is the ladder repair churning? A healthy device produces
+    /// at most a corpse or two per day; the observed storm produced one every
+    /// ~20 seconds. Five tombstoned routes born within the last twenty
+    /// minutes can only mean a repair loop that is re-minting what something
+    /// else keeps killing — stop feeding it.
+    nonisolated static func isLadderRepairStorming(
+        state: DeviceEpochStoreState,
+        now: Date
+    ) -> Bool {
+        // Count distinct MINT MOMENTS, not tombstones. A storm is repeated
+        // mint→kill→mint cycles, and each cycle mints at its own instant. A
+        // horizon, by contrast, is minted as one batch and retired as one
+        // batch, so an ordinary policy change (a parent lowering the device
+        // limit) instantly produced eight same-second tombstones and tripped
+        // this breaker — which then has no way out: it parks the repair, the
+        // ladder stays wrong, and every retry re-reads the same eight corpses
+        // until they age out. The pool simply stopped (2026-08-08 00:05, real
+        // device: `repair_storm_parked` every 12 seconds).
+        let recentMintInstants = Set(
+            state.routes.values
+                .filter {
+                    $0.lifecycle == .tombstoned
+                        && now.timeIntervalSince($0.createdAt) < 20 * 60
+                }
+                // Second granularity: siblings of one batch share an instant.
+                .map { Int($0.createdAt.timeIntervalSince1970) }
+        )
+        return recentMintInstants.count >= 5
+    }
+
     private func hasNonterminalPriorRouteWork(_ routeID: UUID, in state: DeviceEpochStoreState) -> Bool {
         state.sampleWork.values.contains { $0.routeID == routeID && $0.retry.terminal == .pending }
+    }
+
+    /// #84 (P1-1): a sample queued moments before the gate closed is stranded
+    /// once its epoch pauses — the dispatcher only claims samples on active
+    /// epochs, so the delivery-settle terminalizer, which needs a backend
+    /// response to run, never fires. The pending work then wedges every
+    /// `hasNonterminalPriorRouteWork` barrier (same-day gate-resume
+    /// replacement AND the midnight rollover) until the day ends. Settle such
+    /// samples with the fate an attempted delivery would have received: the
+    /// backend refuses samples on a paused epoch, and the usage they carry is
+    /// already excluded at credit time via `excludedWhilePausedMinutes`.
+    /// The live handoff's to-side epoch is exempt — a cutover-ready candidate
+    /// can be revived paused→active and its samples must stay pending.
+    private func settlePausedRouteSamples(owner: UUID) throws {
+        var settled: [(workID: UUID, corrID: UUID)] = []
+        try store.transaction(expectedOwner: owner) { state in
+            for (key, var work) in state.sampleWork {
+                guard work.ownerChildDeviceID == owner,
+                      work.retry.terminal == .pending,
+                      let epochID = work.epochID,
+                      let epoch = state.epochs[epochID],
+                      epoch.childDeviceID == owner,
+                      epoch.status == .paused,
+                      state.v2RouteHandoff?.toEpochID != epochID
+                else { continue }
+                work.claim = nil
+                work.retry.terminal = .rejected
+                work.retry.lastErrorCode = "accounting_paused"
+                work.retry.nextAttemptAt = clock.now
+                state.sampleWork[key] = work
+                settled.append((work.workID, work.routeID ?? epochID))
+            }
+        }
+        for item in settled {
+            MeteringFlightRecorder.emit(
+                kind: .meteringSample,
+                site: "recovery.pausedSampleSettle",
+                verdict: "settled_rejected",
+                detail: MeteringFlightRecorder.detail([
+                    ("work", MeteringFlightRecorder.shortID(item.workID)),
+                    ("code", "accounting_paused"),
+                ]),
+                corrID: item.corrID
+            )
+        }
     }
 
     private func uniqueInstallKey(for routeID: UUID, in state: DeviceEpochStoreState) -> UUID? {
