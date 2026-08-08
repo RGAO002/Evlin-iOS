@@ -68,8 +68,26 @@ final class AutomaticLockNoticeTests: XCTestCase {
             overrideActive: true,
             usageDate: "2026-07-15"
         )
-        XCTAssertEqual(notice?.message, "Screen time override is applying.")
+        XCTAssertEqual(
+            notice?.message,
+            "You overrode today's screen time limit, so apps stay unlocked for "
+                + "the rest of today. Raising today's limit ends the override."
+        )
         XCTAssertNil(notice?.action)
+    }
+
+    /// The copy has to name both halves: that the parent did it, and the one
+    /// way back out. Without the second sentence, raising the limit silently
+    /// re-locks a day the parent thought they had released.
+    func test_overrideNotice_namesTheParentsActionAndTheWayOut() {
+        let message = AutomaticLockNotice.make(
+            coveringSources: ["earned_time"],
+            exhausted: true,
+            overrideActive: true,
+            usageDate: "2026-07-15"
+        )?.message ?? ""
+        XCTAssertTrue(message.contains("You overrode"), message)
+        XCTAssertTrue(message.contains("Raising today's limit"), message)
     }
 
     func test_completeCoveringSources_preservesPriorStateUntilEveryDeviceReplies() {

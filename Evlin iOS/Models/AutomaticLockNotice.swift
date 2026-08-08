@@ -29,10 +29,16 @@ nonisolated struct AutomaticLockNotice: Equatable, Sendable {
         ]
         if exhausted || !sources.isDisjoint(with: earnedSources) {
             if overrideActive {
+                // Say plainly that the override is the parent's own doing, and
+                // that raising today's limit takes it back — otherwise the one
+                // way out of an override is invisible, and a parent who raises
+                // the limit afterwards is surprised when the day locks again.
                 return .init(
                     kind: .earnedTime,
                     systemImage: "hourglass.bottomhalf.filled",
-                    message: "Screen time override is applying.",
+                    message: "You overrode today's screen time limit, "
+                        + "so apps stay unlocked for the rest of today. "
+                        + "Raising today's limit ends the override.",
                     actionTitle: nil,
                     action: nil
                 )
