@@ -397,16 +397,36 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
         rules: [AppLimitRule],
         ownerChildDeviceID: UUID
     ) -> AppLimitPlanResult {
-        guard let result = ActiveLockPersistenceLock.shared.withLock({
-            armV2Locked(
-                rules: rules,
-                ownerChildDeviceID: ownerChildDeviceID
-            )
-        }) else {
-            return .partiallyArmed(armed: 0, failed: rules.count)
-        }
-        return result
+        // Serialise concurrent arms WITHOUT holding ActiveLockPersistenceLock
+        // across DeviceActivity's synchronous XPC.
+        //
+        // That lock has two layers, and both used to span the whole arm: a
+        // process-wide NSRecursiveLock and a CROSS-PROCESS flock that the
+        // DeviceActivityMonitor extension takes at five sites. A daemon call
+        // that never answers therefore did not merely wedge this caller — it
+        // starved the extension into jetsam, which for parental controls is
+        // worse than the crash, because a crash at least restarts and re-arms.
+        // (2026-08-08: FrontBoard killed the app at armV2Locked's
+        // startMonitoring with 0.02s of CPU burned, holding this lock.)
+        //
+        // Dropping it costs only whole-sequence atomicity against the
+        // extension. Every step here already re-enters the persistence lock on
+        // its own — `resolve`, `recordStartAttempt` and `markMonitorStartObserved`
+        // each open their own store transaction — and each is CAS-guarded on
+        // owner + armID + replacementKey + monitorStartPending, so an
+        // interleaved writer is rejected rather than silently merged.
+        Self.armSerialization.lock()
+        defer { Self.armSerialization.unlock() }
+        return armV2Locked(
+            rules: rules,
+            ownerChildDeviceID: ownerChildDeviceID
+        )
     }
+
+    /// In-process single-flight for arming. Recursive because an arm can be
+    /// re-entered on the same thread through recovery paths; deliberately NOT
+    /// the cross-process persistence lock — see `armV2`.
+    private static let armSerialization = NSRecursiveLock()
 
     private func armV2Locked(
         rules: [AppLimitRule],

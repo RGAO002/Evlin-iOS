@@ -108,6 +108,63 @@ final class AppLimitPlannerTests: XCTestCase {
 
     // MARK: - Phase 4 stable per-rule provenance
 
+    /// The 2026-08-08 kill: the main thread sat in `startMonitoring`'s
+    /// synchronous XPC while holding ActiveLockPersistenceLock — which is a
+    /// cross-process flock the DeviceActivityMonitor extension also takes. Any
+    /// unanswered daemon round trip therefore starves the extension as well as
+    /// wedging the caller, so the XPC must not run under that lock.
+    func testDeviceActivityCallsDoNotHoldThePersistenceLock() throws {
+        let owner = UUID(uuidString: "cccccccc-0000-0000-0000-0000000000f1")!
+        let ruleID = UUID(uuidString: "dddddddd-0000-0000-0000-0000000004f1")!
+        let armID = UUID(uuidString: "eeeeeeee-0000-0000-0000-0000000000f1")!
+        let now = Date(timeIntervalSince1970: 1_721_174_400)
+        let store = makeEpochStore(owner: owner)
+        let configured = rule(
+            id: ruleID,
+            budget: 30,
+            window: AppLimitWindow(
+                startMinute: 0,
+                endMinute: 1439,
+                repeats: true,
+                timezone: "UTC"
+            )
+        )
+        try seed(configured, token: 7, owner: owner, store: store)
+
+        let spy = PlannerSchedulerSpy()
+        var lockWasReachableDuringXPC: Bool?
+        spy.beforeStartEvents = { _ in
+            // Another thread must be able to take the persistence lock while
+            // the "daemon call" is in flight. If the caller still holds it,
+            // this blocks and the wait times out.
+            let acquired = DispatchSemaphore(value: 0)
+            DispatchQueue.global(qos: .userInitiated).async {
+                _ = ActiveLockPersistenceLock.shared.withLock { }
+                acquired.signal()
+            }
+            lockWasReachableDuringXPC = acquired.wait(timeout: .now() + 3) == .success
+        }
+
+        let planner = AppLimitPlanner(
+            scheduler: spy,
+            now: { now },
+            epochStore: store,
+            ownerProvider: { owner },
+            armIDProvider: { armID }
+        )
+        XCTAssertEqual(
+            planner.arm(rules: [configured]),
+            .armed(activityCount: 1, eventCount: 1)
+        )
+        XCTAssertEqual(
+            lockWasReachableDuringXPC,
+            true,
+            "startMonitoring ran while the persistence lock was held; an "
+                + "unanswered daemon round trip would wedge the caller AND "
+                + "starve the DeviceActivityMonitor extension on the flock"
+        )
+    }
+
     func testProgressAndRestartPreserveArmProvenanceWithoutCenterCalls() throws {
         let owner = UUID(uuidString: "cccccccc-0000-0000-0000-000000000001")!
         let ruleID = UUID(uuidString: "dddddddd-0000-0000-0000-000000000400")!
@@ -600,11 +657,35 @@ final class AppLimitPlannerTests: XCTestCase {
             armIDProvider: { firstArm }
         )
         XCTAssertEqual(first.arm(rules: [original]), .armed(activityCount: 1, eventCount: 1))
-        XCTAssertFalse(
+        // Contract change (2026-08-08). This used to assert the replacement
+        // COULD NOT commit here, which was true only because the arm held
+        // ActiveLockPersistenceLock — a cross-process flock — across
+        // startMonitoring's synchronous XPC. That is the wedge that got the app
+        // killed by the scene-update watchdog, and it starved the
+        // DeviceActivityMonitor extension on the same flock.
+        //
+        // The replacement may now land mid-flight. What must hold instead is
+        // that the in-flight arm is VOIDED rather than half-committed: the
+        // newer token rebuilds the slot, so the CAS in markMonitorStartObserved
+        // finds no matching provenance and records nothing. The stale monitor
+        // it started is then stopped by the next arm — asserted at the end of
+        // this test.
+        XCTAssertTrue(
             replacementCommittedInsideStart,
-            "a newer token must not commit between the final arm check and startMonitoring"
+            "a newer token must be free to land while the daemon call is in flight"
         )
-        XCTAssertEqual(replacementFinished.wait(timeout: .now() + 2), .success)
+        let afterVoidedArm = try store.read().slots[ruleID]
+        XCTAssertEqual(afterVoidedArm?.latestOrderingToken, 8)
+        XCTAssertNil(
+            afterVoidedArm?.armProvenance,
+            "the arm that lost the race must leave no provenance behind — a "
+                + "half-committed arm would be worse than a discarded one"
+        )
+        // `replacementCommittedInsideStart` already consumed the signal when it
+        // succeeded; only wait again if the commit had not landed by then.
+        if !replacementCommittedInsideStart {
+            XCTAssertEqual(replacementFinished.wait(timeout: .now() + 2), .success)
+        }
         XCTAssertEqual(try store.read().slots[ruleID]?.latestOrderingToken, 8)
 
         spy.beforeStartEvents = nil
