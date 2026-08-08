@@ -7,7 +7,13 @@ import XCTest
 @MainActor
 final class MeteringAuthoritativeBaseCorrectionTests: XCTestCase {
     private let owner = UUID(uuidString: "C0123456-789A-4BCD-8EFA-0123456789AB")!
-    private let start = Date(timeIntervalSince1970: 1_784_937_600)
+    // 2026-07-18T16:00:00Z = 12:00 in America/New_York, i.e. INSIDE the
+    // candidate's own usage date. It used to be 2026-07-25, a week after the
+    // routes these fixtures build, which was harmless until the elapsed-day
+    // sweep landed: a candidate whose day ended a week ago can never cut over,
+    // so recovery correctly reclaimed the handoff and every repair assertion
+    // below lost its subject.
+    private let start = Date(timeIntervalSince1970: 1_784_390_400)
     private let baseURL = URL(string: "https://example.invalid/api/v1")!
 
     func testInitialV1ToV2RegistrationBaseMismatchMintsCorrectedBootstrapCandidate() async throws {
@@ -685,6 +691,17 @@ final class MeteringAuthoritativeBaseCorrectionTests: XCTestCase {
                 case .pendingStart, .starting, .installed, .pendingStop, .stopped:
                     break
                 }
+            }
+            // A candidate the backend has not acknowledged may not dispatch
+            // samples at all, so the in-flight race this test exists for is
+            // unreachable until its activation has succeeded. Acknowledge it
+            // here; the race being pinned is the correction arriving while
+            // that sample is on the wire, not the activation ordering.
+            for (key, var activation) in state.activationWork
+            where activation.routeID == fixture.rejectedRouteID {
+                activation.retry.terminal = .succeeded
+                activation.retry.lastErrorCode = nil
+                state.activationWork[key] = activation
             }
         }
         let requestStarted = expectation(description: "rejected candidate sample dispatched")

@@ -46,7 +46,15 @@ final class MeteringCoverageIntegrationTests: XCTestCase {
         }
     }
 
-    func testExpiredCoverageRejectsPreviouslyValidCallbackWithoutStoppingRoutes() throws {
+    /// Expired coverage must never STOP routes, and — since 2026-07-25 — must
+    /// not veto the active route's own callbacks either. A callback for the
+    /// active route IS the daemon reporting the schedule it holds; letting a
+    /// conservative, periodically-recomputed local snapshot discard it threw
+    /// away genuinely earned minutes Apple never re-sends (real device: every
+    /// re-arm produced a callback dropped as `epoch_not_active` while coverage
+    /// caught up seconds later). This test was inverted at that point; it had
+    /// pinned the pre-fix behaviour.
+    func testExpiredCoverageDoesNotVetoActiveRouteAndNeverStopsRoutes() throws {
         let fixture = try makeFixture()
         try fixture.installAll()
         try fixture.activateRoute(on: "2026-07-18")
@@ -71,8 +79,15 @@ final class MeteringCoverageIntegrationTests: XCTestCase {
         )
 
         XCTAssertEqual(exhausted?.status, .coverageExhausted)
-        XCTAssertEqual(outcome, .discarded(reason: "epoch_not_active"))
-        XCTAssertEqual(try fixture.store.read(), before)
+        guard case .queued = outcome else {
+            return XCTFail("the daemon's own active route must still be trusted, got \(outcome)")
+        }
+        XCTAssertEqual(try fixture.store.read().sampleWork.count, 1)
+        XCTAssertEqual(
+            try fixture.store.read().routes.mapValues(\.lifecycle),
+            before.routes.mapValues(\.lifecycle),
+            "an exhausted coverage snapshot must not retire or tombstone anything"
+        )
         XCTAssertTrue(fixture.center.stopCalls.isEmpty)
     }
 
@@ -387,9 +402,15 @@ private nonisolated final class CoverageCenter: MeteringDeviceActivityCenter, @u
 
     func install(route: MeteringCallbackRoute, selectionBytes: Data) {
         let timeZone = TimeZone(identifier: route.plannedSchedule.timezoneIdentifier)!
+        // The daemon holds whatever the installer armed, and since the
+        // 2026-07-24 arm-from-now topology today's interval starts at the arm
+        // instant, not canonical midnight. Dropping `intervalStartAt` here made
+        // this fake report a stale schedule for today and every coverage refresh
+        // saw a spurious `sched=DIFF`.
         let schedule = try! MeteringDatedSchedule.datedSchedule(
             usageDate: route.usageDate,
-            timeZone: timeZone
+            timeZone: timeZone,
+            intervalStartAt: route.plannedSchedule.intervalStartAt
         )
         let selection = try! JSONDecoder().decode(FamilyActivitySelection.self, from: selectionBytes)
         let events = Dictionary(uniqueKeysWithValues: route.plannedEvents.map { plan in

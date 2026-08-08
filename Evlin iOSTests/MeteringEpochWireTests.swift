@@ -169,7 +169,11 @@ final class MeteringEpochWireTests: XCTestCase {
         {"metering_protocol_version":2,"child_name":"Liam","minutes_left":75,"minutes_max":120,"tasks":[],"daily_complete_acknowledged":false,"screen_time_finished_acknowledged":false}
         """.utf8))
 
-        XCTAssertEqual(absentProtocol.meteringProtocolVersion, 1)
+        // V1 is retired end to end: the backend pins the field to literal 2
+        // (schema `ge=2, le=2`, plus a device-table check constraint), and the
+        // client floors it at 2 so a missing or stale advertisement can never
+        // revive legacy counting.
+        XCTAssertEqual(absentProtocol.meteringProtocolVersion, 2)
         XCTAssertEqual(absentProtocol.earnedTimeRuntime?.policyRevision, "policy-r17")
         XCTAssertEqual(legacyRuntime.earnedTimeRuntime?.policyRevision, "")
         XCTAssertEqual(advertisedV2.meteringProtocolVersion, 2)

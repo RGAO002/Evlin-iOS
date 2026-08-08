@@ -42,11 +42,17 @@ final class MeteringT11DemolitionTests: XCTestCase {
         }
     }
 
-    func testLegacyCoordinatorUsesStrictThirtySecondBoundary() {
+    /// The boundary is `threshold - jitter`, derived rather than hardcoded:
+    /// the jitter allowance widened from 30s to 60s in 40948ab so genuine
+    /// callbacks stopped being rejected, and a literal here silently pinned
+    /// the retired value.
+    func testLegacyCoordinatorUsesStrictJitterBoundary() {
+        let jitter = TimeInterval(MeteringEpochContract.defaultJitterSeconds)
+        let boundary = TimeInterval(5 * 60) - jitter
         XCTAssertEqual(legacyOutcome(after: 1), .rejected)
-        XCTAssertEqual(legacyOutcome(after: 269), .rejected)
-        XCTAssertEqual(legacyOutcome(after: 270), .accepted)
-        XCTAssertEqual(legacyOutcome(after: 271), .accepted)
+        XCTAssertEqual(legacyOutcome(after: boundary - 1), .rejected)
+        XCTAssertEqual(legacyOutcome(after: boundary), .accepted)
+        XCTAssertEqual(legacyOutcome(after: boundary + 1), .accepted)
     }
 
     func testSixtySecondMaximumBoundaryAndLateCallbackRemainValid() {

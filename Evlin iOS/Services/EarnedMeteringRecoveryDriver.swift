@@ -136,6 +136,18 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
         try markElapsedActivePriorAbsentIfNeeded(owner: effectiveOwner)
         try adoptCurrentDayAfterElapsedInitialRouteIfNeeded(owner: effectiveOwner)
         try prepareCanonicalRolloverIfNeeded(owner: effectiveOwner)
+        // A same-key correction rejected only for carrying the wrong
+        // registration reason is REPAIRABLE, and its rejected registration
+        // reads as "proven dead" to the sweep below. Give the specific repair
+        // its chance first, or the generic reclaim retires a candidate that
+        // would have committed on the next attempt. The predicate is narrow
+        // (cutoverReady, no explicit recovery, live prior, 409-sourced
+        // corrected epoch, same usage date and generation key), so running it
+        // this early is a no-op in every other flow.
+        _ = try store.recoverLegacySameKeyCorrectionReasonMismatch(
+            owner: effectiveOwner,
+            now: clock.now
+        )
         // A terminal same-day candidate may still own the handoff slot when
         // midnight prepares the next dated route. Clear only a proven-dead
         // candidate before the rollover tries to claim that single slot.
