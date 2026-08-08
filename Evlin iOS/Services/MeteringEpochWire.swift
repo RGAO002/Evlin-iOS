@@ -99,11 +99,45 @@ nonisolated enum MeteringPolicyIngress {
     static func persist(
         command: LockCommand,
         fetchedDeviceID: UUID,
-        store: DeviceEpochStore = .shared
+        store: DeviceEpochStore = .shared,
+        earnedStore: EarnedTimeStore = .shared
     ) throws -> MeteringPolicyIngressDisposition {
-        try store.ingestDesiredPolicy(
-            desiredPolicy(from: command, fetchedDeviceID: fetchedDeviceID)
-        )
+        let policy = try desiredPolicy(from: command, fetchedDeviceID: fetchedDeviceID)
+        let priorPoolForSameDay = (try? store.read())?.desiredPolicy.flatMap {
+            $0.usageDate == policy.usageDate ? $0.dailyPoolMinutes : nil
+        }
+        let disposition = try store.ingestDesiredPolicy(policy)
+        if case .acceptedNeedsOwner = disposition {
+            retireOverrideIfAllowanceGrew(
+                policy: policy,
+                priorPoolForSameDay: priorPoolForSameDay,
+                earnedStore: earnedStore
+            )
+        }
+        return disposition
+    }
+
+    /// Mirrors the backend's `revoke_same_day_override_on_increase`: a parent
+    /// who raises today's pool is granting a fresh allowance, and the child is
+    /// held to it.
+    ///
+    /// The device keeps its own per-date override flag, and
+    /// `MeteringProcessEntries` suppresses every terminal lock effect while it
+    /// is set (:633/:728/:739). Nothing cleared it on a policy change, so after
+    /// the backend started locking again the device's own ladder stayed silent
+    /// until midnight and enforcement depended entirely on the backend
+    /// round-trip. Only an increase clears it — a lowering leaves the override
+    /// standing, exactly as the backend does.
+    private static func retireOverrideIfAllowanceGrew(
+        policy: MeteringDesiredPolicy,
+        priorPoolForSameDay: Int?,
+        earnedStore: EarnedTimeStore
+    ) {
+        guard let priorPoolForSameDay,
+              policy.dailyPoolMinutes > priorPoolForSameDay,
+              earnedStore.isOverridden(forUsageDate: policy.usageDate)
+        else { return }
+        earnedStore.setOverride(false, forUsageDate: policy.usageDate)
     }
 }
 

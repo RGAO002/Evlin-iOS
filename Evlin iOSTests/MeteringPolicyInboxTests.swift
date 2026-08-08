@@ -146,6 +146,88 @@ final class MeteringPolicyInboxTests: XCTestCase {
         ))
     }
 
+    // MARK: - Override retirement (mirrors the backend, 2026-08-08)
+
+    func testRaisingTodaysPoolRetiresTheLocalOverride() throws {
+        let harness = makeHarness()
+        let earned = makeEarnedStore()
+        XCTAssertEqual(
+            try MeteringPolicyIngress.persist(
+                command: wireCommand(owner: owner, token: 7, dailyPoolMinutes: 120),
+                fetchedDeviceID: owner,
+                store: harness.store,
+                earnedStore: earned
+            ),
+            .acceptedNeedsOwner
+        )
+        // Parent taps "Override today"; the device parks the whole day.
+        earned.setOverride(true, forUsageDate: "2026-07-20")
+        XCTAssertTrue(earned.isOverridden(forUsageDate: "2026-07-20"))
+
+        XCTAssertEqual(
+            try MeteringPolicyIngress.persist(
+                command: wireCommand(owner: owner, token: 8, dailyPoolMinutes: 130),
+                fetchedDeviceID: owner,
+                store: harness.store,
+                earnedStore: earned
+            ),
+            .acceptedNeedsOwner
+        )
+        XCTAssertFalse(
+            earned.isOverridden(forUsageDate: "2026-07-20"),
+            "raising today's pool grants a new allowance; the device must stop "
+                + "suppressing its own terminal locks for the rest of the day"
+        )
+    }
+
+    func testLoweringTodaysPoolLeavesTheOverrideStanding() throws {
+        let harness = makeHarness()
+        let earned = makeEarnedStore()
+        _ = try MeteringPolicyIngress.persist(
+            command: wireCommand(owner: owner, token: 7, dailyPoolMinutes: 120),
+            fetchedDeviceID: owner,
+            store: harness.store,
+            earnedStore: earned
+        )
+        earned.setOverride(true, forUsageDate: "2026-07-20")
+
+        _ = try MeteringPolicyIngress.persist(
+            command: wireCommand(owner: owner, token: 8, dailyPoolMinutes: 60),
+            fetchedDeviceID: owner,
+            store: harness.store,
+            earnedStore: earned
+        )
+        XCTAssertTrue(
+            earned.isOverridden(forUsageDate: "2026-07-20"),
+            "trimming the pool must not weaponise the override into an instant "
+                + "lock on a child who was just told they were free"
+        )
+    }
+
+    func testOverrideForAnotherDayIsUntouched() throws {
+        let harness = makeHarness()
+        let earned = makeEarnedStore()
+        _ = try MeteringPolicyIngress.persist(
+            command: wireCommand(owner: owner, token: 7, dailyPoolMinutes: 120),
+            fetchedDeviceID: owner,
+            store: harness.store,
+            earnedStore: earned
+        )
+        earned.setOverride(true, forUsageDate: "2026-07-19")
+
+        _ = try MeteringPolicyIngress.persist(
+            command: wireCommand(owner: owner, token: 8, dailyPoolMinutes: 130),
+            fetchedDeviceID: owner,
+            store: harness.store,
+            earnedStore: earned
+        )
+        XCTAssertTrue(earned.isOverridden(forUsageDate: "2026-07-19"))
+    }
+
+    private func makeEarnedStore() -> EarnedTimeStore {
+        EarnedTimeStore(suiteName: "evlin.policy-inbox.\(UUID().uuidString)")
+    }
+
     private func makeHarness() -> PolicyInboxHarness {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("metering-policy-inbox-\(UUID().uuidString)", isDirectory: true)
@@ -180,7 +262,11 @@ final class MeteringPolicyInboxTests: XCTestCase {
         )
     }
 
-    private func wireCommand(owner: UUID, token: Int64) -> LockCommand {
+    private func wireCommand(
+        owner: UUID,
+        token: Int64,
+        dailyPoolMinutes: Int = 120
+    ) -> LockCommand {
         let payload = """
         {
           "child_device_id":"\(owner.uuidString)",
@@ -188,7 +274,7 @@ final class MeteringPolicyInboxTests: XCTestCase {
           "timezone":"America/New_York",
           "policy_revision":"policy-\(token)",
           "ordering_token":\(token),
-          "daily_pool_minutes":120,
+          "daily_pool_minutes":\(dailyPoolMinutes),
           "device_cap_minutes":60,
           "remaining_minutes":50,
           "selected_set":{"list_id":"73000000-0000-0000-0000-000000000008"}
@@ -196,7 +282,7 @@ final class MeteringPolicyInboxTests: XCTestCase {
         """.data(using: .utf8)!
         let config = try! JSONDecoder().decode(EarnedTimeConfigCommand.self, from: payload)
         return LockCommand(
-            id: UUID(uuidString: "74000000-0000-0000-0000-000000000008")!,
+            id: UUID(uuidString: "74000000-0000-0000-0000-0000000000\(String(format: "%02d", token))")!,
             action: .earnedTimeConfig,
             tier: nil,
             target: CommandTarget(originalRequest: "policy"),
