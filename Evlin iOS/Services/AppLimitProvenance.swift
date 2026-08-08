@@ -100,7 +100,25 @@ nonisolated final class AppLimitProvenanceStore: @unchecked Sendable {
                 TimeZone(identifier: $0) == nil ? nil : $0
             } ?? timezone.identifier
             let usageDate = Self.usageDate(now, timezone: timezone)
-            let acceptedBase = max(0, canonicalRule.budgetMinutes - rule.budgetMinutes)
+            // A reduced scheduling view declares its own base directly.
+            let viewBase = max(0, canonicalRule.budgetMinutes - rule.budgetMinutes)
+            // Raising a budget mid-day supersedes the arm identity, but it does
+            // not give back the minutes already spent. Seed the new arm with the
+            // backend's authoritative used-today so the ladder is cut over the
+            // remaining budget; without this the child receives a whole second
+            // allowance (08-08: 15m -> 20m yielded 35 minutes of screen time).
+            // Gated on the prior arm's usage date — a fresh day also mints a new
+            // arm, and yesterday's used-today must not carry into it. The store
+            // has no date stamp of its own on `authoritativeUsedTodayMinutes`.
+            let carriedBase: Int
+            if let prior = slot.armProvenance,
+               prior.usageDate == usageDate,
+               let usedToday = slot.authoritativeUsedTodayMinutes {
+                carriedBase = min(max(0, usedToday), canonicalRule.budgetMinutes)
+            } else {
+                carriedBase = 0
+            }
+            let acceptedBase = max(viewBase, carriedBase)
             let key = AppLimitReplacementKey(
                 ruleID: canonicalRule.id,
                 ruleRevision: slot.latestOrderingToken,
