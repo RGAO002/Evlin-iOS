@@ -428,12 +428,47 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
     /// the cross-process persistence lock — see `armV2`.
     private static let armSerialization = NSRecursiveLock()
 
+    /// Rules the backend already reports as spent for today. Read once per arm
+    /// so a single store snapshot decides the whole plan; an unreadable store
+    /// excludes nothing, which keeps the previous behaviour rather than
+    /// silently dropping every rule.
+    private static func authoritativelyExhaustedRuleIDs(
+        in rules: [AppLimitRule],
+        epochStore: AppLimitEpochStore
+    ) -> Set<UUID> {
+        guard let state = try? epochStore.read() else { return [] }
+        return Set(
+            rules.compactMap { rule in
+                state.slots[rule.id]?.isAuthoritativelyExhausted == true
+                    ? rule.id
+                    : nil
+            }
+        )
+    }
+
     private func armV2Locked(
         rules: [AppLimitRule],
         ownerChildDeviceID: UUID
     ) -> AppLimitPlanResult {
         let reference = now()
-        let active = rules.filter { isActive($0, at: reference) }
+        // A rule whose budget the backend already reports as spent is SHIELDED,
+        // not measured — ActionExecutor's exhausted branch owns it. Drop it
+        // before `resolve` so it never claims an arm identity.
+        //
+        // This must happen here rather than at the per-rule guard below: that
+        // guard is a `return`, so one spent app used to abort the whole arm and
+        // every other app silently stopped being measured. And by the time the
+        // guard fires, `resolve` has already written provenance for the rules
+        // sorted ahead of it — an orphan monitor with no concurrency involved.
+        // (Reachable only since the base is seeded from the backend's
+        // used-today; before that `baseAcceptedMinutes` was always 0.)
+        let exhaustedRuleIDs = Self.authoritativelyExhaustedRuleIDs(
+            in: rules,
+            epochStore: epochStore
+        )
+        let active = rules.filter {
+            isActive($0, at: reference) && !exhaustedRuleIDs.contains($0.id)
+        }
         guard active.count <= Self.maxActivities else {
             return .quotaExceeded(
                 windows: active.count,

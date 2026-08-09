@@ -165,6 +165,65 @@ final class AppLimitPlannerTests: XCTestCase {
         )
     }
 
+    /// Regression for 05b7009. Seeding the base from the backend's used-today
+    /// made `baseAcceptedMinutes == budgetMinutes` reachable for the first
+    /// time, and the guard that rejects it is a `return` inside the per-rule
+    /// loop — so ONE app that finished its budget aborted the whole arm and
+    /// every OTHER app silently stopped being measured. An exhausted rule is
+    /// shielded, not armed; it must drop out of the plan without poisoning it.
+    func testExhaustedRuleDoesNotPoisonTheArmForOtherRules() throws {
+        let owner = UUID(uuidString: "cccccccc-0000-0000-0000-0000000000e1")!
+        let liveID = UUID(uuidString: "dddddddd-0000-0000-0000-0000000004e1")!
+        let spentID = UUID(uuidString: "dddddddd-0000-0000-0000-0000000004e2")!
+        let armID = UUID(uuidString: "eeeeeeee-0000-0000-0000-0000000000e1")!
+        let now = Date(timeIntervalSince1970: 1_721_174_400)
+        let store = makeEpochStore(owner: owner)
+        let window = AppLimitWindow(
+            startMinute: 0,
+            endMinute: 1439,
+            repeats: true,
+            timezone: "UTC"
+        )
+        let live = rule(id: liveID, budget: 30, window: window)
+        let spent = rule(id: spentID, budget: 20, window: window)
+        try seed(live, token: 7, owner: owner, store: store)
+        try seed(spent, token: 7, owner: owner, store: store)
+        // The backend says the second app has already used its whole budget.
+        try store.transaction(source: .poll, expectedOwner: owner) { state in
+            state.slots[spentID]?.authoritativeUsedTodayMinutes = 20
+        }
+        XCTAssertEqual(
+            try store.read().slots[spentID]?.isAuthoritativelyExhausted,
+            true
+        )
+
+        let spy = PlannerSchedulerSpy()
+        let planner = AppLimitPlanner(
+            scheduler: spy,
+            now: { now },
+            epochStore: store,
+            ownerProvider: { owner },
+            armIDProvider: { armID }
+        )
+        let result = planner.arm(rules: [live, spent])
+
+        XCTAssertEqual(
+            result,
+            .armed(activityCount: 1, eventCount: 1),
+            "the app that still has budget must be armed; an exhausted "
+                + "sibling is shielded elsewhere and must not fail the arm"
+        )
+        XCTAssertNotNil(
+            try store.read().slots[liveID]?.armProvenance,
+            "the live rule must end up with an arm"
+        )
+        XCTAssertNil(
+            try store.read().slots[spentID]?.armProvenance,
+            "the exhausted rule must not leave a claimed provenance behind — "
+                + "that is the orphan monitor the abort used to create"
+        )
+    }
+
     func testProgressAndRestartPreserveArmProvenanceWithoutCenterCalls() throws {
         let owner = UUID(uuidString: "cccccccc-0000-0000-0000-000000000001")!
         let ruleID = UUID(uuidString: "dddddddd-0000-0000-0000-000000000400")!
