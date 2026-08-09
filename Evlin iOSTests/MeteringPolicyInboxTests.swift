@@ -146,27 +146,16 @@ final class MeteringPolicyInboxTests: XCTestCase {
         ))
     }
 
-    // MARK: - Override retirement (mirrors the backend, 2026-08-08)
+    // MARK: - Override retirement (server-authoritative, 2026-08-08)
 
-    func testRaisingTodaysPoolRetiresTheLocalOverride() throws {
+    func testServerSayingOverrideRetiredClearsTheLocalFlag() throws {
         let harness = makeHarness()
         let earned = makeEarnedStore()
-        XCTAssertEqual(
-            try MeteringPolicyIngress.persist(
-                command: wireCommand(owner: owner, token: 7, dailyPoolMinutes: 120),
-                fetchedDeviceID: owner,
-                store: harness.store,
-                earnedStore: earned
-            ),
-            .acceptedNeedsOwner
-        )
-        // Parent taps "Override today"; the device parks the whole day.
         earned.setOverride(true, forUsageDate: "2026-07-20")
-        XCTAssertTrue(earned.isOverridden(forUsageDate: "2026-07-20"))
 
         XCTAssertEqual(
             try MeteringPolicyIngress.persist(
-                command: wireCommand(owner: owner, token: 8, dailyPoolMinutes: 130),
+                command: wireCommand(owner: owner, token: 8, overrideActive: false),
                 fetchedDeviceID: owner,
                 store: harness.store,
                 earnedStore: earned
@@ -175,48 +164,77 @@ final class MeteringPolicyInboxTests: XCTestCase {
         )
         XCTAssertFalse(
             earned.isOverridden(forUsageDate: "2026-07-20"),
-            "raising today's pool grants a new allowance; the device must stop "
-                + "suppressing its own terminal locks for the rest of the day"
+            "a flag nobody clears means no locking for the rest of the day"
         )
     }
 
-    func testLoweringTodaysPoolLeavesTheOverrideStanding() throws {
+    /// The crash window. The policy persists before the flag is cleared, so a
+    /// process death in between makes the replay a duplicate — and a clear gated
+    /// on the disposition never ran, leaving the override alive until midnight.
+    func testDuplicateDeliveryStillClearsTheLocalFlag() throws {
         let harness = makeHarness()
         let earned = makeEarnedStore()
+        let command = wireCommand(owner: owner, token: 8, overrideActive: false)
+
         _ = try MeteringPolicyIngress.persist(
-            command: wireCommand(owner: owner, token: 7, dailyPoolMinutes: 120),
+            command: command,
             fetchedDeviceID: owner,
             store: harness.store,
             earnedStore: earned
         )
+        // Stand in for "died before clearing": the policy is on disk, the flag
+        // is not yet cleared, and the same command is delivered again.
+        earned.setOverride(true, forUsageDate: "2026-07-20")
+        let replay = try MeteringPolicyIngress.persist(
+            command: command,
+            fetchedDeviceID: owner,
+            store: harness.store,
+            earnedStore: earned
+        )
+        XCTAssertNotEqual(replay, .acceptedNeedsOwner, "must be a duplicate")
+        XCTAssertFalse(
+            earned.isOverridden(forUsageDate: "2026-07-20"),
+            "the clear must not be gated on the disposition"
+        )
+    }
+
+    func testServerSayingOverrideStandsLeavesTheFlagAlone() throws {
+        let harness = makeHarness()
+        let earned = makeEarnedStore()
         earned.setOverride(true, forUsageDate: "2026-07-20")
 
         _ = try MeteringPolicyIngress.persist(
-            command: wireCommand(owner: owner, token: 8, dailyPoolMinutes: 60),
+            command: wireCommand(owner: owner, token: 8, overrideActive: true),
             fetchedDeviceID: owner,
             store: harness.store,
             earnedStore: earned
         )
-        XCTAssertTrue(
-            earned.isOverridden(forUsageDate: "2026-07-20"),
-            "trimming the pool must not weaponise the override into an instant "
-                + "lock on a child who was just told they were free"
+        XCTAssertTrue(earned.isOverridden(forUsageDate: "2026-07-20"))
+    }
+
+    /// Older payloads carry no answer; inventing one in either direction would
+    /// be worse than leaving the flag where the override command put it.
+    func testMissingOverrideFieldLeavesTheFlagAlone() throws {
+        let harness = makeHarness()
+        let earned = makeEarnedStore()
+        earned.setOverride(true, forUsageDate: "2026-07-20")
+
+        _ = try MeteringPolicyIngress.persist(
+            command: wireCommand(owner: owner, token: 8),
+            fetchedDeviceID: owner,
+            store: harness.store,
+            earnedStore: earned
         )
+        XCTAssertTrue(earned.isOverridden(forUsageDate: "2026-07-20"))
     }
 
     func testOverrideForAnotherDayIsUntouched() throws {
         let harness = makeHarness()
         let earned = makeEarnedStore()
-        _ = try MeteringPolicyIngress.persist(
-            command: wireCommand(owner: owner, token: 7, dailyPoolMinutes: 120),
-            fetchedDeviceID: owner,
-            store: harness.store,
-            earnedStore: earned
-        )
         earned.setOverride(true, forUsageDate: "2026-07-19")
 
         _ = try MeteringPolicyIngress.persist(
-            command: wireCommand(owner: owner, token: 8, dailyPoolMinutes: 130),
+            command: wireCommand(owner: owner, token: 8, overrideActive: false),
             fetchedDeviceID: owner,
             store: harness.store,
             earnedStore: earned
@@ -265,7 +283,8 @@ final class MeteringPolicyInboxTests: XCTestCase {
     private func wireCommand(
         owner: UUID,
         token: Int64,
-        dailyPoolMinutes: Int = 120
+        dailyPoolMinutes: Int = 120,
+        overrideActive: Bool? = nil
     ) -> LockCommand {
         let payload = """
         {
@@ -275,6 +294,7 @@ final class MeteringPolicyInboxTests: XCTestCase {
           "policy_revision":"policy-\(token)",
           "ordering_token":\(token),
           "daily_pool_minutes":\(dailyPoolMinutes),
+          \(overrideActive.map { "\"override_active\":\($0)," } ?? "")
           "device_cap_minutes":60,
           "remaining_minutes":50,
           "selected_set":{"list_id":"73000000-0000-0000-0000-000000000008"}

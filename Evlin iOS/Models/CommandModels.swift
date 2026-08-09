@@ -72,6 +72,11 @@ struct EarnedTimeConfigCommand: Codable, Sendable, Equatable {
     let device_cap_minutes: Int
     let earned_bucket_minutes: Int?
     let remaining_minutes: Int?
+    /// Server-authoritative: does a same-day exhaustion override still stand?
+    /// The device must not infer this from pool deltas — it compares a
+    /// different baseline than the server does and can read a lowering as a
+    /// raise. Nil only for payloads predating the field.
+    let override_active: Bool?
     let selected_set: EarnedTimeConfigSelectedSet?
 
     private enum CodingKeys: String, CodingKey {
@@ -86,6 +91,7 @@ struct EarnedTimeConfigCommand: Codable, Sendable, Equatable {
         case device_cap_minutes
         case earned_bucket_minutes
         case remaining_minutes
+        case override_active
         case selected_set
     }
 
@@ -110,6 +116,7 @@ struct EarnedTimeConfigCommand: Codable, Sendable, Equatable {
         device_cap_minutes = try container.decode(Int.self, forKey: .device_cap_minutes)
         earned_bucket_minutes = try container.decodeIfPresent(Int.self, forKey: .earned_bucket_minutes)
         remaining_minutes = try container.decodeIfPresent(Int.self, forKey: .remaining_minutes)
+        override_active = try container.decodeIfPresent(Bool.self, forKey: .override_active)
         selected_set = try container.decodeIfPresent(
             EarnedTimeConfigSelectedSet.self,
             forKey: .selected_set

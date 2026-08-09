@@ -103,38 +103,43 @@ nonisolated enum MeteringPolicyIngress {
         earnedStore: EarnedTimeStore = .shared
     ) throws -> MeteringPolicyIngressDisposition {
         let policy = try desiredPolicy(from: command, fetchedDeviceID: fetchedDeviceID)
-        let priorPoolForSameDay = (try? store.read())?.desiredPolicy.flatMap {
-            $0.usageDate == policy.usageDate ? $0.dailyPoolMinutes : nil
-        }
         let disposition = try store.ingestDesiredPolicy(policy)
-        if case .acceptedNeedsOwner = disposition {
-            retireOverrideIfAllowanceGrew(
-                policy: policy,
-                priorPoolForSameDay: priorPoolForSameDay,
-                earnedStore: earnedStore
-            )
-        }
+        applyAuthoritativeOverrideState(
+            command: command,
+            policy: policy,
+            earnedStore: earnedStore
+        )
         return disposition
     }
 
-    /// Mirrors the backend's `revoke_same_day_override_on_increase`: a parent
-    /// who raises today's pool is granting a fresh allowance, and the child is
-    /// held to it.
+    /// Adopt the server's answer about whether a same-day override still stands.
     ///
-    /// The device keeps its own per-date override flag, and
-    /// `MeteringProcessEntries` suppresses every terminal lock effect while it
-    /// is set (:633/:728/:739). Nothing cleared it on a policy change, so after
-    /// the backend started locking again the device's own ladder stayed silent
-    /// until midnight and enforcement depended entirely on the backend
-    /// round-trip. Only an increase clears it — a lowering leaves the override
-    /// standing, exactly as the backend does.
-    private static func retireOverrideIfAllowanceGrew(
+    /// The device keeps its own per-date override flag and
+    /// `MeteringProcessEntries` suppresses every terminal lock effect while it is
+    /// set (:633/:728/:739), so a flag nobody clears means no locking for the
+    /// rest of that day.
+    ///
+    /// Deliberately NOT derived from the pool delta. Comparing the new pool
+    /// against the device's own last-seen policy uses a different baseline than
+    /// the server's day row, and a device that missed an intermediate command
+    /// reads a lowering as a raise.
+    ///
+    /// Deliberately applied on EVERY ingest rather than only a fresh accept.
+    /// Gating it on the disposition left a crash window: the policy persists
+    /// first, so dying in between made the replay a duplicate and the clear never
+    /// ran — the override survived to midnight. The server's answer is
+    /// idempotent, and a duplicate delivery carries the same one.
+    ///
+    /// Only ever CLEARS. `override_active == true` is not used to SET the flag:
+    /// that direction suppresses enforcement, and the flag is legitimately owned
+    /// by the override command itself (`EarnedOverrideCommandApplier`). A missing
+    /// field means an older payload — leave the flag alone.
+    private static func applyAuthoritativeOverrideState(
+        command: LockCommand,
         policy: MeteringDesiredPolicy,
-        priorPoolForSameDay: Int?,
         earnedStore: EarnedTimeStore
     ) {
-        guard let priorPoolForSameDay,
-              policy.dailyPoolMinutes > priorPoolForSameDay,
+        guard command.earnedTimeConfig?.override_active == false,
               earnedStore.isOverridden(forUsageDate: policy.usageDate)
         else { return }
         earnedStore.setOverride(false, forUsageDate: policy.usageDate)
