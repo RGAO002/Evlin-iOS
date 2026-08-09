@@ -41,6 +41,10 @@ final class AppLimitPlannerTests: XCTestCase {
         /// test make a single window fail while the rest succeed.
         var failingActivityNames: Set<String> = []
         var beforeStartEvents: ((String) -> Void)?
+        /// Fires just before `monitoredActivities()` answers, so a test can let
+        /// another process's arm land in the window between this planner's
+        /// provenance write and its own view of the live set.
+        var beforeMonitoredActivities: (() -> Void)?
 
         func startMonitoring(_ name: DeviceActivityName, during schedule: DeviceActivitySchedule) throws {
             if let e = errorToThrow { throw e }
@@ -75,7 +79,10 @@ final class AppLimitPlannerTests: XCTestCase {
             calls.append(.stopAll)
         }
 
-        func monitoredActivities() -> [DeviceActivityName] { Array(activeActivities) }
+        func monitoredActivities() -> [DeviceActivityName] {
+            beforeMonitoredActivities?()
+            return Array(activeActivities)
+        }
 
         func simulateMonitorLoss() {
             activeActivities.removeAll()
@@ -162,6 +169,83 @@ final class AppLimitPlannerTests: XCTestCase {
             "startMonitoring ran while the persistence lock was held; an "
                 + "unanswered daemon round trip would wedge the caller AND "
                 + "starve the DeviceActivityMonitor extension on the flock"
+        )
+    }
+
+    /// The hole 0d71133 opened. Removing the cross-process flock left
+    /// `armSerialization` — a `private static` lock — as the only guard, and the
+    /// Push NSE arms too (EvlinPushApplier/NotificationService.swift:182), in a
+    /// different process. So the app and the extension can interleave, and the
+    /// app decided what to stop from ITS OWN plan: any activity not in this
+    /// pass's `desiredNames` was "stale", including one the extension had just
+    /// correctly installed. End state was the worst kind — the store believed
+    /// the extension's arm was observed and running while the daemon had no
+    /// monitor at all, so nothing considered itself in need of repair.
+    func testDoesNotStopAnActivityAnotherProcessJustClaimed() throws {
+        let owner = UUID(uuidString: "cccccccc-0000-0000-0000-0000000000d1")!
+        let ruleID = UUID(uuidString: "dddddddd-0000-0000-0000-0000000004d1")!
+        let armA = UUID(uuidString: "eeeeeeee-0000-0000-0000-0000000000d1")!
+        let armB = UUID(uuidString: "eeeeeeee-0000-0000-0000-0000000000d2")!
+        let now = Date(timeIntervalSince1970: 1_721_174_400)
+        let store = makeEpochStore(owner: owner)
+        let window = AppLimitWindow(
+            startMinute: 0,
+            endMinute: 1439,
+            repeats: true,
+            timezone: "UTC"
+        )
+        let original = rule(id: ruleID, budget: 30, window: window)
+        let replacement = rule(id: ruleID, budget: 31, window: window)
+        try seed(original, token: 7, owner: owner, store: store)
+        let spy = PlannerSchedulerSpy()
+
+        // Stand in for the NSE: between this planner's provenance write and its
+        // own read of the live set, another process ingests a newer token and
+        // completes a full arm of its own.
+        var otherProcessArmed = false
+        spy.beforeMonitoredActivities = {
+            guard !otherProcessArmed else { return }
+            otherProcessArmed = true
+            let coordinator = AppLimitCommandCoordinator(
+                store: store,
+                expectedOwnerProvider: { owner }
+            )
+            _ = try? coordinator.ingest(
+                AppLimitCommandEnvelope(
+                    commandID: UUID(),
+                    ruleID: ruleID,
+                    orderingToken: 8,
+                    kind: .set,
+                    payloadDigest: "set-8",
+                    receivedAt: now.addingTimeInterval(1),
+                    source: .notificationServiceExtension,
+                    rule: replacement
+                )
+            )
+            _ = AppLimitPlanner(
+                scheduler: spy,
+                now: { now.addingTimeInterval(1) },
+                epochStore: store,
+                ownerProvider: { owner },
+                armIDProvider: { armB }
+            ).arm(rules: [replacement])
+        }
+
+        _ = AppLimitPlanner(
+            scheduler: spy,
+            now: { now },
+            epochStore: store,
+            ownerProvider: { owner },
+            armIDProvider: { armA }
+        ).arm(rules: [original])
+
+        XCTAssertTrue(otherProcessArmed, "the interleaving hook must have run")
+        let liveNow = Set(spy.monitoredActivities().map(\.rawValue))
+        XCTAssertTrue(
+            liveNow.contains(AppLimitPlanner.v2ActivityName(armID: armB)),
+            "the other process's arm was stopped by this one — the child's app "
+                + "is now unmonitored while the store believes it is armed. "
+                + "Live: \(liveNow.sorted())"
         )
     }
 
@@ -715,7 +799,17 @@ final class AppLimitPlannerTests: XCTestCase {
             ownerProvider: { owner },
             armIDProvider: { firstArm }
         )
-        XCTAssertEqual(first.arm(rules: [original]), .armed(activityCount: 1, eventCount: 1))
+        // An arm that lost its identity mid-flight must SAY it failed. This
+        // used to report `.armed(activityCount: 1, eventCount: 1)` because
+        // markMonitorStartObserved returned silently on a CAS miss and the
+        // caller counted it anyway — the store then believed an arm was
+        // observed and running while the daemon had nothing, which is the one
+        // inconsistency that looks healthy and so never gets repaired.
+        XCTAssertEqual(
+            first.arm(rules: [original]),
+            .partiallyArmed(armed: 0, failed: 1),
+            "a superseded arm must report failure, not success"
+        )
         // Contract change (2026-08-08). This used to assert the replacement
         // COULD NOT commit here, which was true only because the arm held
         // ActiveLockPersistenceLock — a cross-process flock — across

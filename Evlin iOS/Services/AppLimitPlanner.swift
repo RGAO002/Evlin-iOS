@@ -428,6 +428,17 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
     /// the cross-process persistence lock — see `armV2`.
     private static let armSerialization = NSRecursiveLock()
 
+    /// Every v2 activity name currently claimed by a slot's arm provenance —
+    /// including claims written by another process. `nil` means the store could
+    /// not be read, and the caller must then stop NOTHING: an empty set would
+    /// read as "nobody claims anything" and tear down live enforcement.
+    private static func claimedActivityNames(
+        epochStore: AppLimitEpochStore
+    ) -> Set<String>? {
+        guard let state = try? epochStore.read() else { return nil }
+        return Set(state.slots.values.compactMap { $0.armProvenance?.activityName })
+    }
+
     /// Rules the backend already reports as spent for today. Read once per arm
     /// so a single store snapshot decides the whole plan; an unreadable store
     /// excludes nothing, which keeps the previous behaviour rather than
@@ -559,7 +570,21 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
                 .map(\.rawValue)
                 .filter { $0.hasPrefix(Self.v2ActivityPrefix) }
         )
-        let staleNames = liveNames.subtracting(desiredNames)
+        // Stop only what NOBODY claims — never merely "what is absent from my
+        // own plan". The Push NSE arms in its own process
+        // (EvlinPushApplier/NotificationService.swift), and since the arm no
+        // longer holds a cross-process lock, its arm can complete between this
+        // pass's provenance write and this read. Subtracting `desiredNames`
+        // stopped the monitor the extension had just correctly installed, and
+        // left the store believing that arm was observed and running — the one
+        // inconsistency nothing tries to repair, because it looks healthy.
+        //
+        // Read the claims fresh, immediately before the stop. That closes the
+        // window rather than narrowing it: `resolve` writes an arm's provenance
+        // before `startMonitoring` installs it, so anything already visible in
+        // `liveNames` was necessarily claimed before this read.
+        let staleNames = Self.claimedActivityNames(epochStore: epochStore)
+            .map { liveNames.subtracting($0) } ?? []
         if !staleNames.isEmpty {
             scheduler.stopMonitoring(
                 staleNames.sorted().map { DeviceActivityName($0) }
@@ -584,8 +609,19 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
                     during: activity.schedule,
                     events: activity.events
                 )
-                try markMonitorStartObserved(activity.provenance, ownerChildDeviceID: ownerChildDeviceID)
-                armedCount += 1
+                // A superseded arm is NOT armed. Counting it as such is how the
+                // store came to believe an arm was observed and running while
+                // the daemon had nothing — the one inconsistency that looks
+                // healthy and therefore never gets repaired.
+                switch try markMonitorStartObserved(
+                    activity.provenance,
+                    ownerChildDeviceID: ownerChildDeviceID
+                ) {
+                case .observed, .alreadyObserved:
+                    armedCount += 1
+                case .stale:
+                    failedCount += 1
+                }
             } catch {
                 failedCount += 1
             }
@@ -596,20 +632,36 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
         return .armed(activityCount: plan.count, eventCount: active.count)
     }
 
+    /// Outcome of recording that a monitor is running. `stale` has to be
+    /// distinguishable: the old code returned silently on a CAS miss and the
+    /// caller counted the arm as successful anyway, so an arm that had lost its
+    /// identity to another process reported `.armed`.
+    enum MonitorStartObservation: Equatable {
+        /// This call cleared `monitorStartPending`.
+        case observed
+        /// Same arm, already marked — another process got there first, which is
+        /// idempotent success, not failure.
+        case alreadyObserved
+        /// The provenance no longer matches: this arm was superseded.
+        case stale
+    }
+
+    @discardableResult
     private func markMonitorStartObserved(
         _ provenance: AppLimitArmProvenance,
         ownerChildDeviceID: UUID
-    ) throws {
+    ) throws -> MonitorStartObservation {
         try epochStore.transaction(source: .wakeRecovery, expectedOwner: ownerChildDeviceID) { state in
             guard var slot = state.slots[provenance.ruleID],
                   var current = slot.armProvenance,
                   current.armID == provenance.armID,
-                  current.activityName == provenance.activityName,
-                  current.monitorStartPending == true
-            else { return }
+                  current.activityName == provenance.activityName
+            else { return .stale }
+            guard current.monitorStartPending == true else { return .alreadyObserved }
             current.monitorStartPending = false
             slot.armProvenance = current
             state.slots[provenance.ruleID] = slot
+            return .observed
         }
     }
 
