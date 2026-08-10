@@ -43,7 +43,7 @@ final class BigKidStatePoller: ObservableObject {
     private let ensureEarnedArmed: @Sendable () async -> Void
     private let pauseAppLimitArms: () -> Void
     private let hasPausedAppLimitArms: () -> Bool
-    private let rearmUsageCounters: () -> Bool
+    private let rearmUsageCounters: @Sendable () -> Bool
     private let stopLegacyDeviceTotal: @Sendable () -> Void
     private let reportEffectiveState: () async -> Void
     private let failOpenFamily: () async -> Void
@@ -175,7 +175,7 @@ final class BigKidStatePoller: ObservableObject {
         ensureEarnedArmed: @escaping @Sendable () async -> Void = {},
         pauseAppLimitArms: @escaping () -> Void = {},
         hasPausedAppLimitArms: @escaping () -> Bool = { false },
-        rearmUsageCounters: @escaping () -> Bool = { true },
+        rearmUsageCounters: @escaping @Sendable () -> Bool = { true },
         stopLegacyDeviceTotal: @escaping @Sendable () -> Void = {},
         reportEffectiveState: @escaping () async -> Void = {},
         failOpenFamily: @escaping () async -> Void = { await FamilyGoneDetector.failOpen() },
@@ -372,7 +372,17 @@ final class BigKidStatePoller: ObservableObject {
                 let hasPausedAppLimits = runtimeIsAuthoritative
                     && hasPausedAppLimitArms()
                 if !wasCountingAllowed || shouldRecoverSkippedUsage || hasPausedAppLimits {
-                    let recovered = rearmUsageCounters()
+                    // Esen's finding #2: this reaches
+                    // `AppLimitPlanner.resumePausedArms`, i.e. DeviceActivity XPC,
+                    // and it was running on the main actor from this loop. A
+                    // gateway refusal counts as "not recovered", so the skipped
+                    // marker is left in place for the next tick rather than being
+                    // cleared on work that never happened.
+                    let rearm = rearmUsageCounters
+                    let recovered = await MeteringDeviceActivityGateway.perform(
+                        "bigKid.rearmUsageCounters",
+                        { rearm() }
+                    ) ?? false
                     if shouldRecoverSkippedUsage && recovered {
                         CommandDeliveryDiagnostics.remove(CommandDeliveryDiagnostics.keyUsageCountingLastSkipped)
                     }
@@ -493,7 +503,9 @@ final class BigKidStatePoller: ObservableObject {
         return (pool, cap, offset)
     }
 
-    private static func rearmOtherUsageCountersFromStoredPolicy() -> Bool {
+    /// `nonisolated` so it can run inside the gateway's off-main hop. It ends in
+    /// `resumePausedArms`, which is DeviceActivity XPC (Esen's finding #2).
+    nonisolated private static func rearmOtherUsageCountersFromStoredPolicy() -> Bool {
         let perAppResult = AppLimitPlanner().resumePausedArms(
             rules: AppLimitRuleStore.shared.all()
         )
