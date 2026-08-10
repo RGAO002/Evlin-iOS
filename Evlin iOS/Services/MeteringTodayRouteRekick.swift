@@ -105,7 +105,10 @@ enum MeteringTodayRouteRekick {
             )
         }
 
-        let center = DeviceActivityCenter()
+        // The audited adapter, not a raw DeviceActivityCenter: every call below
+        // is synchronous XPC, and a raw center bypasses both the main-thread
+        // audit and any hope of a static check noticing.
+        let center = SystemMeteringDeviceActivityCenter()
         let name = DeviceActivityName(route.activityName)
         // Same reason as the installer's re-arm: carry credited progress into the
         // base so restarting Apple's counter costs no dead time.
@@ -169,7 +172,7 @@ enum MeteringTodayRouteRekick {
         // apart. The probe names WHICH of the four comparisons (registration,
         // schedule, event set, event payload) is the one failing.
         let result = MeteringDaemonProbe.probe(
-            center: SystemMeteringDeviceActivityCenter(center: center),
+            center: center,
             activity: name,
             expectedSchedule: schedule,
             expectedEvents: events
