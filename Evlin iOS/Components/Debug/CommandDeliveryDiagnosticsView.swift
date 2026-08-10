@@ -48,6 +48,7 @@ struct CommandDeliveryDiagnosticsView: View {
                 Text("Expected APNs path: token registered → token upload ok → remote notification received → one-shot poll completed → command ack ok. DAM heartbeat is a debug-only spike: arm it, background/lock/force-quit the app, then wait about 2 minutes to see whether the extension wakes and reports /child/heartbeat.")
             }
 
+            mainThreadAuditSection
             earnedTimeDiagnosticsSection
             heartbeatHistorySection
             nseSpikeSection
@@ -442,6 +443,51 @@ struct CommandDeliveryDiagnosticsView: View {
         )
     }
 #endif
+
+    /// Screen Time calls that ran on the main thread, with the stack that got
+    /// there. Every entry is a watchdog kill waiting for a daemon that does not
+    /// answer within ten seconds — which is how the app died on 2026-08-08.
+    ///
+    /// Empty is the goal, and after normal use it is also the evidence that the
+    /// remaining un-routed call sites are cold and can wait.
+    @ViewBuilder
+    private var mainThreadAuditSection: some View {
+        let sites = DeviceActivityMainThreadAudit.recordedSites()
+        let refusals = MeteringDeviceActivityGateway.recordedRefusals()
+        Section {
+            if sites.isEmpty {
+                Label("No main-thread Screen Time calls recorded", systemImage: "checkmark.seal")
+                    .foregroundStyle(.green)
+            } else {
+                ForEach(Array(sites.enumerated()), id: \.offset) { _, site in
+                    Text(site)
+                        .font(.system(.caption2, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+            }
+            if !refusals.isEmpty {
+                ForEach(Array(refusals.enumerated()), id: \.offset) { _, entry in
+                    Text(entry)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.orange)
+                        .textSelection(.enabled)
+                }
+            }
+            Text("In flight now: \(MeteringDeviceActivityGateway.inFlightCount())")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button(role: .destructive) {
+                DeviceActivityMainThreadAudit.reset()
+                refreshTick += 1
+            } label: {
+                Text("Clear recorded sites")
+            }
+        } header: {
+            Text("Main-thread Screen Time calls")
+        } footer: {
+            Text("Each line is one call site that ran a synchronous Screen Time call on the main thread, newest last, with the call stack. These are the remaining watchdog-kill risks (0x8BADF00D). Use the app normally — onboarding, adding and changing limits, locking and unlocking, leaving it overnight — then send this list. Orange lines are calls the gateway refused because too many were already stuck.")
+        }
+    }
 
     @ViewBuilder
     private func deliveryDiagnosticRow(_ title: String, _ key: String) -> some View {
