@@ -3,8 +3,18 @@ import DeviceActivity
 import FamilyControls
 import ManagedSettings
 
-@MainActor
-final class BigKidActivityScheduler {
+/// `nonisolated` deliberately: every method here is a synchronous DeviceActivity
+/// XPC round trip, and pinned to the main actor they were reachable from
+/// BigKidStatePoller's ten-second foreground loop — a watchdog kill on any tick
+/// where the Screen Time daemon does not answer. Nothing here holds main-only
+/// state; it is a `DeviceActivityCenter` and three name constants, so the
+/// isolation was never buying anything. `@unchecked Sendable` covers the center,
+/// which Apple does not mark Sendable (same as SystemMeteringDeviceActivityCenter).
+///
+/// It talks to `DeviceActivityCenter` directly rather than through either
+/// adapter, so the audit calls are inline here — otherwise this is a blocking
+/// surface no sweep can see.
+nonisolated final class BigKidActivityScheduler: @unchecked Sendable {
     static let shared = BigKidActivityScheduler()
     private let center = DeviceActivityCenter()
     private let activityName = DeviceActivityName("evlin.bigkid.freeplay")
@@ -26,6 +36,7 @@ final class BigKidActivityScheduler {
             threshold: DateComponents(minute: minutes)
         )
         do {
+            DeviceActivityMainThreadAudit.noteIfOnMainThread("bigKid.startMonitoring")
             try center.startMonitoring(
                 activityName,
                 during: schedule,
@@ -39,6 +50,7 @@ final class BigKidActivityScheduler {
     }
 
     func stop() {
+        DeviceActivityMainThreadAudit.noteIfOnMainThread("bigKid.stop")
         center.stopMonitoring([activityName])
     }
 
@@ -54,10 +66,12 @@ final class BigKidActivityScheduler {
             intervalEnd: calendar.dateComponents(components, from: end),
             repeats: false
         )
+        DeviceActivityMainThreadAudit.noteIfOnMainThread("bigKid.heartbeatStart")
         try center.startMonitoring(commandHeartbeatName, during: schedule)
     }
 
     func stopCommandHeartbeatSpike() {
+        DeviceActivityMainThreadAudit.noteIfOnMainThread("bigKid.heartbeatStop")
         center.stopMonitoring([commandHeartbeatName])
     }
 }

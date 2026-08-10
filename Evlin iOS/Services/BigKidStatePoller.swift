@@ -44,7 +44,7 @@ final class BigKidStatePoller: ObservableObject {
     private let pauseAppLimitArms: () -> Void
     private let hasPausedAppLimitArms: () -> Bool
     private let rearmUsageCounters: () -> Bool
-    private let stopLegacyDeviceTotal: () -> Void
+    private let stopLegacyDeviceTotal: @Sendable () -> Void
     private let reportEffectiveState: () async -> Void
     private let failOpenFamily: () async -> Void
     private let requestFreshPoll: () -> Void
@@ -176,7 +176,7 @@ final class BigKidStatePoller: ObservableObject {
         pauseAppLimitArms: @escaping () -> Void = {},
         hasPausedAppLimitArms: @escaping () -> Bool = { false },
         rearmUsageCounters: @escaping () -> Bool = { true },
-        stopLegacyDeviceTotal: @escaping () -> Void = {},
+        stopLegacyDeviceTotal: @escaping @Sendable () -> Void = {},
         reportEffectiveState: @escaping () async -> Void = {},
         failOpenFamily: @escaping () async -> Void = { await FamilyGoneDetector.failOpen() },
         requestFreshPoll: @escaping () -> Void = {}
@@ -311,7 +311,16 @@ final class BigKidStatePoller: ObservableObject {
             // activity before reconciling the authoritative v2 runtime. This
             // makes a foreground launch converge an old install to v2 instead
             // of silently starting a second metering lane.
-            stopLegacyDeviceTotal()
+            // Off the main thread: this is `BigKidActivityScheduler.stop()`, a
+            // synchronous DeviceActivity XPC, and it runs on EVERY tick of this
+            // ten-second loop. It was the single most frequent main-thread daemon
+            // call in the app (Esen's finding #1) — one unanswered round trip on
+            // any tick is a watchdog kill.
+            let stopLegacy = stopLegacyDeviceTotal
+            _ = await MeteringDeviceActivityGateway.perform("bigKid.stopLegacy") {
+                stopLegacy()
+                return true
+            }
             let runtimeReconciliation = syncEarnedRuntime(snapshot.earnedTimeRuntime)
             let runtimeIsAuthoritative: Bool
             if runtimeReconciliation == .runtimeUnavailable {
