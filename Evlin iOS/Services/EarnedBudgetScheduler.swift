@@ -13,8 +13,19 @@ import FamilyControls
 /// The threshold-planning logic (`thresholds(poolMinutes:capMinutes:)`) is a
 /// **pure function** — no DeviceActivity calls, no entitlements — so it can
 /// be unit-tested in isolation.
-@MainActor
-final class EarnedBudgetScheduler {
+/// `nonisolated` deliberately: `arm` / `armFromNow` /
+/// `recoverInterruptedTransition` / `stop` all end in synchronous DeviceActivity
+/// XPC, and pinned to the main actor they were reachable from
+/// BigKidStatePoller's ten-second loop and from the capture view's dismissal
+/// handler — a watchdog kill whenever the Screen Time daemon does not answer
+/// (Esen's finding #3). The type holds a `DeviceActivityCenter` and a
+/// `UserDefaults` and nothing else: no observable state, no UI, so the isolation
+/// was pure cost. `@unchecked Sendable` covers the center, which Apple does not
+/// mark Sendable.
+///
+/// It reaches `DeviceActivityCenter` directly rather than through an adapter, so
+/// the audit calls are inline.
+nonisolated final class EarnedBudgetScheduler: @unchecked Sendable {
 
     // MARK: - Constants (single sources of truth)
 
@@ -199,6 +210,7 @@ final class EarnedBudgetScheduler {
             store: .shared,
             owner: owner,
             startMonitoring: { rawName in
+                DeviceActivityMainThreadAudit.noteIfOnMainThread("earnedBudget.startMonitoring")
                 try center.startMonitoring(
                     DeviceActivityName(rawName),
                     during: schedule,
@@ -206,6 +218,7 @@ final class EarnedBudgetScheduler {
                 )
             },
             stopMonitoring: { rawNames in
+                DeviceActivityMainThreadAudit.noteIfOnMainThread("earnedBudget.stopMonitoring")
                 center.stopMonitoring(rawNames.map { DeviceActivityName($0) })
             }
         )
@@ -255,6 +268,7 @@ final class EarnedBudgetScheduler {
             store: .shared,
             owner: owner,
             stopMonitoring: { rawNames in
+                DeviceActivityMainThreadAudit.noteIfOnMainThread("earnedBudget.stopMonitoring")
                 center.stopMonitoring(rawNames.map { DeviceActivityName($0) })
             }
         )
@@ -264,6 +278,7 @@ final class EarnedBudgetScheduler {
     func stop() {
         guard let owner = defaults?.string(forKey: "evlin.childId")
             .flatMap(UUID.init(uuidString:)) else {
+            DeviceActivityMainThreadAudit.noteIfOnMainThread("earnedBudget.stopMonitoring")
             center.stopMonitoring([DeviceActivityName(LegacyMeteringActivity.legacyActivityName)])
             return
         }
@@ -271,6 +286,7 @@ final class EarnedBudgetScheduler {
             store: .shared,
             owner: owner,
             stopMonitoring: { rawNames in
+                DeviceActivityMainThreadAudit.noteIfOnMainThread("earnedBudget.stopMonitoring")
                 center.stopMonitoring(rawNames.map { DeviceActivityName($0) })
             }
         )

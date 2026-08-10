@@ -40,7 +40,7 @@ final class BigKidStatePoller: ObservableObject {
     private let syncMeteringCoverage: () -> Void
     private let markAuthoritativeReady: (UUID) -> Void
     private let clearAuthoritativeReadiness: () -> Void
-    private let ensureEarnedArmed: () -> Void
+    private let ensureEarnedArmed: @Sendable () async -> Void
     private let pauseAppLimitArms: () -> Void
     private let hasPausedAppLimitArms: () -> Bool
     private let rearmUsageCounters: () -> Bool
@@ -134,7 +134,7 @@ final class BigKidStatePoller: ObservableObject {
         self.clearAuthoritativeReadiness = {
             EarnedTimeStore.shared.clearAuthoritativeStateReadiness()
         }
-        self.ensureEarnedArmed = { EarnedBudgetArming.armIfReady() }
+        self.ensureEarnedArmed = { await EarnedBudgetArming.armIfReady() }
         self.pauseAppLimitArms = { _ = AppLimitPlanner().pauseActiveArms() }
         self.hasPausedAppLimitArms = { AppLimitPlanner().hasPausedArms() }
         self.rearmUsageCounters = Self.rearmOtherUsageCountersFromStoredPolicy
@@ -172,7 +172,7 @@ final class BigKidStatePoller: ObservableObject {
         syncMeteringCoverage: @escaping () -> Void = {},
         markAuthoritativeReady: @escaping (UUID) -> Void = { _ in },
         clearAuthoritativeReadiness: @escaping () -> Void = {},
-        ensureEarnedArmed: @escaping () -> Void = {},
+        ensureEarnedArmed: @escaping @Sendable () async -> Void = {},
         pauseAppLimitArms: @escaping () -> Void = {},
         hasPausedAppLimitArms: @escaping () -> Bool = { false },
         rearmUsageCounters: @escaping () -> Bool = { true },
@@ -364,7 +364,10 @@ final class BigKidStatePoller: ObservableObject {
                 }
             } else {
                 if runtimeIsAuthoritative {
-                    ensureEarnedArmed()
+                    // `armIfReady` hops its own daemon calls now; this await is
+                    // what lets it, instead of them running here on the main
+                    // actor every tick.
+                    await ensureEarnedArmed()
                 }
                 let hasPausedAppLimits = runtimeIsAuthoritative
                     && hasPausedAppLimitArms()

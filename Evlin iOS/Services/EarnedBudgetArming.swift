@@ -93,8 +93,10 @@ enum EarnedBudgetArming {
         max(0, acceptedEstimateMinutes ?? runningOffsetMinutes)
     }
 
+    /// `nonisolated`: pure sequencing plus one store write, and it has to be
+    /// callable from off the main thread now that the arm hops.
     @discardableResult
-    static func installReplacement(
+    nonisolated static func installReplacement(
         replacementOffset: Int,
         store: EarnedTimeStore,
         startMonitoring: () -> Bool
@@ -104,7 +106,9 @@ enum EarnedBudgetArming {
         return true
     }
 
-    static func stopLegacyMonitoring(
+    /// `nonisolated`: defaults reads and a scheduler stop, no UI. Callable from
+    /// off the main thread now that the daemon calls hop.
+    nonisolated static func stopLegacyMonitoring(
         defaults: UserDefaults? = UserDefaults(suiteName: "group.com.evlin.ios"),
         epochStore: DeviceEpochStore = .shared,
         stopMonitoring: (() -> Void)? = nil
@@ -421,9 +425,18 @@ enum EarnedBudgetArming {
     /// call repeatedly — arming replaces any previously armed ladder. The
     /// pool/cap policy is sourced from `EarnedTimeStore`, preserving already
     /// counted minutes as a re-arm offset before resuming from now.
-    static func armIfReady(force: Bool = false) {
+    /// `async` because every DeviceActivity touch below has to leave the main
+    /// thread: these are synchronous XPC round trips with no timeout, and this
+    /// function is reached from BigKidStatePoller's ten-second loop and from the
+    /// capture view's dismissal handler (Esen's finding #3). The guard chain
+    /// stays on the main actor — it is UserDefaults and store reads, none of
+    /// which block — so only the daemon calls hop.
+    static func armIfReady(force: Bool = false) async {
         reconcileIdentityTransition()
-        EarnedBudgetScheduler.shared.recoverInterruptedTransition()
+        _ = await MeteringDeviceActivityGateway.perform("earnedBudget.recoverTransition") {
+            EarnedBudgetScheduler.shared.recoverInterruptedTransition()
+            return true
+        }
 
         // Only arm on the child device.
         let mode = UserDefaults.standard.string(forKey: "appMode") ?? ""
@@ -493,7 +506,7 @@ enum EarnedBudgetArming {
             return
         }
         guard store.usageCountingAllowed else {
-            stopLegacyMonitoring()
+            await stopLegacyMonitoringOffMain()
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyEarnedArmAttempt,
                 "skipped usage-counting-paused \(EarnedBudgetScheduler.selectionSummary(selection))"
@@ -554,7 +567,7 @@ enum EarnedBudgetArming {
             capMinutes: capMinutes,
             offsetMinutes: replacementOffset
         ) else {
-            stopLegacyMonitoring(defaults: defaults)
+            await stopLegacyMonitoringOffMain(defaults: defaults)
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyEarnedArmAttempt,
                 "skipped no-remaining pool=\(poolMinutes) cap=\(capMinutes) offset=\(replacementOffset) \(EarnedBudgetScheduler.selectionSummary(selection))"
@@ -570,18 +583,42 @@ enum EarnedBudgetArming {
             generationKey: nextGenerationKey,
             armedAt: Date()
         )
-        _ = installReplacement(
-            replacementOffset: replacementOffset,
-            store: store,
-            startMonitoring: {
-                EarnedBudgetScheduler.shared.armFromNow(
-                    poolMinutes: remainingPolicy.poolMinutes,
-                    capMinutes: remainingPolicy.capMinutes,
-                    selection: selection,
-                    generation: replacementGeneration,
-                    timeZone: TimeZone(identifier: timezoneIdentifier) ?? .current
-                )
-            }
-        )
+        // The arm itself. `installReplacement` only writes the offset once the
+        // monitor is actually running, so hopping the whole thing keeps that
+        // ordering intact rather than recording an arm that never happened.
+        let timeZone = TimeZone(identifier: timezoneIdentifier) ?? .current
+        let armed = await MeteringDeviceActivityGateway.perform("earnedBudget.armFromNow") {
+            installReplacement(
+                replacementOffset: replacementOffset,
+                store: store,
+                startMonitoring: {
+                    EarnedBudgetScheduler.shared.armFromNow(
+                        poolMinutes: remainingPolicy.poolMinutes,
+                        capMinutes: remainingPolicy.capMinutes,
+                        selection: selection,
+                        generation: replacementGeneration,
+                        timeZone: timeZone
+                    )
+                }
+            )
+        }
+        if armed == nil {
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyEarnedArmAttempt,
+                "skipped gateway-refused pool=\(poolMinutes) cap=\(capMinutes)"
+            )
+        }
     }
+
+    /// `stopLegacyMonitoring` off the main thread. Kept as its own hop so the
+    /// two early-return branches above read the same as they did.
+    private static func stopLegacyMonitoringOffMain(
+        defaults: UserDefaults? = UserDefaults(suiteName: "group.com.evlin.ios")
+    ) async {
+        _ = await MeteringDeviceActivityGateway.perform("earnedBudget.stopLegacy") {
+            stopLegacyMonitoring(defaults: defaults)
+            return true
+        }
+    }
+
 }

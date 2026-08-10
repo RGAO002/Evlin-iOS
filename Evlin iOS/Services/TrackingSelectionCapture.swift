@@ -41,7 +41,10 @@ final class TrackingSelectionCapture: ObservableObject {
         return true
     }
 
-    func commit() {
+    /// `async` because `armIfReady` now hops its DeviceActivity calls off the
+    /// main thread. This used to run a synchronous daemon round trip straight
+    /// from a picker-dismissal handler on the main thread.
+    func commit() async {
         guard !selectionIsEmpty else {
             state = .needsSelection
             return
@@ -49,12 +52,12 @@ final class TrackingSelectionCapture: ObservableObject {
         EarnedTimeStore.shared.saveMeasurementSelection(selection)
         // This retains the existing identity-transition reconciliation. V2
         // installation is performed explicitly by commit(then:).
-        EarnedBudgetArming.armIfReady()
+        await EarnedBudgetArming.armIfReady()
         state = .saved
     }
 
     func commit(then recoverV2: @escaping () async -> Void) async {
-        commit()
+        await commit()
         guard state == .saved else { return }
         await recoverV2()
     }

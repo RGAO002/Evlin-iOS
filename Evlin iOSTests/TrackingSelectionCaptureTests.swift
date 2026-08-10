@@ -4,11 +4,11 @@ import XCTest
 
 @MainActor
 final class TrackingSelectionCaptureTests: XCTestCase {
-    func testEmptySelectionIsRejectedRatherThanSavedAsNothing() {
+    func testEmptySelectionIsRejectedRatherThanSavedAsNothing() async {
         let capture = TrackingSelectionCapture()
         capture.selection = FamilyActivitySelection()
 
-        capture.commit()
+        await capture.commit()
 
         XCTAssertEqual(capture.state, .needsSelection)
     }

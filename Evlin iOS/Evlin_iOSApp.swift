@@ -207,8 +207,13 @@ struct Evlin_iOSApp: App {
     /// both present). No-op when not ready or when running in parent mode.
     /// The shared implementation also tears down state left behind by a
     /// previous device identity (account/family switch).
+    /// Unstructured on purpose: this is called from scene-activation handlers
+    /// that are not async, and `armIfReady` now hops its DeviceActivity calls
+    /// off the main thread. Awaiting it here would mean making every one of
+    /// those handlers async to gain nothing — the arm reports its own outcome to
+    /// diagnostics and no caller consumes a result.
     private func armEarnedBudgetIfReady() {
-        EarnedBudgetArming.armIfReady()
+        Task { await EarnedBudgetArming.armIfReady() }
     }
 
     private func drainEarnedSampleRetryQueueIfNeeded() {
