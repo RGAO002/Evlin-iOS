@@ -109,6 +109,32 @@ func makeDefaultDeviceActivityScheduler() -> DeviceActivityScheduling {
 
 /// Translates LockCommand into ActiveLockStore mutations.
 /// See spec §6 for dispatcher logic and §3.4 for merge rules.
+/// Result of one gateway-routed DeviceActivity scheduling attempt.
+///
+/// Carries a description rather than the `Error` because it crosses a
+/// `@Sendable` boundary. Both call sites only log the reason, so nothing is lost.
+nonisolated enum DeviceActivityScheduleOutcome: Sendable, Equatable {
+    case scheduled
+    case schedulerFailed(String)
+}
+
+/// Thrown so the existing `do/catch` sites keep working unchanged — they log
+/// `error.localizedDescription` and branch only on success vs failure.
+nonisolated enum DeviceActivitySchedulingFailure: LocalizedError, Equatable {
+    /// DeviceActivity itself refused the schedule.
+    case scheduler(String)
+    /// Too many daemon calls are already wedged, so this one was never made.
+    /// NOT grounds to shield: it says nothing about the child's remaining time.
+    case daemonBusy
+
+    var errorDescription: String? {
+        switch self {
+        case .scheduler(let detail): return detail
+        case .daemonBusy: return "device_activity_gateway_busy"
+        }
+    }
+}
+
 final class ActionExecutor: @unchecked Sendable {
     static let shared = ActionExecutor()
 
@@ -263,7 +289,7 @@ final class ActionExecutor: @unchecked Sendable {
                 return Self.staleIdentityResult
             }
             for record in cleared {
-                cancelScheduled(recordKey: record.recordKey)
+                await cancelScheduled(recordKey: record.recordKey)
             }
             return .confirmedExact(verb: .unshieldAll, displayName: "\(cleared.count) shield(s) cleared", effectiveState: nil)
         case .unblockAll:
@@ -720,7 +746,7 @@ final class ActionExecutor: @unchecked Sendable {
         guard let removed = await ActiveLockStore.shared.removeShield(recordKey: record.recordKey) else {
             return .failed(.nothingToUnlock)
         }
-        cancelScheduled(recordKey: record.recordKey)
+        await cancelScheduled(recordKey: record.recordKey)
 
         let effective = effectiveStateFrom(
             removed.stillCovered,
@@ -796,9 +822,9 @@ final class ActionExecutor: @unchecked Sendable {
                     )
                     return Self.staleIdentityResult
                 }
-                if scheduleShieldExpiryIfNeeded(record) {
+                if await scheduleShieldExpiryIfNeeded(record) {
                     guard identity.isCurrent else {
-                        cancelScheduled(recordKey: record.recordKey)
+                        await cancelScheduled(recordKey: record.recordKey)
                         await rollbackShieldCommand(
                             receipt: shieldMutation.receipt,
                             deferredLockedSetID: deferredLockedSetID,
@@ -871,10 +897,10 @@ final class ActionExecutor: @unchecked Sendable {
         }
     }
 
-    private func scheduleShieldExpiryIfNeeded(_ record: ShieldRecord) -> Bool {
+    private func scheduleShieldExpiryIfNeeded(_ record: ShieldRecord) async -> Bool {
         guard let expiresAt = record.expiresAt else { return false }
         do {
-            try scheduleRelock(recordKey: record.recordKey, expiresAt: expiresAt)
+            try await scheduleRelock(recordKey: record.recordKey, expiresAt: expiresAt)
             let message = "schedule_ok recordKey=\(record.recordKey) "
                 + "expiresAt=\(ISO8601DateFormatter().string(from: expiresAt))"
             NSLog("[Evlin] %@", message)
@@ -1182,11 +1208,11 @@ final class ActionExecutor: @unchecked Sendable {
         // Schedule only after the final suspension and identity check.
         if let exp = expiresAt {
             do {
-                try scheduleAutoUnblock(bundleID: bundleID, expiresAt: exp)
+                try await scheduleAutoUnblock(bundleID: bundleID, expiresAt: exp)
                 NSLog("[Evlin] block_schedule_ok bundleID=%@ expiresAt=%@",
                       bundleID, ISO8601DateFormatter().string(from: exp))
                 guard identity.isCurrent else {
-                    cancelScheduledBlock(bundleID: bundleID)
+                    await cancelScheduledBlock(bundleID: bundleID)
                     await rollbackAddedBlock(blockMutation.receipt)
                     return Self.staleIdentityResult
                 }
@@ -1258,7 +1284,7 @@ final class ActionExecutor: @unchecked Sendable {
     /// recompute the effective state. Activity name namespace is
     /// `evlin.block.<sha-of-bundleID>` so the extension knows it's a
     /// block-expiry event vs a shield-expiry event.
-    private func scheduleAutoUnblock(bundleID: String, expiresAt: Date) throws {
+    private func scheduleAutoUnblock(bundleID: String, expiresAt: Date) async throws {
         let now = Date()
         let requestedInterval = expiresAt.timeIntervalSince(now)
         let minInterval = TimeInterval(Self.minScheduleMinutes * 60)
@@ -1270,7 +1296,7 @@ final class ActionExecutor: @unchecked Sendable {
         let endComp = calendar.dateComponents([.hour, .minute, .second], from: clampedEnd)
         let schedule = DeviceActivitySchedule(intervalStart: startComp, intervalEnd: endComp, repeats: false)
         let name = DeviceActivityName(deviceActivityNameForBlock(bundleID: bundleID))
-        try activityScheduler.startMonitoring(name, during: schedule)
+        try await startMonitoringOffMain("block.scheduleAutoUnblock", name, schedule)
     }
 
     private func deviceActivityNameForBlock(bundleID: String) -> String {
@@ -1279,10 +1305,11 @@ final class ActionExecutor: @unchecked Sendable {
         return "evlin.block.\(bytes)"
     }
 
-    private func cancelScheduledBlock(bundleID: String) {
-        activityScheduler.stopMonitoring([
-            DeviceActivityName(deviceActivityNameForBlock(bundleID: bundleID))
-        ])
+    private func cancelScheduledBlock(bundleID: String) async {
+        await stopMonitoringOffMain(
+            "block.cancelScheduled",
+            [DeviceActivityName(deviceActivityNameForBlock(bundleID: bundleID))]
+        )
     }
 
     // MARK: - Unshield — spec §4.4
@@ -1499,7 +1526,7 @@ final class ActionExecutor: @unchecked Sendable {
                         return Self.staleIdentityResult
                     }
                     for record in removedByName {
-                        cancelScheduled(recordKey: record.recordKey)
+                        await cancelScheduled(recordKey: record.recordKey)
                     }
                     let eff = effectiveStateFrom(
                         post.stillCovered,
@@ -1588,7 +1615,7 @@ final class ActionExecutor: @unchecked Sendable {
         guard identity.isCurrent else {
             return Self.staleIdentityResult
         }
-        cancelScheduled(recordKey: recordKey)
+        await cancelScheduled(recordKey: recordKey)
 
         return .confirmedExact(verb: .unshield, displayName: removed.record.displayName, effectiveState: eff)
     }
@@ -1620,7 +1647,7 @@ final class ActionExecutor: @unchecked Sendable {
             guard identity.isCurrent else {
                 return Self.staleIdentityResult
             }
-            cancelScheduled(recordKey: exactAppShield.recordKey)
+            await cancelScheduled(recordKey: exactAppShield.recordKey)
             let eff = effectiveStateFrom(post.stillCovered, isBlocked: post.blockedAfter, possibleSavedList: post.possibleSavedListCoverage)
             return .confirmedExact(verb: .unshield, displayName: removed.record.displayName, effectiveState: eff)
         }
@@ -1682,7 +1709,7 @@ final class ActionExecutor: @unchecked Sendable {
 
     // MARK: - DeviceActivity scheduling
 
-    private func scheduleRelock(recordKey: String, expiresAt: Date) throws {
+    private func scheduleRelock(recordKey: String, expiresAt: Date) async throws {
         let now = Date()
         let requestedInterval = expiresAt.timeIntervalSince(now)
         let minInterval = TimeInterval(Self.minScheduleMinutes * 60)
@@ -1694,12 +1721,52 @@ final class ActionExecutor: @unchecked Sendable {
         let endComp = calendar.dateComponents([.hour, .minute, .second], from: clampedEnd)
         let schedule = DeviceActivitySchedule(intervalStart: startComp, intervalEnd: endComp, repeats: false)
         let name = DeviceActivityName(deviceActivityNameFor(recordKey: recordKey))
-        try activityScheduler.startMonitoring(name, during: schedule)
+        try await startMonitoringOffMain("shield.scheduleRelock", name, schedule)
     }
 
-    private func cancelScheduled(recordKey: String) {
+    private func cancelScheduled(recordKey: String) async {
         let name = DeviceActivityName(deviceActivityNameFor(recordKey: recordKey))
-        activityScheduler.stopMonitoring([name])
+        await stopMonitoringOffMain("shield.cancelScheduled", [name])
+    }
+
+    /// Timed shield/block scheduling, off the main thread. These are synchronous
+    /// XPC round trips with no timeout, exactly like the arm that got the app
+    /// killed on 2026-08-08 — they simply fire less often, on parent commands
+    /// that carry a duration rather than on a loop.
+    private func startMonitoringOffMain(
+        _ api: StaticString,
+        _ name: DeviceActivityName,
+        _ schedule: DeviceActivitySchedule
+    ) async throws {
+        let scheduler = activityScheduler
+        let outcome = await MeteringDeviceActivityGateway.perform(api) {
+            () -> DeviceActivityScheduleOutcome in
+            do {
+                try scheduler.startMonitoring(name, during: schedule)
+                return .scheduled
+            } catch {
+                return .schedulerFailed(error.localizedDescription)
+            }
+        }
+        switch outcome {
+        case .scheduled:
+            return
+        case .schedulerFailed(let detail):
+            throw DeviceActivitySchedulingFailure.scheduler(detail)
+        case nil:
+            throw DeviceActivitySchedulingFailure.daemonBusy
+        }
+    }
+
+    private func stopMonitoringOffMain(
+        _ api: StaticString,
+        _ names: [DeviceActivityName]
+    ) async {
+        let scheduler = activityScheduler
+        _ = await MeteringDeviceActivityGateway.perform(api) { () -> Bool in
+            scheduler.stopMonitoring(names)
+            return true
+        }
     }
 
     private func deviceActivityNameFor(recordKey: String) -> String {
