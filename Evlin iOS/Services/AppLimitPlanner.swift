@@ -7,7 +7,11 @@ import CryptoKit
 /// Outcome of an `AppLimitPlanner.arm(rules:)` pass. Returned to the caller
 /// (P6) which turns `.quotaExceeded` into a `limit_quota_exceeded` ack and
 /// `.armed` into a success ack. The planner itself emits no acks.
-enum AppLimitPlanResult: Equatable {
+// `nonisolated` + `Sendable`: a plain value enum, and it has to cross a
+// `Task.detached` boundary now that arming runs off the main thread. Left on the
+// project-wide MainActor default it was neither, which is also where that pile
+// of "main actor-isolated conformance to Equatable" warnings came from.
+nonisolated enum AppLimitPlanResult: Equatable, Sendable {
     /// DeviceActivity was (re)armed. `activityCount` distinct window activities,
     /// `eventCount` total `evlin.limit.<ruleId>` events across them.
     case armed(activityCount: Int, eventCount: Int)

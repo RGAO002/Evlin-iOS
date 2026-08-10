@@ -514,9 +514,22 @@ final class ActionExecutor: @unchecked Sendable {
         guard await mutationAllowed() else {
             throw AppLimitConvergenceError.stale
         }
-        let plan = makeLimitPlanner().arm(
-            rules: appLimitSchedulingRules(for: slot)
-        )
+        // Off the main thread: `arm` ends in DeviceActivity's synchronous XPC,
+        // which has no timeout and killed the app here on 2026-08-08. This
+        // executor stays on the MainActor — its `@unchecked Sendable` is an
+        // assertion, not a proof, so flipping the whole class would quietly
+        // promote a pile of serialised state to genuinely concurrent.
+        let planner = makeLimitPlanner()
+        let schedulingRules = appLimitSchedulingRules(for: slot)
+        let plan = await MeteringDeviceActivityGateway.perform("appLimit.arm") {
+            planner.arm(rules: schedulingRules)
+        }
+        guard let plan else {
+            // Refused because too many daemon calls are already wedged. That is
+            // a failure to arm, not a reason to shield: it says nothing about
+            // whether the child still has time.
+            throw AppLimitConvergenceError.partiallyArmed(armed: 0, failed: 1)
+        }
         switch plan {
         case .armed:
             break
