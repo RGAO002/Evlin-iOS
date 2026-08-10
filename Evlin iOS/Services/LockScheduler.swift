@@ -4,7 +4,11 @@ import DeviceActivity
 /// Schedules / cancels a record's DeviceActivityMonitor auto-removal by its
 /// `deviceActivityName`. Standalone + injectable so the reflection reconciler
 /// (and tests) can drive it without going through ActionExecutor.
-struct LockScheduler {
+/// `nonisolated` deliberately: both members end in synchronous DeviceActivity
+/// XPC through the injected adapter, and this type is reached from
+/// BigKidStatePoller's reflection reconciler on the main actor. It holds nothing
+/// but that adapter, so the project-wide MainActor default was pure cost.
+nonisolated struct LockScheduler: Sendable {
     private let activityScheduler: DeviceActivityScheduling
     private static let minScheduleMinutes = 15   // DeviceActivity practical floor
 
