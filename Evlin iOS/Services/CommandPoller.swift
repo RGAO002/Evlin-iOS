@@ -276,12 +276,16 @@ enum AppLimitRecoveryTrigger {
         // DeviceActivity calls are synchronous XPC. Capture the verified owner
         // before leaving the main actor, then reconcile off-main so foreground
         // recovery cannot trip the scene-update watchdog.
-        _ = await Task.detached(priority: .utility) {
+        //
+        // Routed through the gateway rather than detaching here directly: this
+        // was already correct, but leaving it as its own hop kept it outside the
+        // in-flight accounting, so a wedged daemon looked quieter than it was.
+        _ = await MeteringDeviceActivityGateway.perform("appLimit.arm.pollRecovery") {
             let rules = AppLimitRuleStore.shared.all()
             return AppLimitPlanner(
                 ownerProvider: { owner }
             ).arm(rules: rules)
-        }.value
+        }
     }
 
     private static func reconcileConsumedPhysicalEventsIfNeeded() async {

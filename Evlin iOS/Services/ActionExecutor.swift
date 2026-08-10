@@ -441,7 +441,13 @@ final class ActionExecutor: @unchecked Sendable {
             )
         case .clear:
             _ = try await appLimitLockStore.removeLimitSourceVerified(ruleID: work.ruleID)
-            guard case .armed = makeLimitPlanner().arm(rules: ruleStore.all()) else {
+            // Off-main: `arm` ends in synchronous DeviceActivity XPC.
+            let planner = makeLimitPlanner()
+            let rules = ruleStore.all()
+            let plan = await MeteringDeviceActivityGateway.perform("appLimit.arm.clear") {
+                planner.arm(rules: rules)
+            }
+            guard case .armed = plan else {
                 throw AppLimitOwnerWorkError.stale
             }
             return AppLimitOwnerEffectResult(armID: nil, source: "app_owner_recovery")
@@ -614,7 +620,14 @@ final class ActionExecutor: @unchecked Sendable {
             return .failed(.execution("lock_store_unavailable"))
         }
         guard identity.isCurrent else { return Self.staleIdentityResult }
-        _ = makeLimitPlanner().arm(rules: ruleStore.all())
+        // Off-main: `arm` ends in synchronous DeviceActivity XPC. The result was
+        // already discarded here; a refusal is likewise not fatal to the clear,
+        // which has already been applied at the lock store.
+        let clearPlanner = makeLimitPlanner()
+        let clearRules = ruleStore.all()
+        _ = await MeteringDeviceActivityGateway.perform("appLimit.arm.afterClear") {
+            clearPlanner.arm(rules: clearRules)
+        }
         afterMutationCheckpoint(.clearLimitRearmed)
         guard identity.isCurrent else { return Self.staleIdentityResult }
         let display = command.target.targetDisplay ?? command.target.bundleID ?? "App"
