@@ -25,11 +25,16 @@ enum MeteringNuclearReset {
     ///   K-device button passes true so a fresh route can arm.
     @discardableResult
     static func run(includeMeteringStore: Bool = false) async -> String {
-        // Audited adapters rather than raw DeviceActivityCenter: both calls
-        // below are synchronous XPC, and this runs from a user-facing settings
-        // button, not a debug screen.
+        // Audited adapters, and off the main thread: both calls are synchronous XPC.
+        // This runs from a user-facing settings button, so it gets the roomier
+        // foreground watchdog budget rather than the ten-second background one —
+        // but a daemon that never answers wedges the thread either way.
         let auditedCenter = SystemMeteringDeviceActivityCenter()
         let auditedScheduler = DeviceActivityCenterScheduler()
+        let liveActivityCount = await MeteringDeviceActivityGateway.perform(
+            "nuke.activities"
+        ) { auditedCenter.activities.count }
+            .map(String.init) ?? "unavailable"
         // A3: a nuclear reset destroys every activity and (optionally) the
         // whole metering store. Anything that happens afterwards has to be
         // readable in the light of "someone nuked the device at this instant",
@@ -40,14 +45,17 @@ enum MeteringNuclearReset {
             verdict: "started",
             detail: MeteringFlightRecorder.detail([
                 ("includeStore", String(includeMeteringStore)),
-                ("activities", String(auditedCenter.activities.count)),
+                ("activities", String(liveActivityCount)),
             ])
         )
         // 1. Stop every scheduled DeviceActivity callback FIRST. If we don't, a
         //    pending intervalDidEnd could fire mid-reset and write its own
         //    recompute back on top of us. This is also what releases Apple's
         //    activity capacity so a fresh route can arm.
-        auditedScheduler.stopMonitoring()
+        _ = await MeteringDeviceActivityGateway.perform("nuke.stopAll") {
+            auditedScheduler.stopMonitoring()
+            return true
+        }
 
         // 2. Drop every ManagedSettings policy this app has set. Broader than
         //    clearLockRestrictions() — also clears categories, webDomains,
