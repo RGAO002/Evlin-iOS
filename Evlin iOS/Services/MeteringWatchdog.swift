@@ -120,7 +120,20 @@ nonisolated final class MeteringWatchdog: @unchecked Sendable {
     /// Unthrottled check + heal. `runIfDue` is the production entry point;
     /// this one exists for the debug button and for tests.
     func run(trigger: String) async {
-        let verdict = check()
+        // `check()` ends in synchronous DeviceActivity XPC — `center.activities`
+        // through `perAppReds`, and `MeteringDaemonProbe`. The `nonisolated` on
+        // this class buys nothing for that: the production caller is the
+        // `Task { @MainActor in ... }` in the background-push handler, and under
+        // SWIFT_APPROACHABLE_CONCURRENCY a `nonisolated async` inherits its
+        // caller's executor. Only an explicit hop leaves the main thread.
+        //
+        // A refusal means too many daemon calls are already wedged. Skipping a
+        // periodic self-check is the right response to that; the next wake runs
+        // it again.
+        guard let verdict = await MeteringDeviceActivityGateway.perform(
+            "watchdog.check",
+            { self.check() }
+        ) else { return }
         guard !verdict.inconclusive else { return }
 
         if verdict.isGreen {
