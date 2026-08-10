@@ -644,6 +644,29 @@ struct OnboardingCoordinator: View {
                             try? await apiClient.postAgreementAck(
                                 version: BetaAgreementContent.wireVersion)
                         }
+                        // Register THIS device as a parent device. Pairing v2
+                        // builds the family on the parent ACCOUNT, so nothing in
+                        // the first-parent chain ever did — only the offline and
+                        // co-parent recovery paths call it. The consequences are
+                        // silent: `evlin.parentDeviceID` stays empty, so the
+                        // parent half never uploads its APNs token (the upload
+                        // plan requires that id when appMode is "parent") and the
+                        // single-device role float never meets its gate.
+                        // Idempotent upsert on X-Device-Id, best-effort, and
+                        // deliberately not awaited so it cannot delay this step.
+                        Task {
+                            if let registered = await registerParentDevice() {
+                                parentDeviceID = registered.device_id
+                                UserDefaults.standard.set(
+                                    registered.device_id.uuidString,
+                                    forKey: "evlin.parentDeviceID"
+                                )
+                                UserDefaults.standard.set(
+                                    registered.family_id.uuidString,
+                                    forKey: "evlin.familyID"
+                                )
+                            }
+                        }
                         // Single device skips "new or join": there is only ever
                         // one family, and the next thing needed is the code.
                         if singleDevice {
@@ -725,6 +748,18 @@ struct OnboardingCoordinator: View {
                     targetChildProfileID: nil,
                     targetChildName: nil
                 )
+                .task {
+                    // Single device: this screen advances ONLY via
+                    // `onCodeReady`, which fires exactly once when the code is
+                    // minted. Returning here afterwards therefore stranded the
+                    // tester on a code nobody would ever consume — no kid half
+                    // is running to join, and no second callback is coming.
+                    // Hand the existing code over again instead.
+                    guard singleDevice,
+                          case let .showing(invite) = parentInviteModel.stage
+                    else { return }
+                    singleDeviceJoinAsKid(code: invite.codeDisplay)
+                }
 
             case .parentConnected:
                 ParentConnectedStep(
@@ -877,8 +912,19 @@ struct OnboardingCoordinator: View {
                         step = .childConnected
                     },
                     // Single device has no mode screen to fall back to — the
-                    // parent half of this phone owns the family already.
-                    onBack: { step = singleDevice ? .parentInviteV2 : .modeSelect }
+                    // parent half of this phone owns the family already. The
+                    // ROLE has to go back with the step: leaving appMode on
+                    // "child" put the parent's own code screen under a KID
+                    // banner, which is also the only way that combination can
+                    // appear at all.
+                    onBack: {
+                        if singleDevice {
+                            appMode = "parent"
+                            step = .parentInviteV2
+                        } else {
+                            step = .modeSelect
+                        }
+                    }
                 )
 
             case .childConnected:

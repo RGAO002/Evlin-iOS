@@ -1,4 +1,10 @@
-#if DEBUG
+// Ships in RELEASE as well as DEBUG.
+//
+// The kid's final onboarding step proves v2 metering is actually armed before
+// it lets setup finish, and that proof is derived here. Behind `#if DEBUG` the
+// proof simply did not exist in a Release build, so the archive failed to
+// compile — and had it compiled by dropping the check, TestFlight would have
+// completed onboarding without ever confirming the device can count.
 import CryptoKit
 import DeviceActivity
 import FamilyControls
@@ -1060,4 +1066,3 @@ nonisolated final class DiagnosticDeviceActivityScheduler: DeviceActivitySchedul
         return UUID(uuidString: String(activityName.dropFirst("evlin.limit.v2.".count)))
     }
 }
-#endif

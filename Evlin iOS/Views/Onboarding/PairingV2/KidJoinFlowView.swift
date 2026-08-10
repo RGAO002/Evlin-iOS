@@ -9,6 +9,9 @@ import UIKit
 struct KidJoinFlowView: View {
 
     @StateObject private var model: KidJoinFlowModel
+    /// One auto-present per appearance of this flow; `onAppear` can fire again
+    /// on a re-render and a second resolve would race the first.
+    @State private var autoPresented = false
     // New-child pairing shares the normal onboarding profile surface instead
     // of maintaining a second, stripped-down name form in this flow.
     @State private var newChildName = ""
@@ -49,10 +52,17 @@ struct KidJoinFlowView: View {
                 KidJoinScanStep(onScanned: { invite in
                     Task { await model.present(invite) }
                 })
-                .task {
-                    if let autoInvite {
-                        await model.present(autoInvite)
-                    }
+                // Deliberately an UNSTRUCTURED task, not `.task`. Single
+                // device hands the code over by changing the role and the step
+                // together, and the role change rebuilds the view tree — which
+                // cancelled a `.task`-owned resolve mid-flight. The server had
+                // already recorded the resolution, so the tester was told "that
+                // code didn't work" about a code that had in fact just worked,
+                // with no way forward. Resolving must outlive one re-render.
+                .onAppear {
+                    guard let autoInvite, !autoPresented else { return }
+                    autoPresented = true
+                    Task { await model.present(autoInvite) }
                 }
 
             case .resolving:
@@ -99,8 +109,19 @@ struct KidJoinFlowView: View {
                     Text(message)
                         .multilineTextAlignment(.center)
                         .foregroundStyle(.secondary)
-                    Button("Try again") { onBack() }
-                        .buttonStyle(.bordered)
+                    // "Try again" used to call `onBack()`, which on single
+                    // device meant the parent's own code screen — a screen that
+                    // cannot advance again, so the retry was a dead end. Retry
+                    // the code we already hold; fall back to going back only
+                    // when there is nothing to retry.
+                    Button("Try again") {
+                        if let autoInvite {
+                            Task { await model.present(autoInvite) }
+                        } else {
+                            onBack()
+                        }
+                    }
+                    .buttonStyle(.bordered)
                 }
                 .padding()
             }
