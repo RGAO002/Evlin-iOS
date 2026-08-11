@@ -146,6 +146,96 @@ final class ReflectionLockApplierTests: XCTestCase {
         XCTAssertEqual(spy.stopped.count, 0, "the scheduler must not have been touched")
     }
 
+    /// `.swap` cancels the outgoing lock and then adds the incoming one, so its
+    /// window is inside the CANCEL. The production guard is in place; this proves
+    /// it, rather than leaving `.swap` covered only by inspection.
+    func test_identitySwitchDuringSwapCancelDoesNotShieldForTheOldChild() async {
+        let store = ActiveLockStore()
+        let spy = BlockingLockSchedulerSpy()
+        spy.blocksOnStop = true
+        let oldID = UUID()
+        let identity = MutableIdentityBox(oldID)
+        let applier = ReflectionLockApplier(
+            store: store,
+            scheduler: LockScheduler(activityScheduler: spy),
+            currentChildID: { identity.value }
+        )
+        let outgoing = UUID()
+        let incoming = UUID()
+        groupDefaults?.set(
+            try? JSONEncoder().encode(ReflectionLockSticky(
+                heldRID: outgoing,
+                capExpiresAt: Date().addingTimeInterval(120)
+            )),
+            forKey: stickyKey
+        )
+
+        let reconcile = Task {
+            await applier.reconcile(snapshot: pendingSnapshot(rid: incoming), childID: oldID)
+        }
+        var spins = 0
+        while spy.stoppedNames.isEmpty, spins < 20_000 {
+            await Task.yield()
+            spins += 1
+        }
+        XCTAssertFalse(spy.stoppedNames.isEmpty, "the swap never reached its cancel")
+        identity.value = UUID()
+        spy.releaseStart()
+        await reconcile.value
+
+        let shields = await store.allCurrent().shields
+        XCTAssertFalse(
+            shields.contains { $0.recordKey == "all:reflection:\(incoming.uuidString)" },
+            "a device that changed hands mid-swap must not receive the previous "
+                + "child's all-app lock"
+        )
+        XCTAssertTrue(
+            spy.startedNames.isEmpty,
+            "and it must not schedule that lock's expiry either"
+        )
+        // Pins the PRE-shield guard specifically. Without it the swap adds the
+        // shield and the later post-schedule guard tears it down again, so the end
+        // state alone cannot tell the two apart — but that later path also clears
+        // the sticky, whereas returning before the shield leaves it untouched.
+        let stickyAfter: ReflectionLockSticky? = groupDefaults?
+            .data(forKey: stickyKey)
+            .flatMap { try? JSONDecoder().decode(ReflectionLockSticky.self, from: $0) }
+        XCTAssertEqual(
+            stickyAfter?.heldRID,
+            outgoing,
+            "the swap must have returned BEFORE mutating anything, leaving the "
+                + "outgoing lock's sticky exactly as it was"
+        )
+    }
+
+    /// A refused stop has to be retried by a machine, not just written down. Left
+    /// as a log line, the state machine called the release finished while Apple
+    /// still held the activity — and unclaimed activities are invisible to the
+    /// planner's 20-slot quota check, so they pile up until a real arm fails.
+    func test_refusedStopIsRetriedOnTheNextReconcile() async {
+        let store = ActiveLockStore()
+        let spy = LockSchedulerSpy()
+        let childID = UUID()
+        let applier = makeApplier(store: store, spy: spy, childID: childID)
+        let rid = UUID()
+        let stranded = ReflectionLockRecordFactory
+            .make(rid: rid, expiresAt: Date(), childID: childID).deviceActivityName
+        // Stand in for "the gateway refused this stop on an earlier pass".
+        groupDefaults?.set([stranded], forKey: "evlin.reflectionLockPendingStops")
+
+        await applier.reconcile(snapshot: resolvedSnapshot(rid: rid, resolution: .approved),
+                                childID: childID)
+
+        XCTAssertTrue(
+            spy.stopped.contains { ($0 ?? []).contains(where: { $0.rawValue == stranded }) },
+            "the queued stop must be retried, not left on the device forever"
+        )
+        XCTAssertNil(
+            groupDefaults?.stringArray(forKey: "evlin.reflectionLockPendingStops"),
+            "a stop that lands must leave the queue"
+        )
+    }
+
     private func makeApplier(
         store: ActiveLockStore,
         spy: LockSchedulerSpy,
@@ -327,8 +417,14 @@ private final class BlockingLockSchedulerSpy: DeviceActivityScheduling, @uncheck
         try startMonitoring(activity, during: schedule)
     }
 
+    /// Set before use to hold the caller inside `stopMonitoring` instead —
+    /// `.swap` cancels before it adds its shield, so that is where its window is.
+    var blocksOnStop = false
+
     func stopMonitoring(_ activities: [DeviceActivityName]) {
         lock.lock(); _stoppedNames.append(contentsOf: activities.map(\.rawValue)); lock.unlock()
+        guard blocksOnStop else { return }
+        _ = release.wait(timeout: .now() + 10)
     }
 
     func stopMonitoring() {}

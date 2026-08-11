@@ -23,6 +23,15 @@ final class ReflectionLockApplier {
     private let defaults = UserDefaults(suiteName: "group.com.evlin.ios")
     private let stickyKey = "evlin.reflectionLockSticky"
     private let scheduleFailureKey = "evlin.reflectionLockScheduleFailure"
+    /// Activity names whose stop the gateway refused. A diagnostic string is not
+    /// a retry: without this the state machine treated a release as finished, the
+    /// Apple activity stayed live, and nothing ever tried again. Unclaimed
+    /// activities are invisible to the planner's own 20-slot quota check, so they
+    /// accumulate silently until a legitimate arm gets `excessiveActivities`.
+    private let pendingStopsKey = "evlin.reflectionLockPendingStops"
+    /// Cap per pass so a backlog cannot monopolise the gateway's four slots and
+    /// starve the enforcement work this same call is here to do.
+    private let pendingStopsPerPass = 4
     private let currentChildID: () -> UUID?
     private let afterLocalMutation: () async -> Void
 
@@ -41,6 +50,11 @@ final class ReflectionLockApplier {
     nonisolated deinit {}
 
     func reconcile(snapshot: ChildStateResponse, childID: UUID, now: Date = Date()) async {
+        // Before the identity guard on purpose: a pending stop is an Apple
+        // activity nobody wants, so it should be retired whoever the device now
+        // belongs to. Skipping it on a mismatch would strand exactly the
+        // activities an identity switch leaves behind.
+        await drainPendingStops()
         guard identityIsCurrent(childID) else { return }
         let sticky = loadSticky()
         let r = snapshot.reflectionRequest
@@ -175,9 +189,9 @@ final class ReflectionLockApplier {
 
     /// Schedule the DAM auto-removal; on failure DO NOT swallow — record a diagnostic
     /// (a failed schedule means no OS timer, so the lock could outlive its lease).
-    /// A refused cancel leaves a live activity nobody claims. Record it in the
-    /// same slot the schedule failures use so the next diagnostics read shows it,
-    /// rather than letting the caller assume the stop happened.
+    /// A refused cancel leaves a live activity nobody claims. It is recorded for
+    /// diagnostics AND queued for retry — the diagnostic alone let the state
+    /// machine call a release finished while Apple still held the activity.
     private func cancelOrDiagnose(_ deviceActivityName: String, rid: UUID) async {
         guard await scheduler.cancel(deviceActivityName: deviceActivityName) else {
             defaults?.set(
@@ -185,7 +199,45 @@ final class ReflectionLockApplier {
                     + "key=all:reflection:\(rid.uuidString) name=\(deviceActivityName)",
                 forKey: scheduleFailureKey
             )
+            enqueuePendingStop(deviceActivityName)
             return
+        }
+        // A name can be queued from an earlier refusal; a stop that lands now
+        // retires it. `cancel` is idempotent, so a duplicate attempt is harmless.
+        removePendingStop(deviceActivityName)
+    }
+
+    /// Retry a bounded slice of the queued stops. Names that are refused again
+    /// stay queued for the next pass, so the loop closes only on success.
+    private func drainPendingStops() async {
+        let queued = loadPendingStops()
+        guard !queued.isEmpty else { return }
+        for name in queued.prefix(pendingStopsPerPass) {
+            if await scheduler.cancel(deviceActivityName: name) {
+                removePendingStop(name)
+            }
+        }
+    }
+
+    private func loadPendingStops() -> [String] {
+        defaults?.stringArray(forKey: pendingStopsKey) ?? []
+    }
+
+    private func enqueuePendingStop(_ name: String) {
+        var queued = loadPendingStops()
+        guard !queued.contains(name) else { return }
+        queued.append(name)
+        defaults?.set(queued, forKey: pendingStopsKey)
+    }
+
+    private func removePendingStop(_ name: String) {
+        let queued = loadPendingStops()
+        guard queued.contains(name) else { return }
+        let remaining = queued.filter { $0 != name }
+        if remaining.isEmpty {
+            defaults?.removeObject(forKey: pendingStopsKey)
+        } else {
+            defaults?.set(remaining, forKey: pendingStopsKey)
         }
     }
 
