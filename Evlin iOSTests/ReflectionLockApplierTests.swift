@@ -20,6 +20,7 @@ final class ReflectionLockApplierTests: XCTestCase {
         // The backlog is persisted, so without this one test's stranded stop is
         // retried inside the next one and shows up as a phantom extra `stop`.
         groupDefaults?.removeObject(forKey: pendingStopsKey)
+        ScreenTimeEventLog.clear()
     }
 
     private let pendingStopsKey = "evlin.reflectionLockPendingStops"
@@ -336,6 +337,50 @@ final class ReflectionLockApplierTests: XCTestCase {
         spy.releaseStart()
     }
 
+    /// Observation 2 from review: a drain whose first XPC never returns never
+    /// finishes, which is an acceptable bounded degradation ONLY if it is visible.
+    /// Otherwise the sole symptom is orphan activities accumulating over days.
+    func test_stuckDrainIsReportedWithQueueLength() async {
+        // Via the recorder's own test seam, so this asserts what the applier
+        // emits rather than what the rate limiter happens to let through.
+        let sink = RecordedEvents()
+        MeteringFlightRecorder.testSink = { sink.append($0) }
+        defer { MeteringFlightRecorder.testSink = nil }
+        let store = ActiveLockStore()
+        let spy = BlockingLockSchedulerSpy()
+        let childID = UUID()
+        let stranded = "evlin.shield.stranded.visible"
+        spy.blocksOnlyStopNamed = stranded
+        spy.blocksOnStart = false
+        spy.blockSeconds = 20
+        let applier = ReflectionLockApplier(
+            store: store,
+            scheduler: LockScheduler(activityScheduler: spy),
+            currentChildID: { childID }
+        )
+        groupDefaults?.set([stranded], forKey: pendingStopsKey)
+
+        await applier.reconcile(snapshot: pendingSnapshot(rid: UUID()), childID: childID)
+        var spins = 0
+        while !spy.stoppedNames.contains(stranded), spins < 20_000 {
+            await Task.yield()
+            spins += 1
+        }
+
+        // `site` and `detail` both land in `app`; `verdict` lands in `reason`.
+        let recorded = sink.all
+        let drainEvents = recorded.filter {
+            ($0.app ?? "").contains("reflection.pendingStops.drain")
+        }
+        XCTAssertTrue(
+            drainEvents.contains { ($0.app ?? "").contains("queued=1") && $0.reason == "started" },
+            "the drain must record what it set out to clear, so a queue that never "
+                + "empties is readable rather than invisible. Saw: "
+                + "\(recorded.map { "\($0.reason)|\($0.app ?? "")" })"
+        )
+        spy.releaseStart()
+    }
+
     private func makeApplier(
         store: ActiveLockStore,
         spy: LockSchedulerSpy,
@@ -565,4 +610,12 @@ private final class MutationCounter: @unchecked Sendable {
     private var stored = 0
     var count: Int { lock.lock(); defer { lock.unlock() }; return stored }
     func bump() { lock.lock(); stored += 1; lock.unlock() }
+}
+
+/// Collects flight-recorder events emitted during a test.
+private final class RecordedEvents: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [ScreenTimeEvent] = []
+    var all: [ScreenTimeEvent] { lock.lock(); defer { lock.unlock() }; return stored }
+    func append(_ e: ScreenTimeEvent) { lock.lock(); stored.append(e); lock.unlock() }
 }

@@ -36,6 +36,13 @@ final class ReflectionLockApplier {
     /// BigKidStatePoller holds this applier for its lifetime, so the instance is
     /// the right scope — and it keeps tests from inheriting each other's state.
     private var pendingStopDrainInFlight = false
+    /// When the in-flight drain started. A drain whose first XPC never returns
+    /// never ends either — a bounded, acceptable degradation, but only if it is
+    /// VISIBLE. Without this the sole symptom is orphan activities quietly
+    /// accumulating over days.
+    private var pendingStopDrainStartedAt: Date?
+    /// How long a drain may run before every skipped attempt reports it as stuck.
+    private let drainStallThreshold: TimeInterval = 5 * 60
     private let currentChildID: () -> UUID?
     private let afterLocalMutation: () async -> Void
 
@@ -174,12 +181,49 @@ final class ReflectionLockApplier {
     /// A wedged drain now costs one gateway slot and nothing else. Single-flight,
     /// so a queue that cannot be drained does not accumulate tasks either.
     private func schedulePendingStopDrain() {
-        guard !pendingStopDrainInFlight, !loadPendingStops().isEmpty else { return }
+        let queued = loadPendingStops()
+        guard !queued.isEmpty else { return }
+        if pendingStopDrainInFlight {
+            reportDrainStallIfOverdue(queueLength: queued.count)
+            return
+        }
         pendingStopDrainInFlight = true
+        pendingStopDrainStartedAt = Date()
+        MeteringFlightRecorder.emit(
+            kind: .meteringWork,
+            site: "reflection.pendingStops.drain",
+            verdict: "started",
+            detail: "queued=\(queued.count)"
+        )
         Task { [weak self] in
             await self?.drainPendingStops()
-            self?.pendingStopDrainInFlight = false
+            guard let self else { return }
+            let remaining = self.loadPendingStops().count
+            MeteringFlightRecorder.emit(
+                kind: .meteringWork,
+                site: "reflection.pendingStops.drain",
+                verdict: remaining == 0 ? "cleared" : "partial",
+                detail: "remaining=\(remaining)"
+            )
+            self.pendingStopDrainInFlight = false
+            self.pendingStopDrainStartedAt = nil
         }
+    }
+
+    /// A drain that has been in flight past the threshold is parked in the daemon
+    /// and will never finish. Report it every time a pass has to skip because of
+    /// it, so the black box shows a stuck maintenance task and a growing queue
+    /// instead of nothing at all.
+    private func reportDrainStallIfOverdue(queueLength: Int) {
+        guard let startedAt = pendingStopDrainStartedAt,
+              Date().timeIntervalSince(startedAt) >= drainStallThreshold
+        else { return }
+        MeteringFlightRecorder.emitFailure(
+            site: "reflection.pendingStops.drain",
+            verdict: "stalled",
+            detail: "queued=\(queueLength) "
+                + "stuckFor=\(Int(Date().timeIntervalSince(startedAt)))s"
+        )
     }
 
     private func identityIsCurrent(_ expectedChildID: UUID) -> Bool {
