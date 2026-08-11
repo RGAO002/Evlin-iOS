@@ -66,7 +66,7 @@ final class ReflectionLockApplier {
                 clearReflectionStickyIfHeld(in: [rid])
                 return
             }
-            scheduleOrDiagnose(rec, rid: rid)
+            await scheduleOrDiagnose(rec, rid: rid)
             // §8.1 (Plan 7): first-sight honest payoff — tell the backend the kid
             // device APPLIED the all-apps reflection lock so the parent's
             // first-actions poll sees `lock_applied_at`. Best-effort, idempotent
@@ -82,7 +82,7 @@ final class ReflectionLockApplier {
             guard identityIsCurrent(childID) else { return }
             let name = ReflectionLockRecordFactory
                 .make(rid: rid, expiresAt: now, childID: childID).deviceActivityName
-            scheduler.cancel(deviceActivityName: name)
+            await scheduler.cancel(deviceActivityName: name)
         case .swap(let releaseRID, let applyRID, let expiresAt):
             let releaseKey = "all:reflection:\(releaseRID.uuidString)"
             let held = await store.allCurrent().shields.first { $0.recordKey == releaseKey }
@@ -91,7 +91,7 @@ final class ReflectionLockApplier {
                 _ = await store.removeShield(recordKey: releaseKey)
             }
             guard identityIsCurrent(childID) else { return }
-            scheduler.cancel(deviceActivityName: ReflectionLockRecordFactory
+            await scheduler.cancel(deviceActivityName: ReflectionLockRecordFactory
                 .make(rid: releaseRID, expiresAt: now, childID: childID).deviceActivityName)
             let rec = ReflectionLockRecordFactory.make(rid: applyRID, expiresAt: expiresAt, childID: childID)
             _ = await store.addShield(rec, force: true)
@@ -101,7 +101,7 @@ final class ReflectionLockApplier {
                 clearReflectionStickyIfHeld(in: [releaseRID, applyRID])
                 return
             }
-            scheduleOrDiagnose(rec, rid: applyRID)
+            await scheduleOrDiagnose(rec, rid: applyRID)
             postLockAppliedBestEffort(childID: childID, rid: applyRID)
         }
         guard identityIsCurrent(childID) else { return }
@@ -151,9 +151,9 @@ final class ReflectionLockApplier {
 
     /// Schedule the DAM auto-removal; on failure DO NOT swallow — record a diagnostic
     /// (a failed schedule means no OS timer, so the lock could outlive its lease).
-    private func scheduleOrDiagnose(_ rec: ShieldRecord, rid: UUID) {
+    private func scheduleOrDiagnose(_ rec: ShieldRecord, rid: UUID) async {
         do {
-            try scheduler.schedule(record: rec)
+            try await scheduler.schedule(record: rec)
             defaults?.removeObject(forKey: scheduleFailureKey)   // clear stale failure on success
         } catch {
             defaults?.set("ts=\(Date().timeIntervalSince1970) key=all:reflection:\(rid.uuidString) err=\(error)",

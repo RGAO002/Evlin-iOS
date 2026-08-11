@@ -196,7 +196,7 @@ final class AppLimitEffectRecoveryEntry {
 enum AppLimitRecoveryTrigger {
     static func launch() async {
         await runLifecycleRecovery(
-            convergeIdentity: { convergeCurrentIdentity() },
+            convergeIdentity: { await convergeCurrentIdentity() },
             recoverOwnerWork: { await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured() },
             recoverEffects: { await AppLimitEffectRecoveryEntry.shared.recoverIfConfigured() },
             reconcileRules: { await reconcileAlreadyAppliedRules() },
@@ -206,7 +206,7 @@ enum AppLimitRecoveryTrigger {
 
     static func foreground() async {
         await runLifecycleRecovery(
-            convergeIdentity: { convergeCurrentIdentity() },
+            convergeIdentity: { await convergeCurrentIdentity() },
             recoverOwnerWork: { await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured() },
             recoverEffects: { await AppLimitEffectRecoveryEntry.shared.recoverIfConfigured() },
             reconcileRules: { await reconcileAlreadyAppliedRules() },
@@ -215,14 +215,14 @@ enum AppLimitRecoveryTrigger {
     }
 
     static func silentRemoteNotification() async {
-        convergeCurrentIdentity()
+        await convergeCurrentIdentity()
         await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured()
         await AppLimitEffectRecoveryEntry.shared.recoverIfConfigured()
     }
 
     static func pollCompletion() async {
         await runPollRecovery(
-            convergeIdentity: { convergeCurrentIdentity() },
+            convergeIdentity: { await convergeCurrentIdentity() },
             recoverOwnerWork: { await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured() },
             recoverEffects: { await AppLimitEffectRecoveryEntry.shared.recoverIfConfigured() },
             reconcileConsumedPhysicalEvents: {
@@ -265,9 +265,9 @@ enum AppLimitRecoveryTrigger {
         await reconcileConsumedPhysicalEvents()
     }
 
-    private static func convergeCurrentIdentity() {
+    private static func convergeCurrentIdentity() async {
         guard let owner = MeteringOwnerMirror.current() else { return }
-        AppLimitPairingIdentityConvergence.run(ownerChildDeviceID: owner)
+        _ = await AppLimitPairingIdentityConvergence.run(ownerChildDeviceID: owner)
     }
 
     private static func reconcileAlreadyAppliedRules() async {

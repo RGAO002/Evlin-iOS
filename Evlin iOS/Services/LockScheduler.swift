@@ -16,7 +16,13 @@ nonisolated struct LockScheduler: Sendable {
         self.activityScheduler = activityScheduler
     }
 
-    func schedule(record: ShieldRecord) throws {
+    /// `async` because the call it ends in is synchronous DeviceActivity XPC.
+    ///
+    /// Marking this type `nonisolated` was NOT enough and the earlier commit that
+    /// did only that achieved nothing: a synchronous `nonisolated` function runs
+    /// on whatever thread called it, and every caller here is `@MainActor`. The
+    /// hop lives inside the scheduler so no call site can forget it.
+    func schedule(record: ShieldRecord) async throws {
         guard let expiresAt = record.expiresAt else { return }   // permanent → no schedule
         let now = Date()
         let minInterval = TimeInterval(Self.minScheduleMinutes * 60)
@@ -27,11 +33,33 @@ nonisolated struct LockScheduler: Sendable {
             intervalStart: cal.dateComponents([.hour, .minute, .second], from: now),
             intervalEnd: cal.dateComponents([.hour, .minute, .second], from: clampedEnd),
             repeats: false)
-        try activityScheduler.startMonitoring(
-            DeviceActivityName(record.deviceActivityName), during: schedule)
+        let scheduler = activityScheduler
+        let name = DeviceActivityName(record.deviceActivityName)
+        let outcome = await MeteringDeviceActivityGateway.perform("reflection.schedule") {
+            () -> DeviceActivityScheduleOutcome in
+            do {
+                try scheduler.startMonitoring(name, during: schedule)
+                return .scheduled
+            } catch {
+                return .schedulerFailed(error.localizedDescription)
+            }
+        }
+        switch outcome {
+        case .scheduled:
+            return
+        case .schedulerFailed(let detail):
+            throw DeviceActivitySchedulingFailure.scheduler(detail)
+        case nil:
+            throw DeviceActivitySchedulingFailure.daemonBusy
+        }
     }
 
-    func cancel(deviceActivityName: String) {
-        activityScheduler.stopMonitoring([DeviceActivityName(deviceActivityName)])
+    func cancel(deviceActivityName: String) async {
+        let scheduler = activityScheduler
+        let name = DeviceActivityName(deviceActivityName)
+        _ = await MeteringDeviceActivityGateway.perform("reflection.cancel") {
+            scheduler.stopMonitoring([name])
+            return true
+        }
     }
 }

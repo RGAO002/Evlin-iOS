@@ -1,5 +1,7 @@
+import DeviceActivity
 import Foundation
 import XCTest
+@testable import Evlin_iOS
 
 /// Static guardrail for the DeviceActivity boundary.
 ///
@@ -101,6 +103,111 @@ final class DeviceActivityAdapterBoundaryTests: XCTestCase {
         )
     }
 
+
+    // MARK: - Does it actually leave the main thread?
+
+    /// The gap this file used to have. Everything above is static: it proves
+    /// nobody bypassed the adapters and that the adapters mention the audit. It
+    /// proves NOTHING about the thread the calls run on — which is the entire
+    /// point of the work — so all three main-thread regressions found in review
+    /// were invisible to a green suite.
+    @MainActor
+    func testGatewayActuallyLeavesTheMainThread() async {
+        let ranOnMain = await MeteringDeviceActivityGateway.perform("test.thread") {
+            Thread.isMainThread
+        }
+        XCTAssertEqual(
+            ranOnMain,
+            false,
+            "the gateway is the one thing everything else depends on; if its "
+                + "closure runs on the main thread then every site routed "
+                + "through it is still a watchdog kill waiting to happen"
+        )
+    }
+
+    /// Marking a type `nonisolated` does NOT move its synchronous calls off the
+    /// caller's thread — that mistake shipped once already, as a commit whose
+    /// stated goal it did not achieve. The hop has to be inside the scheduler so
+    /// no caller can forget it, and this asserts it is.
+    @MainActor
+    func testLockSchedulerCallsRunOffTheMainThread() async throws {
+        let spy = ThreadRecordingScheduler()
+        let scheduler = LockScheduler(activityScheduler: spy)
+
+        await scheduler.cancel(deviceActivityName: "evlin.shield.test")
+        XCTAssertEqual(
+            spy.stopRanOnMainThread,
+            false,
+            "LockScheduler.cancel ran its daemon call on the main thread"
+        )
+
+        try await scheduler.schedule(
+            record: ShieldRecord(
+                recordKey: "test",
+                tier: .savedList,
+                targetKey: "list",
+                displayName: "Locked set",
+                lastCommandID: UUID(),
+                appTokens: [],
+                categoryTokens: [],
+                webDomainTokens: [],
+                appliesToAll: false,
+                issuedAt: Date(),
+                expiresAt: Date().addingTimeInterval(3600),
+                originalRequest: "thread audit test",
+                targetChildID: UUID()
+            )
+        )
+        XCTAssertEqual(
+            spy.startRanOnMainThread,
+            false,
+            "LockScheduler.schedule ran its daemon call on the main thread"
+        )
+    }
+
+    /// The allowlist check used to pass if the word `noteIfOnMainThread` appeared
+    /// anywhere in an adapter file — so a sixth method added later, unaudited,
+    /// would not have been noticed. Every XPC surface needs its own.
+    func testEveryXPCSurfaceInEveryAdapterIsAudited() throws {
+        let surfaces = [
+            "center.startMonitoring",
+            "center.stopMonitoring",
+            "center.activities",
+            "center.schedule(for:",
+            "center.events(for:",
+        ]
+        let root = Self.appSourceRoot()
+        var unaudited: [String] = []
+        for adapter in Self.adapters.sorted() {
+            guard let url = try Self.find(adapter, under: root) else { continue }
+            let lines = try String(contentsOf: url, encoding: .utf8)
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .map(String.init)
+            for (index, line) in lines.enumerated() {
+                let code = line.components(separatedBy: "//").first ?? line
+                guard surfaces.contains(where: { code.contains($0) }) else { continue }
+                // The audit call must sit within the few lines above the surface.
+                let window = lines[max(0, index - 4)..<index]
+                let audited = window.contains {
+                    $0.contains("DeviceActivityMainThreadAudit.noteIfOnMainThread")
+                }
+                if !audited {
+                    unaudited.append("\(adapter):\(index + 1)  \(code.trimmingCharacters(in: .whitespaces))")
+                }
+            }
+        }
+        XCTAssertEqual(
+            unaudited,
+            [],
+            """
+            XPC surfaces with no audit call directly above them. Each is a \
+            blocking call that would leave no trace when it runs on the main \
+            thread:
+            \(unaudited.joined(separator: "\n"))
+            """
+        )
+    }
+
     /// True when `text` constructs `DeviceActivityCenter` itself, as opposed to
     /// one of the wrappers whose names end in it.
     private static func constructsRawCenter(_ text: String) -> Bool {
@@ -169,4 +276,32 @@ final class DeviceActivityAdapterBoundaryTests: XCTestCase {
         }
         return findings.sorted()
     }
+}
+
+/// Records which thread each adapter call landed on.
+private final class ThreadRecordingScheduler: DeviceActivityScheduling, @unchecked Sendable {
+    private(set) var startRanOnMainThread: Bool?
+    private(set) var stopRanOnMainThread: Bool?
+
+    func startMonitoring(_ name: DeviceActivityName, during schedule: DeviceActivitySchedule) throws {
+        startRanOnMainThread = Thread.isMainThread
+    }
+
+    func startMonitoring(
+        _ activity: DeviceActivityName,
+        during schedule: DeviceActivitySchedule,
+        events: [DeviceActivityEvent.Name: DeviceActivityEvent]
+    ) throws {
+        startRanOnMainThread = Thread.isMainThread
+    }
+
+    func stopMonitoring(_ activities: [DeviceActivityName]) {
+        stopRanOnMainThread = Thread.isMainThread
+    }
+
+    func stopMonitoring() {
+        stopRanOnMainThread = Thread.isMainThread
+    }
+
+    func monitoredActivities() -> [DeviceActivityName] { [] }
 }

@@ -1182,7 +1182,7 @@ struct OnboardingCoordinator: View {
                 )
             },
             convergeAppLimitIdentity: { deviceID in
-                AppLimitPairingIdentityConvergence.run(
+                _ = await AppLimitPairingIdentityConvergence.run(
                     ownerChildDeviceID: deviceID
                 )
             },

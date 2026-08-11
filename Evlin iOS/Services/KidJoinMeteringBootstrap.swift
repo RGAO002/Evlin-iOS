@@ -1,15 +1,26 @@
 import Foundation
 import DeviceActivity
 
-@MainActor
-enum AppLimitPairingIdentityConvergence {
+/// NOT `@MainActor`. Both members below read the live activity set and stop
+/// monitors — synchronous DeviceActivity XPC — and this runs during pairing and
+/// during recovery. Foreground gets a roomier watchdog budget than the
+/// ten-second background one, but a daemon that never answers wedges the thread
+/// either way, and pairing is precisely when a device's Screen Time state is
+/// least settled.
+nonisolated enum AppLimitPairingIdentityConvergence {
     @discardableResult
-    static func run(ownerChildDeviceID: UUID) -> Bool {
-        run(
+    static func run(ownerChildDeviceID: UUID) async -> Bool {
+        // One hop for the whole convergence: it is stop-then-persist against a
+        // single store snapshot, and splitting it would let another arm land in
+        // the middle. A refusal means the daemon is already saturated — reported
+        // as "did not converge" rather than silently claiming success.
+        await MeteringDeviceActivityGateway.perform("pairing.convergeIdentity") {
+            run(
             ownerChildDeviceID: ownerChildDeviceID,
-            store: .shared,
-            scheduler: makeDefaultDeviceActivityScheduler()
-        )
+                store: .shared,
+                scheduler: makeDefaultDeviceActivityScheduler()
+            )
+        } ?? false
     }
 
     @discardableResult
@@ -70,7 +81,7 @@ enum AppLimitPairingIdentityConvergence {
 @MainActor
 struct KidJoinMeteringBootstrap {
     let prepareIdentity: (UUID) -> Void
-    let convergeAppLimitIdentity: (UUID) -> Void
+    let convergeAppLimitIdentity: (UUID) async -> Void
     let publishSelection: () async -> Bool
     let publishMatchedCatalog: () async -> Bool
     let recoverMetering: () async -> Void
@@ -78,7 +89,7 @@ struct KidJoinMeteringBootstrap {
 
     func run(for childDeviceID: UUID) async {
         prepareIdentity(childDeviceID)
-        convergeAppLimitIdentity(childDeviceID)
+        await convergeAppLimitIdentity(childDeviceID)
         _ = await publishSelection()
         _ = await publishMatchedCatalog()
         await recoverMetering()

@@ -13,10 +13,22 @@ enum MeteringTodayRouteRekick {
     /// - Parameter trigger: who asked — `manual` for the debug button,
     ///   `watchdog` for the A3 self-heal. Recorded so an auto-heal loop is
     ///   distinguishable from a human hammering the button.
-    @MainActor
     @discardableResult
     static func run(trigger: String = "manual") async -> String {
-        let report = await perform(trigger: trigger)
+        // One hop for the whole rekick, not four. `perform` is a single coherent
+        // daemon operation — stop, start, coverage refresh, probe — and splitting
+        // it would let another arm interleave in the middle of it.
+        //
+        // This matters more here than anywhere else: the watchdog calls this
+        // exactly when it has just seen a red, which usually means the Screen
+        // Time daemon is already unhealthy. Self-healing on the main thread is
+        // running the riskiest daemon call at the moment it is most likely to
+        // hang, and a hang there killed the app on 2026-08-08.
+        guard let report = await MeteringDeviceActivityGateway.perform("rekick.perform", {
+            perform(trigger: trigger)
+        }) else {
+            return "rekick_refused_gateway_busy"
+        }
         MeteringFlightRecorder.emit(
             kind: .meteringRepair,
             site: "rekick.run",
@@ -36,8 +48,10 @@ enum MeteringTodayRouteRekick {
         let routeID: UUID?
     }
 
-    @MainActor
-    private static func perform(trigger: String) async -> Report {
+    /// NOT `@MainActor`: every DeviceActivity call below is synchronous XPC, and
+    /// `run` hops this whole function off the main thread. It touches only
+    /// `DeviceEpochStore.shared`, which is `nonisolated` and internally locked.
+    nonisolated private static func perform(trigger: String) -> Report {
         let store = DeviceEpochStore.shared
         let state: DeviceEpochStoreState
         do {

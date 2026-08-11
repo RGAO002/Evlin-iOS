@@ -30,10 +30,19 @@ struct CommandDeliveryDiagnosticsView: View {
                 deliveryDiagnosticRow("Command ack", CommandDeliveryDiagnostics.keyCommandAck)
                 deliveryDiagnosticRow("DAM heartbeat spike", CommandDeliveryDiagnostics.keyDAMHeartbeat)
                 Button("Arm DAM heartbeat spike (starts in 2 min)") {
-                    armDAMHeartbeatSpike()
+                    Task { await armDAMHeartbeatSpike() }
                 }
                 Button(role: .destructive) {
-                    BigKidActivityScheduler.shared.stopCommandHeartbeatSpike()
+                    // Off-main like every other daemon call. This screen is used
+                    // often enough that a hang here is a real hang, debug-only or
+                    // not — and a probe that wedges the app is a bad probe.
+                    Task {
+                        _ = await MeteringDeviceActivityGateway.perform("debug.heartbeatStop") {
+                            BigKidActivityScheduler.shared.stopCommandHeartbeatSpike()
+                            return true
+                        }
+                        refreshTick += 1
+                    }
                     CommandDeliveryDiagnostics.record(
                         CommandDeliveryDiagnostics.keyDAMHeartbeat,
                         "stopped debug heartbeat schedule"
@@ -390,17 +399,17 @@ struct CommandDeliveryDiagnosticsView: View {
 
             Button {
                 clearMeteringMonitorProbe()
-                do {
-                    try BigKidActivityScheduler.shared.startCommandHeartbeatSpike(
-                        delaySeconds: 30
-                    )
-                } catch {
-                    MeteringMonitorCapabilityProbe.append(
-                        "control operation=arm_dam_heartbeat result=error=\(error.localizedDescription)",
-                        defaults: meteringMonitorProbeDefaults
-                    )
+                Task {
+                    do {
+                        try await startHeartbeatSpikeOffMain(delaySeconds: 30)
+                    } catch {
+                        MeteringMonitorCapabilityProbe.append(
+                            "control operation=arm_dam_heartbeat result=error=\(error.localizedDescription)",
+                            defaults: meteringMonitorProbeDefaults
+                        )
+                    }
+                    refreshTick += 1
                 }
-                refreshTick += 1
             } label: {
                 Label("Run DAM monitor probe", systemImage: "play.fill")
             }
@@ -490,6 +499,33 @@ struct CommandDeliveryDiagnosticsView: View {
     }
 
     @ViewBuilder
+    /// The probe's own daemon call, off the main thread. `perform` hands back
+    /// the thrown description because an `Error` cannot cross the boundary.
+    private func startHeartbeatSpikeOffMain(delaySeconds: TimeInterval? = nil) async throws {
+        let outcome = await MeteringDeviceActivityGateway.perform("debug.heartbeatStart") {
+            () -> DeviceActivityScheduleOutcome in
+            do {
+                if let delaySeconds {
+                    try BigKidActivityScheduler.shared.startCommandHeartbeatSpike(
+                        delaySeconds: delaySeconds
+                    )
+                } else {
+                    try BigKidActivityScheduler.shared.startCommandHeartbeatSpike()
+                }
+                return .scheduled
+            } catch {
+                return .schedulerFailed(error.localizedDescription)
+            }
+        }
+        switch outcome {
+        case .scheduled: return
+        case .schedulerFailed(let detail):
+            throw DeviceActivitySchedulingFailure.scheduler(detail)
+        case nil:
+            throw DeviceActivitySchedulingFailure.daemonBusy
+        }
+    }
+
     private func deliveryDiagnosticRow(_ title: String, _ key: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
@@ -503,9 +539,9 @@ struct CommandDeliveryDiagnosticsView: View {
         .padding(.vertical, 2)
     }
 
-    private func armDAMHeartbeatSpike() {
+    private func armDAMHeartbeatSpike() async {
         do {
-            try BigKidActivityScheduler.shared.startCommandHeartbeatSpike()
+            try await startHeartbeatSpikeOffMain()
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyDAMHeartbeat,
                 "armed debug heartbeat schedule; expected intervalDidStart in ~2 min"
