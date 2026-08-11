@@ -16,6 +16,29 @@ enum ScreenTimeEventLog {
     static let cap = 2000
     static let suiteName = "group.com.evlin.ios"
 
+    /// A second ring holding only the events worth having AFTER something went
+    /// wrong, so routine traffic cannot evict the failure that explains it.
+    ///
+    /// The main ring is FIFO with a 2000 cap. That makes an error and a
+    /// heartbeat equally disposable: once the device carries on normally for
+    /// 2000 events, the scene that would have explained the failure is gone.
+    /// A whole day of debugging on 2026-08-08 came down to reading a crash log
+    /// off the device by hand because the recorder had nothing left.
+    static let preservedKey = "evlin.screentime.preserved"
+    /// Small on purpose. These kinds are rare — at most a handful a day — so a
+    /// few hundred slots is weeks of failures, and it stays cheap to re-scan.
+    static let preservedCap = 300
+
+    /// Kinds that survive rollover of the main ring. All are low-volume and
+    /// high-signal: the previously-silent `catch` conversions, terminal work
+    /// failures, drops, the midnight rollover (rare and historically the most
+    /// fragile step), and operator repairs. The high-volume progress kinds —
+    /// callbacks, samples, guards, watchdog heartbeats — are deliberately NOT
+    /// here; they are what does the evicting.
+    static let preservedKinds: Set<ScreenTimeEvent.Kind> = [
+        .meteringError, .meteringWork, .drop, .meteringDay, .meteringRepair, .reset
+    ]
+
     private static let logger = Logger(subsystem: "com.evlin.screentime", category: "event")
     private static var shared: UserDefaults? { UserDefaults(suiteName: suiteName) }
 
@@ -35,6 +58,26 @@ enum ScreenTimeEventLog {
             log = Array(log.suffix(cap))
         }
         defaults.set(log, forKey: key)
+        // (3) failure ring — same line, so the uploader's deterministic
+        // `client_event_id` hash makes a duplicate upload idempotent rather
+        // than a second event.
+        guard preservedKinds.contains(event.kind) else { return }
+        var preserved = defaults.stringArray(forKey: preservedKey) ?? []
+        preserved.append(line)
+        if preserved.count > preservedCap {
+            preserved = Array(preserved.suffix(preservedCap))
+        }
+        defaults.set(preserved, forKey: preservedKey)
+    }
+
+    /// Failure lines still on the device, oldest → newest.
+    static func preservedLines(from defaults: UserDefaults) -> [String] {
+        defaults.stringArray(forKey: preservedKey) ?? []
+    }
+
+    static func preservedLines() -> [String] {
+        guard let d = shared else { return [] }
+        return preservedLines(from: d)
     }
 
     /// Records callback arrival without loading or rewriting the durable ring.
@@ -81,5 +124,6 @@ enum ScreenTimeEventLog {
 
     static func clear(in defaults: UserDefaults) {
         defaults.removeObject(forKey: key)
+        defaults.removeObject(forKey: preservedKey)
     }
 }

@@ -30,6 +30,10 @@ import Foundation
 enum ScreenTimeEventUploader {
 
     static let watermarkKey = "evlin.screentime.uploadedThroughHash"
+    /// Separate watermark for the failure ring. Without its own mark the
+    /// preserved lines would either re-upload on every single pass forever or
+    /// ride the main ring's mark and be skipped the moment the two rings drift.
+    static let preservedWatermarkKey = "evlin.screentime.preservedThroughHash"
     static let disableKey = "evlin.screentime.uploadDisabled"
     static let batchLimit = 200
 
@@ -149,7 +153,18 @@ enum ScreenTimeEventUploader {
         guard let d = UserDefaults(suiteName: ScreenTimeEventLog.suiteName) else { return }
 
         let all = ScreenTimeEventLog.readLines(from: d)
-        let pending = pendingLines(all: all, lastUploadedHash: d.string(forKey: watermarkKey))
+        let mainPending = pendingLines(all: all, lastUploadedHash: d.string(forKey: watermarkKey))
+        // Failures the main ring may already have evicted. Merged in rather than
+        // uploaded separately so one identity resolution and one batching pass
+        // covers both; the deterministic `client_event_id` makes any overlap with
+        // `mainPending` idempotent at the server.
+        let preservedAll = ScreenTimeEventLog.preservedLines(from: d)
+        let preservedPending = pendingLines(
+            all: preservedAll,
+            lastUploadedHash: d.string(forKey: preservedWatermarkKey)
+        )
+        var seen = Set<String>()
+        let pending = (preservedPending + mainPending).filter { seen.insert($0).inserted }
         guard !pending.isEmpty else { return }
         guard let base = URL(string: APIClient.currentBaseURL) else { return }
 
@@ -193,9 +208,16 @@ enum ScreenTimeEventUploader {
                 }
             }
         }
-        // Advance ONLY when every POST of the pending window succeeded.
-        if allOK, let last = pending.last {
-            d.set(lineHash(last), forKey: watermarkKey)
+        // Advance ONLY when every POST of the pending window succeeded, and
+        // advance each ring against its OWN last line — `pending` is a merge, so
+        // its last element says nothing about where the other ring got to.
+        if allOK {
+            if let last = mainPending.last {
+                d.set(lineHash(last), forKey: watermarkKey)
+            }
+            if let last = preservedPending.last {
+                d.set(lineHash(last), forKey: preservedWatermarkKey)
+            }
         }
     }
 }
