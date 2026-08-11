@@ -50,12 +50,13 @@ final class ReflectionLockApplier {
     nonisolated deinit {}
 
     func reconcile(snapshot: ChildStateResponse, childID: UUID, now: Date = Date()) async {
-        // Before the identity guard on purpose: a pending stop is an Apple
-        // activity nobody wants, so it should be retired whoever the device now
-        // belongs to. Skipping it on a mismatch would strand exactly the
-        // activities an identity switch leaves behind.
-        await drainPendingStops()
-        guard identityIsCurrent(childID) else { return }
+        guard identityIsCurrent(childID) else {
+            // No current enforcement to do, so the whole pass can go to the
+            // backlog. This is also the case that CREATES most of it, since an
+            // identity switch abandons whatever the previous child had armed.
+            await drainPendingStops()
+            return
+        }
         let sticky = loadSticky()
         let r = snapshot.reflectionRequest
         let heldRecordKey = sticky.heldRID.map { "all:reflection:\($0.uuidString)" }
@@ -124,7 +125,17 @@ final class ReflectionLockApplier {
             )
             // The cancel suspended. Re-verify BEFORE adding a shield, or a device
             // that changed hands mid-swap gets the previous child's all-app lock.
-            guard identityIsCurrent(childID) else { return }
+            //
+            // Clearing the sticky is part of the same obligation, not a nicety:
+            // `ReflectionLockSticky` carries no owner, so a sticky left behind
+            // here is read as the NEW child's held reflection on the next
+            // reconcile. `.apply`'s mismatch path already clears it; leaving
+            // `.swap` inconsistent was the bug, and asserting the old behaviour
+            // in a test made it a contract.
+            guard identityIsCurrent(childID) else {
+                clearReflectionStickyIfHeld(in: [releaseRID, applyRID])
+                return
+            }
             let rec = ReflectionLockRecordFactory.make(rid: applyRID, expiresAt: expiresAt, childID: childID)
             _ = await store.addShield(rec, force: true)
             await afterLocalMutation()
@@ -144,6 +155,13 @@ final class ReflectionLockApplier {
         }
         guard identityIsCurrent(childID) else { return }
         saveSticky(next)
+        // Backlog LAST, never first. A per-pass cap does not bound a wedged XPC:
+        // one historical stop that enters the daemon and never returns would make
+        // the drain never finish, and draining first meant the current apply or
+        // release never ran at all — the reflection state machine would stop
+        // advancing entirely. Draining here can only delay the NEXT pass's
+        // backlog, never this pass's enforcement.
+        await drainPendingStops()
     }
 
     private func identityIsCurrent(_ expectedChildID: UUID) -> Bool {

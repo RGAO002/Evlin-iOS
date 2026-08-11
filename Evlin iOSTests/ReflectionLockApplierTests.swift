@@ -147,18 +147,23 @@ final class ReflectionLockApplierTests: XCTestCase {
     }
 
     /// `.swap` cancels the outgoing lock and then adds the incoming one, so its
-    /// window is inside the CANCEL. The production guard is in place; this proves
-    /// it, rather than leaving `.swap` covered only by inspection.
-    func test_identitySwitchDuringSwapCancelDoesNotShieldForTheOldChild() async {
+    /// window is inside the CANCEL.
+    ///
+    /// `afterLocalMutation` runs immediately after `addShield`, so counting it
+    /// proves whether the incoming shield was ever created — the end state cannot,
+    /// because the later post-schedule guard tears one down again.
+    func test_identitySwitchDuringSwapCancelNeverAddsTheIncomingShield() async {
         let store = ActiveLockStore()
         let spy = BlockingLockSchedulerSpy()
         spy.blocksOnStop = true
         let oldID = UUID()
         let identity = MutableIdentityBox(oldID)
+        let mutations = MutationCounter()
         let applier = ReflectionLockApplier(
             store: store,
             scheduler: LockScheduler(activityScheduler: spy),
-            currentChildID: { identity.value }
+            currentChildID: { identity.value },
+            afterLocalMutation: { mutations.bump() }
         )
         let outgoing = UUID()
         let incoming = UUID()
@@ -183,56 +188,83 @@ final class ReflectionLockApplierTests: XCTestCase {
         spy.releaseStart()
         await reconcile.value
 
-        let shields = await store.allCurrent().shields
-        XCTAssertFalse(
-            shields.contains { $0.recordKey == "all:reflection:\(incoming.uuidString)" },
-            "a device that changed hands mid-swap must not receive the previous "
-                + "child's all-app lock"
-        )
-        XCTAssertTrue(
-            spy.startedNames.isEmpty,
-            "and it must not schedule that lock's expiry either"
-        )
-        // Pins the PRE-shield guard specifically. Without it the swap adds the
-        // shield and the later post-schedule guard tears it down again, so the end
-        // state alone cannot tell the two apart — but that later path also clears
-        // the sticky, whereas returning before the shield leaves it untouched.
-        let stickyAfter: ReflectionLockSticky? = groupDefaults?
-            .data(forKey: stickyKey)
-            .flatMap { try? JSONDecoder().decode(ReflectionLockSticky.self, from: $0) }
         XCTAssertEqual(
-            stickyAfter?.heldRID,
-            outgoing,
-            "the swap must have returned BEFORE mutating anything, leaving the "
-                + "outgoing lock's sticky exactly as it was"
+            mutations.count,
+            0,
+            "the incoming shield must never be created for a child who has left"
+        )
+        XCTAssertTrue(spy.startedNames.isEmpty, "and its expiry must not be scheduled")
+        XCTAssertNil(
+            groupDefaults?.data(forKey: stickyKey),
+            "the departed child's sticky must be cleared — it carries no owner, so "
+                + "leaving it makes the NEXT child inherit their reflection RID"
         )
     }
 
-    /// A refused stop has to be retried by a machine, not just written down. Left
-    /// as a log line, the state machine called the release finished while Apple
-    /// still held the activity — and unclaimed activities are invisible to the
-    /// planner's 20-slot quota check, so they pile up until a real arm fails.
-    func test_refusedStopIsRetriedOnTheNextReconcile() async {
+    /// End to end, because the previous version wrote the queue key by hand and
+    /// would still have passed with `enqueuePendingStop` deleted:
+    /// gateway refuses -> the refusal enqueues -> the next reconcile stops it ->
+    /// the queue empties.
+    func test_refusedStopIsEnqueuedThenRetriedOnTheNextPass() async {
         let store = ActiveLockStore()
         let spy = LockSchedulerSpy()
         let childID = UUID()
         let applier = makeApplier(store: store, spy: spy, childID: childID)
         let rid = UUID()
-        let stranded = ReflectionLockRecordFactory
+        let name = ReflectionLockRecordFactory
             .make(rid: rid, expiresAt: Date(), childID: childID).deviceActivityName
-        // Stand in for "the gateway refused this stop on an earlier pass".
-        groupDefaults?.set([stranded], forKey: "evlin.reflectionLockPendingStops")
 
-        await applier.reconcile(snapshot: resolvedSnapshot(rid: rid, resolution: .approved),
-                                childID: childID)
+        // Apply first, so there is something for the release to tear down.
+        await applier.reconcile(snapshot: pendingSnapshot(rid: rid), childID: childID)
+        let startedBefore = spy.stopped.count
 
+        // Pass 1: every gateway slot held, so the release's stop is refused and
+        // never reaches the scheduler.
+        let gate = DispatchSemaphore(value: 0)
+        var holders: [Task<Void, Never>] = []
+        for _ in 0..<MeteringDeviceActivityGateway.maxInFlight {
+            holders.append(Task {
+                _ = await MeteringDeviceActivityGateway.perform("test.hold") {
+                    _ = gate.wait(timeout: .now() + 10)
+                    return true
+                }
+            })
+        }
+        var spins = 0
+        while MeteringDeviceActivityGateway.inFlightCount()
+            < MeteringDeviceActivityGateway.maxInFlight, spins < 20_000 {
+            await Task.yield()
+            spins += 1
+        }
+        await applier.reconcile(
+            snapshot: resolvedSnapshot(rid: rid, resolution: .approved),
+            childID: childID
+        )
+        XCTAssertEqual(
+            spy.stopped.count,
+            startedBefore,
+            "pass 1's stop must have been refused, not delivered"
+        )
+        XCTAssertEqual(
+            groupDefaults?.stringArray(forKey: "evlin.reflectionLockPendingStops"),
+            [name],
+            "a refused stop must enqueue itself; a log line is not a retry"
+        )
+
+        // Pass 2: slots free again.
+        for _ in holders { gate.signal() }
+        for h in holders { await h.value }
+        await applier.reconcile(
+            snapshot: resolvedSnapshot(rid: rid, resolution: .approved),
+            childID: childID
+        )
         XCTAssertTrue(
-            spy.stopped.contains { ($0 ?? []).contains(where: { $0.rawValue == stranded }) },
-            "the queued stop must be retried, not left on the device forever"
+            spy.stopped.contains { ($0 ?? []).contains(where: { $0.rawValue == name }) },
+            "the queued stop must actually be retried"
         )
         XCTAssertNil(
             groupDefaults?.stringArray(forKey: "evlin.reflectionLockPendingStops"),
-            "a stop that lands must leave the queue"
+            "and a stop that lands must leave the queue"
         )
     }
 
@@ -442,4 +474,13 @@ private final class MutableIdentityBox: @unchecked Sendable {
         get { lock.lock(); defer { lock.unlock() }; return stored }
         set { lock.lock(); stored = newValue; lock.unlock() }
     }
+}
+
+/// Counts `afterLocalMutation`, which the applier calls immediately after
+/// `addShield` — so a count of zero proves no shield was created.
+private final class MutationCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = 0
+    var count: Int { lock.lock(); defer { lock.unlock() }; return stored }
+    func bump() { lock.lock(); stored += 1; lock.unlock() }
 }
