@@ -381,6 +381,80 @@ final class ReflectionLockApplierTests: XCTestCase {
         spy.releaseStart()
     }
 
+    /// Pins the stall reporter's throttle at the five boundaries review specified.
+    /// The clock is the `now` `reconcile` already takes, so nothing waits.
+    ///
+    /// Without a throttle this fires on EVERY poll — about six a minute against a
+    /// 300-slot failure ring, which wipes every other piece of failure evidence
+    /// inside an hour. The reporter would destroy what it was added to protect.
+    func test_stalledDrainIsReportedAtMostOncePerThresholdWindow() async {
+        let sink = RecordedEvents()
+        MeteringFlightRecorder.testSink = { sink.append($0) }
+        defer { MeteringFlightRecorder.testSink = nil }
+
+        let store = ActiveLockStore()
+        let spy = BlockingLockSchedulerSpy()
+        let childID = UUID()
+        let stranded = "evlin.shield.stranded.stalled"
+        spy.blocksOnlyStopNamed = stranded
+        spy.blocksOnStart = false
+        spy.blockSeconds = 60
+        let applier = ReflectionLockApplier(
+            store: store,
+            scheduler: LockScheduler(activityScheduler: spy),
+            currentChildID: { childID }
+        )
+        groupDefaults?.set([stranded], forKey: pendingStopsKey)
+
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        // Pass 1 starts the drain, which parks in the daemon.
+        await applier.reconcile(snapshot: pendingSnapshot(rid: UUID()), childID: childID, now: t0)
+        var spins = 0
+        while !spy.stoppedNames.contains(stranded), spins < 20_000 {
+            await Task.yield()
+            spins += 1
+        }
+
+        func stalledCount() -> Int {
+            sink.all.filter {
+                ($0.app ?? "").contains("reflection.pendingStops.drain")
+                    && $0.reason == "stalled"
+            }.count
+        }
+
+        await applier.reconcile(
+            snapshot: pendingSnapshot(rid: UUID()), childID: childID,
+            now: t0.addingTimeInterval(299)
+        )
+        XCTAssertEqual(stalledCount(), 0, "299s is inside the window — nothing yet")
+
+        await applier.reconcile(
+            snapshot: pendingSnapshot(rid: UUID()), childID: childID,
+            now: t0.addingTimeInterval(300)
+        )
+        XCTAssertEqual(stalledCount(), 1, "300s reports exactly once")
+
+        await applier.reconcile(
+            snapshot: pendingSnapshot(rid: UUID()), childID: childID,
+            now: t0.addingTimeInterval(301)
+        )
+        XCTAssertEqual(stalledCount(), 1, "301s must not report again")
+
+        await applier.reconcile(
+            snapshot: pendingSnapshot(rid: UUID()), childID: childID,
+            now: t0.addingTimeInterval(600)
+        )
+        XCTAssertEqual(stalledCount(), 2, "a second window allows a second report")
+
+        // The queue length has to survive into the report, or the record says a
+        // drain is stuck without saying how much is stuck behind it.
+        XCTAssertTrue(
+            sink.all.contains { ($0.app ?? "").contains("queued=1") && $0.reason == "stalled" },
+            "the stall report must carry the queue length"
+        )
+        spy.releaseStart()
+    }
+
     private func makeApplier(
         store: ActiveLockStore,
         spy: LockSchedulerSpy,

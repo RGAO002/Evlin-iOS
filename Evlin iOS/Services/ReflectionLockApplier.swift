@@ -43,6 +43,20 @@ final class ReflectionLockApplier {
     private var pendingStopDrainStartedAt: Date?
     /// How long a drain may run before every skipped attempt reports it as stuck.
     private let drainStallThreshold: TimeInterval = 5 * 60
+    /// When the stall was last reported, so a stuck drain does not report on every
+    /// poll. `.meteringError` is never rate-limited by the flight recorder, and
+    /// the poller runs about every ten seconds — roughly six an hour became six a
+    /// MINUTE, which fills the 300-slot failure ring in under an hour and evicts
+    /// exactly the evidence that ring exists to keep. The reporter was destroying
+    /// the thing it was added to protect.
+    private var lastDrainStallReportAt: Date?
+    /// Reports per stuck drain. Throttling alone is not enough: one every five
+    /// minutes is ~288 a day, which still fills the ring. Twelve consecutive
+    /// reports establish the condition; the thirteenth adds nothing and starts
+    /// costing other evidence, so after an hour it goes quiet and the queue length
+    /// stays readable from the drain's own `started` record.
+    private let drainStallReportCap = 12
+    private var drainStallReportCount = 0
     private let currentChildID: () -> UUID?
     private let afterLocalMutation: () async -> Void
 
@@ -65,7 +79,7 @@ final class ReflectionLockApplier {
             // Trigger, never await — see `schedulePendingStopDrain`. This is also
             // the case that CREATES most of the backlog, since an identity switch
             // abandons whatever the previous child had armed.
-            schedulePendingStopDrain()
+            schedulePendingStopDrain(now: now)
             return
         }
         let sticky = loadSticky()
@@ -166,7 +180,7 @@ final class ReflectionLockApplier {
         }
         guard identityIsCurrent(childID) else { return }
         saveSticky(next)
-        schedulePendingStopDrain()
+        schedulePendingStopDrain(now: now)
     }
 
     /// Start the backlog drain and return immediately.
@@ -180,15 +194,17 @@ final class ReflectionLockApplier {
     ///
     /// A wedged drain now costs one gateway slot and nothing else. Single-flight,
     /// so a queue that cannot be drained does not accumulate tasks either.
-    private func schedulePendingStopDrain() {
+    private func schedulePendingStopDrain(now: Date) {
         let queued = loadPendingStops()
         guard !queued.isEmpty else { return }
         if pendingStopDrainInFlight {
-            reportDrainStallIfOverdue(queueLength: queued.count)
+            reportDrainStallIfOverdue(queueLength: queued.count, now: now)
             return
         }
         pendingStopDrainInFlight = true
-        pendingStopDrainStartedAt = Date()
+        pendingStopDrainStartedAt = now
+        lastDrainStallReportAt = nil
+        drainStallReportCount = 0
         MeteringFlightRecorder.emit(
             kind: .meteringWork,
             site: "reflection.pendingStops.drain",
@@ -207,22 +223,31 @@ final class ReflectionLockApplier {
             )
             self.pendingStopDrainInFlight = false
             self.pendingStopDrainStartedAt = nil
+            self.lastDrainStallReportAt = nil
+            self.drainStallReportCount = 0
         }
     }
 
-    /// A drain that has been in flight past the threshold is parked in the daemon
-    /// and will never finish. Report it every time a pass has to skip because of
-    /// it, so the black box shows a stuck maintenance task and a growing queue
-    /// instead of nothing at all.
-    private func reportDrainStallIfOverdue(queueLength: Int) {
+    /// A drain in flight past the threshold is parked in the daemon and will not
+    /// finish. Report it — but at most once per threshold window, and at most
+    /// `drainStallReportCap` times, because the report itself is unsuppressed.
+    private func reportDrainStallIfOverdue(queueLength: Int, now: Date) {
         guard let startedAt = pendingStopDrainStartedAt,
-              Date().timeIntervalSince(startedAt) >= drainStallThreshold
+              now.timeIntervalSince(startedAt) >= drainStallThreshold,
+              drainStallReportCount < drainStallReportCap
         else { return }
+        if let last = lastDrainStallReportAt,
+           now.timeIntervalSince(last) < drainStallThreshold {
+            return
+        }
+        lastDrainStallReportAt = now
+        drainStallReportCount += 1
         MeteringFlightRecorder.emitFailure(
             site: "reflection.pendingStops.drain",
             verdict: "stalled",
             detail: "queued=\(queueLength) "
-                + "stuckFor=\(Int(Date().timeIntervalSince(startedAt)))s"
+                + "stuckFor=\(Int(now.timeIntervalSince(startedAt)))s "
+                + "report=\(drainStallReportCount)/\(drainStallReportCap)"
         )
     }
 
