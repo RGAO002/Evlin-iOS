@@ -67,6 +67,18 @@ final class ReflectionLockApplier {
                 return
             }
             await scheduleOrDiagnose(rec, rid: rid)
+            // The schedule is a suspension point, so the device may have changed
+            // hands while it was in flight — and unlike the checks above, this one
+            // has to undo something that has already landed with Apple. Without
+            // it the schedule re-creates the previous family's activity AFTER its
+            // cleanup ran, and the ack below credits the lock to a child who is
+            // no longer on this device.
+            guard identityIsCurrent(childID) else {
+                await cancelOrDiagnose(rec.deviceActivityName, rid: rid)
+                await removeReflectionRecordIfOwned(rec)
+                clearReflectionStickyIfHeld(in: [rid])
+                return
+            }
             // §8.1 (Plan 7): first-sight honest payoff — tell the backend the kid
             // device APPLIED the all-apps reflection lock so the parent's
             // first-actions poll sees `lock_applied_at`. Best-effort, idempotent
@@ -82,7 +94,7 @@ final class ReflectionLockApplier {
             guard identityIsCurrent(childID) else { return }
             let name = ReflectionLockRecordFactory
                 .make(rid: rid, expiresAt: now, childID: childID).deviceActivityName
-            await scheduler.cancel(deviceActivityName: name)
+            await cancelOrDiagnose(name, rid: rid)
         case .swap(let releaseRID, let applyRID, let expiresAt):
             let releaseKey = "all:reflection:\(releaseRID.uuidString)"
             let held = await store.allCurrent().shields.first { $0.recordKey == releaseKey }
@@ -91,8 +103,14 @@ final class ReflectionLockApplier {
                 _ = await store.removeShield(recordKey: releaseKey)
             }
             guard identityIsCurrent(childID) else { return }
-            await scheduler.cancel(deviceActivityName: ReflectionLockRecordFactory
-                .make(rid: releaseRID, expiresAt: now, childID: childID).deviceActivityName)
+            await cancelOrDiagnose(
+                ReflectionLockRecordFactory
+                    .make(rid: releaseRID, expiresAt: now, childID: childID).deviceActivityName,
+                rid: releaseRID
+            )
+            // The cancel suspended. Re-verify BEFORE adding a shield, or a device
+            // that changed hands mid-swap gets the previous child's all-app lock.
+            guard identityIsCurrent(childID) else { return }
             let rec = ReflectionLockRecordFactory.make(rid: applyRID, expiresAt: expiresAt, childID: childID)
             _ = await store.addShield(rec, force: true)
             await afterLocalMutation()
@@ -102,6 +120,12 @@ final class ReflectionLockApplier {
                 return
             }
             await scheduleOrDiagnose(rec, rid: applyRID)
+            guard identityIsCurrent(childID) else {
+                await cancelOrDiagnose(rec.deviceActivityName, rid: applyRID)
+                await removeReflectionRecordIfOwned(rec)
+                clearReflectionStickyIfHeld(in: [releaseRID, applyRID])
+                return
+            }
             postLockAppliedBestEffort(childID: childID, rid: applyRID)
         }
         guard identityIsCurrent(childID) else { return }
@@ -151,6 +175,20 @@ final class ReflectionLockApplier {
 
     /// Schedule the DAM auto-removal; on failure DO NOT swallow — record a diagnostic
     /// (a failed schedule means no OS timer, so the lock could outlive its lease).
+    /// A refused cancel leaves a live activity nobody claims. Record it in the
+    /// same slot the schedule failures use so the next diagnostics read shows it,
+    /// rather than letting the caller assume the stop happened.
+    private func cancelOrDiagnose(_ deviceActivityName: String, rid: UUID) async {
+        guard await scheduler.cancel(deviceActivityName: deviceActivityName) else {
+            defaults?.set(
+                "ts=\(Date().timeIntervalSince1970) cancel_refused "
+                    + "key=all:reflection:\(rid.uuidString) name=\(deviceActivityName)",
+                forKey: scheduleFailureKey
+            )
+            return
+        }
+    }
+
     private func scheduleOrDiagnose(_ rec: ShieldRecord, rid: UUID) async {
         do {
             try await scheduler.schedule(record: rec)

@@ -54,12 +54,21 @@ nonisolated struct LockScheduler: Sendable {
         }
     }
 
-    func cancel(deviceActivityName: String) async {
+    /// `false` means the stop never reached the daemon — the gateway refused
+    /// because too many calls are already wedged.
+    ///
+    /// Callers must not read that as "cancelled". Discarding it let a release or
+    /// a swap carry on believing the old activity was gone while it was still
+    /// live and, worse, with nothing recorded to retry from: activities that
+    /// nobody claims are invisible to the planner's own 20-slot quota check, so
+    /// they accumulate until a legitimate arm gets `excessiveActivities`.
+    @discardableResult
+    func cancel(deviceActivityName: String) async -> Bool {
         let scheduler = activityScheduler
         let name = DeviceActivityName(deviceActivityName)
-        _ = await MeteringDeviceActivityGateway.perform("reflection.cancel") {
+        return await MeteringDeviceActivityGateway.perform("reflection.cancel") {
             scheduler.stopMonitoring([name])
             return true
-        }
+        } ?? false
     }
 }
