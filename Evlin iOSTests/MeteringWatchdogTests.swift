@@ -14,12 +14,14 @@ final class MeteringWatchdogTests: XCTestCase {
     override func setUp() {
         super.setUp()
         captured = []
+        EarnedTimeStore.shared.usageCountingAllowed = true
         MeteringFlightRecorder.testSink = { [weak self] event in
             self?.captured.append(event)
         }
     }
 
     override func tearDown() {
+        EarnedTimeStore.shared.usageCountingAllowed = true
         MeteringFlightRecorder.testSink = nil
         captured = []
         super.tearDown()
@@ -204,6 +206,19 @@ final class MeteringWatchdogTests: XCTestCase {
         XCTAssertEqual(fixture.healCalls, 2)
     }
 
+    func testExpectedCoverageExhaustionWhileAccountingPausedDoesNotRekick() async throws {
+        let fixture = try WatchdogFixture()
+        defer { fixture.cleanup() }
+        try fixture.armDaemon()
+        try fixture.setAccountingPausedWithExhaustedCoverage()
+        EarnedTimeStore.shared.usageCountingAllowed = false
+
+        await fixture.makeWatchdog().run(trigger: "task_pause")
+
+        XCTAssertEqual(fixture.healCalls, 0)
+        XCTAssertEqual(events(kind: .meteringWatch).last?.reason, "green")
+    }
+
     func testSelfCheckIntervalThrottlesRunIfDue() async throws {
         let fixture = try WatchdogFixture()
         defer { fixture.cleanup() }
@@ -342,6 +357,21 @@ private final class WatchdogFixture: @unchecked Sendable {
                 requiredThroughUsageDate: "2026-07-25",
                 readyThroughUsageDate: "2026-07-25",
                 status: .ready,
+                refreshedAt: self.start,
+                errorCode: nil
+            )
+        }
+    }
+
+    func setAccountingPausedWithExhaustedCoverage() throws {
+        try store.transaction(expectedOwner: owner) { state in
+            state.epochs[self.epochID]?.status = .paused
+            state.coverage = MonitorCoverageState(
+                ownerChildDeviceID: self.owner,
+                requiredFromUsageDate: "2026-07-18",
+                requiredThroughUsageDate: "2026-07-25",
+                readyThroughUsageDate: nil,
+                status: .coverageExhausted,
                 refreshedAt: self.start,
                 errorCode: nil
             )

@@ -290,7 +290,11 @@ nonisolated final class MeteringWatchdog: @unchecked Sendable {
             owner: owner,
             usageDate: route.usageDate
         )
-        if let coverageRed {
+        let expectedAccountingPause =
+            !EarnedTimeStore.shared.usageCountingAllowed &&
+            state.epochs[route.epochID]?.status == .paused
+        if let coverageRed,
+           !(expectedAccountingPause && coverageRed == "coverage_exhausted") {
             reds.append(coverageRed)
         }
 
