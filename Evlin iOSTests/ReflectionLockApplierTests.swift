@@ -17,7 +17,12 @@ final class ReflectionLockApplierTests: XCTestCase {
         groupDefaults?.removeObject(forKey: scheduleFailureKey)
         groupDefaults?.removeObject(forKey: "evlin.shieldRecords")
         groupDefaults?.removeObject(forKey: "evlin.blockRecords")
+        // The backlog is persisted, so without this one test's stranded stop is
+        // retried inside the next one and shows up as a phantom extra `stop`.
+        groupDefaults?.removeObject(forKey: pendingStopsKey)
     }
+
+    private let pendingStopsKey = "evlin.reflectionLockPendingStops"
 
     // MARK: - Fixtures
 
@@ -246,7 +251,7 @@ final class ReflectionLockApplierTests: XCTestCase {
             "pass 1's stop must have been refused, not delivered"
         )
         XCTAssertEqual(
-            groupDefaults?.stringArray(forKey: "evlin.reflectionLockPendingStops"),
+            groupDefaults?.stringArray(forKey: pendingStopsKey),
             [name],
             "a refused stop must enqueue itself; a log line is not a retry"
         )
@@ -258,14 +263,77 @@ final class ReflectionLockApplierTests: XCTestCase {
             snapshot: resolvedSnapshot(rid: rid, resolution: .approved),
             childID: childID
         )
+        // The drain is deliberately NOT awaited by `reconcile` any more, so wait
+        // for the background task rather than assuming it finished.
+        var drainSpins = 0
+        while groupDefaults?.stringArray(forKey: pendingStopsKey) != nil,
+              drainSpins < 20_000 {
+            await Task.yield()
+            drainSpins += 1
+        }
         XCTAssertTrue(
             spy.stopped.contains { ($0 ?? []).contains(where: { $0.rawValue == name }) },
             "the queued stop must actually be retried"
         )
         XCTAssertNil(
-            groupDefaults?.stringArray(forKey: "evlin.reflectionLockPendingStops"),
+            groupDefaults?.stringArray(forKey: pendingStopsKey),
             "and a stop that lands must leave the queue"
         )
+    }
+
+    /// The drain must not be on the poller's await chain at all.
+    ///
+    /// BigKidStatePoller awaits `reconcile` and then replays metering callbacks,
+    /// applies the UI snapshot and reconciles the pool. Awaiting the drain — even
+    /// after committing the current reflection work — meant one historical stop
+    /// that entered the daemon and never returned froze all of that and left
+    /// `isFetchInFlight` set for good. Responsive UI made it invisible.
+    ///
+    /// Asserted on elapsed time rather than on "did it hang", so the difference is
+    /// deterministic: with the drain awaited this call cannot return until the
+    /// parked stop gives up, which is `blockSeconds` away.
+    func test_wedgedBacklogStopDoesNotBlockReconcileFromReturning() async {
+        let blockSeconds: TimeInterval = 20
+        let store = ActiveLockStore()
+        let spy = BlockingLockSchedulerSpy()
+        let childID = UUID()
+        let stranded = "evlin.shield.stranded.forever"
+        spy.blocksOnlyStopNamed = stranded
+        spy.blocksOnStart = false
+        spy.blockSeconds = blockSeconds
+        let applier = ReflectionLockApplier(
+            store: store,
+            scheduler: LockScheduler(activityScheduler: spy),
+            currentChildID: { childID }
+        )
+        groupDefaults?.set([stranded], forKey: pendingStopsKey)
+
+        let started = Date()
+        await applier.reconcile(snapshot: pendingSnapshot(rid: UUID()), childID: childID)
+        let elapsed = Date().timeIntervalSince(started)
+
+        XCTAssertLessThan(
+            elapsed,
+            blockSeconds / 4,
+            "reconcile waited on the backlog: a stop parked in the daemon must not "
+                + "hold up metering replay, the UI snapshot or the pool reconcile"
+        )
+        // Prove the wedge was real rather than absent.
+        var spins = 0
+        while !spy.stoppedNames.contains(stranded), spins < 20_000 {
+            await Task.yield()
+            spins += 1
+        }
+        XCTAssertTrue(
+            spy.stoppedNames.contains(stranded),
+            "the backlog drain must actually have been attempted"
+        )
+        XCTAssertEqual(
+            groupDefaults?.stringArray(forKey: pendingStopsKey),
+            [stranded],
+            "a stop still parked in the daemon stays queued — only success dequeues"
+        )
+        spy.releaseStart()
     }
 
     private func makeApplier(
@@ -438,7 +506,8 @@ private final class BlockingLockSchedulerSpy: DeviceActivityScheduling, @uncheck
 
     func startMonitoring(_ name: DeviceActivityName, during schedule: DeviceActivitySchedule) throws {
         lock.lock(); _startedNames.append(name.rawValue); lock.unlock()
-        _ = release.wait(timeout: .now() + 10)
+        guard blocksOnStart else { return }
+        _ = release.wait(timeout: .now() + blockSeconds)
     }
 
     func startMonitoring(
@@ -452,9 +521,22 @@ private final class BlockingLockSchedulerSpy: DeviceActivityScheduling, @uncheck
     /// Set before use to hold the caller inside `stopMonitoring` instead —
     /// `.swap` cancels before it adds its shield, so that is where its window is.
     var blocksOnStop = false
+    /// Block only this activity, so a test can wedge the backlog drain without
+    /// also wedging the current pass's own cancel.
+    var blocksOnlyStopNamed: String?
+    var blockSeconds: TimeInterval = 10
+    /// Whether `startMonitoring` parks. On for the `.apply` identity window, off
+    /// when a test only wants to wedge a stop — otherwise the start's own block
+    /// dominates whatever the test is measuring.
+    var blocksOnStart = true
 
     func stopMonitoring(_ activities: [DeviceActivityName]) {
         lock.lock(); _stoppedNames.append(contentsOf: activities.map(\.rawValue)); lock.unlock()
+        if let target = blocksOnlyStopNamed {
+            guard activities.contains(where: { $0.rawValue == target }) else { return }
+            _ = release.wait(timeout: .now() + blockSeconds)
+            return
+        }
         guard blocksOnStop else { return }
         _ = release.wait(timeout: .now() + 10)
     }

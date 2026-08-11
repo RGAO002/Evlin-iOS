@@ -32,6 +32,10 @@ final class ReflectionLockApplier {
     /// Cap per pass so a backlog cannot monopolise the gateway's four slots and
     /// starve the enforcement work this same call is here to do.
     private let pendingStopsPerPass = 4
+    /// At most one background drain at a time. An instance flag, not a static:
+    /// BigKidStatePoller holds this applier for its lifetime, so the instance is
+    /// the right scope — and it keeps tests from inheriting each other's state.
+    private var pendingStopDrainInFlight = false
     private let currentChildID: () -> UUID?
     private let afterLocalMutation: () async -> Void
 
@@ -51,10 +55,10 @@ final class ReflectionLockApplier {
 
     func reconcile(snapshot: ChildStateResponse, childID: UUID, now: Date = Date()) async {
         guard identityIsCurrent(childID) else {
-            // No current enforcement to do, so the whole pass can go to the
-            // backlog. This is also the case that CREATES most of it, since an
-            // identity switch abandons whatever the previous child had armed.
-            await drainPendingStops()
+            // Trigger, never await — see `schedulePendingStopDrain`. This is also
+            // the case that CREATES most of the backlog, since an identity switch
+            // abandons whatever the previous child had armed.
+            schedulePendingStopDrain()
             return
         }
         let sticky = loadSticky()
@@ -155,13 +159,27 @@ final class ReflectionLockApplier {
         }
         guard identityIsCurrent(childID) else { return }
         saveSticky(next)
-        // Backlog LAST, never first. A per-pass cap does not bound a wedged XPC:
-        // one historical stop that enters the daemon and never returns would make
-        // the drain never finish, and draining first meant the current apply or
-        // release never ran at all — the reflection state machine would stop
-        // advancing entirely. Draining here can only delay the NEXT pass's
-        // backlog, never this pass's enforcement.
-        await drainPendingStops()
+        schedulePendingStopDrain()
+    }
+
+    /// Start the backlog drain and return immediately.
+    ///
+    /// Moving the drain after the current enforcement was not enough: `reconcile`
+    /// still awaited it, and BigKidStatePoller awaits `reconcile` before it
+    /// replays metering callbacks, applies the UI snapshot and reconciles the
+    /// pool. So a historical stop that enters the daemon and never returns froze
+    /// the entire back half of every poll and left `isFetchInFlight` set for good.
+    /// It was easy to miss precisely because the UI thread stayed responsive.
+    ///
+    /// A wedged drain now costs one gateway slot and nothing else. Single-flight,
+    /// so a queue that cannot be drained does not accumulate tasks either.
+    private func schedulePendingStopDrain() {
+        guard !pendingStopDrainInFlight, !loadPendingStops().isEmpty else { return }
+        pendingStopDrainInFlight = true
+        Task { [weak self] in
+            await self?.drainPendingStops()
+            self?.pendingStopDrainInFlight = false
+        }
     }
 
     private func identityIsCurrent(_ expectedChildID: UUID) -> Bool {
