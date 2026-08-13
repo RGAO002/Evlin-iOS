@@ -342,9 +342,11 @@ nonisolated final class EarnedV2CallbackJournal: @unchecked Sendable {
             }
             let data = try Self.encoder.encode(entries)
             defaults.set(data, forKey: Self.storageKey)
-            guard defaults.synchronize(),
-                  defaults.data(forKey: Self.storageKey) == data
-            else {
+            // `synchronize()` is only a flush hint and can report false even
+            // when the App-Group bytes are already readable. Exact byte
+            // readback remains the durability gate.
+            _ = defaults.synchronize()
+            guard defaults.data(forKey: Self.storageKey) == data else {
                 throw EarnedV2CallbackJournalError.durableReadbackMismatch
             }
         }

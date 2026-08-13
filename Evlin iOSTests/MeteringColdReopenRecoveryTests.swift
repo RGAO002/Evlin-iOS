@@ -236,6 +236,48 @@ final class MeteringColdReopenRecoveryTests: XCTestCase {
         XCTAssertEqual(transport.requestCount, 1)
     }
 
+    func testCompactEarnedCallbackTrustsExactReadbackWhenSynchronizeHintIsFalse() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanUp() }
+        let suiteName = "metering-callback-sync-hint-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(FalseSynchronizeCallbackDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let journal = EarnedV2CallbackJournal(defaults: defaults)
+        let activeRoute = try activateTodayRoute(in: fixture)
+        let callbackClock = ColdReopenCallbackClock(
+            now: fixture.clock.now.addingTimeInterval(5 * 60)
+        )
+        let callback = EarnedMeteringCallback(
+            store: fixture.store,
+            clock: callbackClock,
+            journal: journal
+        )
+        let transport = ColdReopenRecordingTransport(owner: fixture.owner)
+
+        _ = try callback.handleDurably(
+            MeteringAppleCallback(
+                activityName: activeRoute.activityName,
+                eventName: MeteringRouteNamespace.eventName(
+                    routeID: activeRoute.routeID,
+                    thresholdMinutes: 5
+                ),
+                observedAt: callbackClock.now
+            ),
+            expectedOwnerChildDeviceID: fixture.owner
+        )
+        defaults.synchronizeResult = false
+
+        let delivered = try await journal.submitPendingTransport(
+            owner: fixture.owner,
+            baseURL: URL(string: "https://example.invalid/api/v1")!,
+            transport: transport,
+            recordedAt: callbackClock.now
+        )
+
+        XCTAssertEqual(delivered, 1)
+        XCTAssertNotNil(try journal.pending(owner: fixture.owner).first?.transportReceipt)
+    }
+
     func testCompactEarnedCallbackKeepsFactWhenTransportFails() async throws {
         let fixture = try makeFixture()
         defer { fixture.cleanUp() }
@@ -836,5 +878,14 @@ private final class ColdReopenRecordingTransport: MeteringHTTPTransport, @unchec
             warning: nil
         )
         return (try JSONEncoder().encode(snapshot), response)
+    }
+}
+
+private final class FalseSynchronizeCallbackDefaults: UserDefaults {
+    var synchronizeResult = true
+
+    override func synchronize() -> Bool {
+        _ = super.synchronize()
+        return synchronizeResult
     }
 }
