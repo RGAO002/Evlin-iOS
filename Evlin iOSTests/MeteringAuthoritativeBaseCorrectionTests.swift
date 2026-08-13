@@ -334,6 +334,57 @@ final class MeteringAuthoritativeBaseCorrectionTests: XCTestCase {
         })
     }
 
+    /// The dead end this exists to prevent, on the path where it can actually
+    /// happen: the bootstrap/initial correction, where there is NO live prior
+    /// route to fall back to. Refusing a second 409 there left the device with
+    /// a candidate that could never register — installer deferring
+    /// `registrationRequired` every minute, zero samples, pool frozen for the
+    /// rest of the day (Fred's K-iPhone, 2026-08-13). A second 409 whose
+    /// authoritative base MOVED must be adopted.
+    func testSecondInitialBaseMismatchWithMovedBaseMintsAnotherCorrection() async throws {
+        let fixture = try CorrectionFixture(owner: owner, start: start, initialBootstrap: true)
+        defer { fixture.cleanup() }
+        fixture.transport.results = [fixture.authoritativeConflict(estimatedMinutes: 40)]
+        await fixture.delivery.drain(owner: owner)
+        let afterFirst = try fixture.store.read()
+        let firstCorrected = try XCTUnwrap(afterFirst.epochs.values.first {
+            $0.baseAcceptedMinutes == 40 && $0.baseSource == .registrationConflict409
+        })
+        XCTAssertEqual(firstCorrected.baseCorrectionState, .used)
+
+        // The kid kept using the phone between attempts, so the server's
+        // authoritative number moved on: 40 → 46. The first drain already
+        // burned one attempt on an empty transport (network_error), so the
+        // retry needs a LATER clock for its backoff to elapse — same pattern
+        // as the other multi-drain tests in this file.
+        fixture.transport.results = [fixture.authoritativeConflict(estimatedMinutes: 46)]
+        let laterDelivery = MeteringEpochDelivery(
+            baseURL: URL(string: "https://example.invalid/api/v1")!,
+            store: fixture.store,
+            transport: fixture.transport,
+            clock: CorrectionClock(now: start.addingTimeInterval(30 * 60))
+        )
+        await laterDelivery.drain(owner: owner)
+
+        let final = try fixture.store.read()
+        XCTAssertEqual(final.epochs[firstCorrected.epochID]?.status, .retired)
+        let second = try XCTUnwrap(final.epochs.values.first {
+            $0.baseAcceptedMinutes == 46 && $0.baseSource == .registrationConflict409
+        })
+        XCTAssertEqual(second.status, .active)
+        let secondRoute = try XCTUnwrap(
+            final.routes.values.first { $0.epochID == second.epochID }
+        )
+        XCTAssertEqual(
+            final.registrationWork.values.first {
+                $0.epochID == second.epochID && $0.routeID == secondRoute.routeID
+            }?.retry.terminal,
+            .pending,
+            "a re-corrected candidate must have registration work queued — "
+                + "otherwise the installer defers registrationRequired forever"
+        )
+    }
+
     func testPriorAndCorrectedCallbacksUseCumulativeMaximumNotSum() async throws {
         let fixture = try CorrectionFixture(owner: owner, start: start)
         defer { fixture.cleanup() }
@@ -693,16 +744,36 @@ final class MeteringAuthoritativeBaseCorrectionTests: XCTestCase {
                 }
             }
             // A candidate the backend has not acknowledged may not dispatch
-            // samples at all, so the in-flight race this test exists for is
-            // unreachable until its activation has succeeded. Acknowledge it
-            // here; the race being pinned is the correction arriving while
+            // samples at all (isSampleDispatchable's pendingCandidateActivation
+            // gate demands EXACTLY ONE succeeded activation row), so the
+            // in-flight race this test exists for is unreachable until its
+            // activation has succeeded. The fixture carries no activation work
+            // at all — the old "mark whatever exists succeeded" loop iterated
+            // an empty dictionary and the sample starved before the race even
+            // started. Create the acknowledged row the comment always claimed
+            // was here; the race being pinned is the correction arriving while
             // that sample is on the wire, not the activation ordering.
-            for (key, var activation) in state.activationWork
-            where activation.routeID == fixture.rejectedRouteID {
-                activation.retry.terminal = .succeeded
-                activation.retry.lastErrorCode = nil
-                state.activationWork[key] = activation
-            }
+            let activationID = UUID(uuidString: "20000000-0000-4000-8000-000000000006")!
+            state.activationWork[activationID] = EpochActivationWork(
+                workID: activationID,
+                ownerChildDeviceID: fixture.owner,
+                epochID: fixture.rejectedEpochID,
+                routeID: fixture.rejectedRouteID,
+                request: EpochActivationRequestDTO(
+                    protocolVersion: 2,
+                    deviceID: fixture.owner,
+                    routeID: fixture.rejectedRouteID,
+                    verifiedAt: start
+                ),
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 1,
+                    nextAttemptAt: start,
+                    lastErrorCode: nil,
+                    terminal: .succeeded
+                ),
+                createdAt: start
+            )
         }
         let requestStarted = expectation(description: "rejected candidate sample dispatched")
         let suspended = CorrectionSuspendingTransport(

@@ -6731,8 +6731,10 @@ extension DeviceEpochStoreState {
             now: now
         )
 
-        // A correction is intentionally single-use. A second 409 leaves the
-        // functioning prior route in place, but cannot mint a third candidate.
+        // A correction is intentionally single-use. The cutoverReady invariant
+        // guarantees a LIVE prior route here, so a second 409 falls back to it
+        // and mints nothing. (The dead-end case — no live prior — is the
+        // INITIAL path below, where the budget is relaxed.)
         guard correctionAvailable else {
             v2RouteHandoff = nil
             return false
@@ -7137,7 +7139,21 @@ extension DeviceEpochStoreState {
               rejectedEpoch.registeredAt == nil,
               (rejectedEpoch.authoritativeBaseConflict == nil
                   || rejectedEpoch.authoritativeBaseConflict == conflict),
-              rejectedEpoch.baseCorrectionState == .available,
+              // The correction budget is single-use to stop a LOOP, not to
+              // stop progress. On this path there is no live prior route to
+              // fall back to (no handoff, no active route), so refusing a
+              // second 409 left the device with a candidate that could never
+              // register: the installer deferred `registrationRequired` every
+              // minute, no sample was ever sent, and the pool stayed frozen
+              // for the rest of the day while the parent's badge still read
+              // ACTIVE (Fred's K-iPhone, 2026-08-13 15:00 onward — per-app
+              // limits kept counting, the pool did not). A second 409 whose
+              // authoritative base MOVED is new information (minutes accrued
+              // between attempts) and must be adoptable; one repeating the
+              // number we already adopted is a real loop and stays refused.
+              (rejectedEpoch.baseCorrectionState == .available
+                  || rejectedEpoch.baseAcceptedMinutes
+                      != conflict.authoritativeSnapshot.estimatedMinutes),
               conflict.authoritativeSnapshot.childDeviceID == owner,
               conflict.authoritativeSnapshot.usageDate == rejectedEpoch.usageDate,
               conflict.authoritativeSnapshot.usageDate == rejectedRoute.usageDate,
