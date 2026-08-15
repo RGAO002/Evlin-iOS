@@ -77,6 +77,13 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     }
 
     override func intervalDidStart(for activity: DeviceActivityName) {
+        let memoryTrace = DAMMemoryTrace.shared
+        let traceContext = memoryTrace.begin(
+            kind: .intervalStart,
+            activityName: activity.rawValue,
+            eventName: nil
+        )
+        defer { memoryTrace.mark(traceContext, stage: .exit) }
         super.intervalDidStart(for: activity)
 
         let raw = activity.rawValue
@@ -96,13 +103,16 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             let project: ([String: ShieldRecord]) -> Void = { [weak self] shields in
                 self?.recomputeAndApplyShields(shields)
             }
-            awaitBounded {
+            memoryTrace.mark(traceContext, stage: .beforeState)
+            awaitBounded(traceContext: traceContext) {
                 await DAMMeteringEntry.shared.recoverMeteringIfConfigured()
             }
+            memoryTrace.mark(traceContext, stage: .afterState)
             Task { @MainActor in
                 await DAMMeteringEntry.shared.recoverShieldEffectsIfConfigured(
                     projectShields: project
                 )
+                memoryTrace.mark(traceContext, stage: .afterShield)
             }
             return
         }
@@ -209,6 +219,13 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     }
 
     override func intervalDidEnd(for activity: DeviceActivityName) {
+        let memoryTrace = DAMMemoryTrace.shared
+        let traceContext = memoryTrace.begin(
+            kind: .intervalEnd,
+            activityName: activity.rawValue,
+            eventName: nil
+        )
+        defer { memoryTrace.mark(traceContext, stage: .exit) }
         super.intervalDidEnd(for: activity)
 
         let raw = activity.rawValue
@@ -225,13 +242,16 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             let project: ([String: ShieldRecord]) -> Void = { [weak self] shields in
                 self?.recomputeAndApplyShields(shields)
             }
-            awaitBounded {
+            memoryTrace.mark(traceContext, stage: .beforeState)
+            awaitBounded(traceContext: traceContext) {
                 await DAMMeteringEntry.shared.recoverMeteringIfConfigured()
             }
+            memoryTrace.mark(traceContext, stage: .afterState)
             Task { @MainActor in
                 await DAMMeteringEntry.shared.recoverShieldEffectsIfConfigured(
                     projectShields: project
                 )
+                memoryTrace.mark(traceContext, stage: .afterShield)
             }
             return
         }
@@ -267,6 +287,21 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
 
     override func eventDidReachThreshold(_ event: DeviceActivityEvent.Name,
                                          activity: DeviceActivityName) {
+        let traceKind: DAMMemoryTrace.CallbackKind
+        if activity.rawValue.hasPrefix(MeteringRouteNamespace.prefix) {
+            traceKind = .thresholdPool
+        } else if activity.rawValue.hasPrefix("evlin.limit.v2.") {
+            traceKind = .thresholdAppLimit
+        } else {
+            traceKind = .thresholdOther
+        }
+        let memoryTrace = DAMMemoryTrace.shared
+        let traceContext = memoryTrace.begin(
+            kind: traceKind,
+            activityName: activity.rawValue,
+            eventName: event.rawValue
+        )
+        defer { memoryTrace.mark(traceContext, stage: .exit) }
         super.eventDidReachThreshold(event, activity: activity)
 #if DEBUG
         let thresholdEntryCount =
@@ -338,11 +373,19 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                 nums: ScreenTimeEvent.Nums(threshold: parsed?.thresholdMinutes),
                 corrID: parsed?.routeID
             )
-            handleV2MeteringThreshold(event: event, activity: activity)
+            handleV2MeteringThreshold(
+                event: event,
+                activity: activity,
+                traceContext: traceContext
+            )
             return
         }
         if activity.rawValue.hasPrefix("evlin.limit.v2.") {
-            handleValidatedAppLimitThreshold(event: event, activity: activity)
+            handleValidatedAppLimitThreshold(
+                event: event,
+                activity: activity,
+                traceContext: traceContext
+            )
             return
         }
 
@@ -390,29 +433,55 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     /// And if the wait expires, the entry is still durably queued and the app's
     /// foreground drain still picks it up — i.e. exactly today's behaviour.
     /// This can only make delivery earlier, never later.
-    private func awaitBounded(_ work: @escaping @Sendable () async -> Void) {
+    private func awaitBounded(
+        traceContext: DAMMemoryTrace.Context? = nil,
+        _ work: @escaping @Sendable () async -> Void
+    ) {
+        if let traceContext {
+            DAMMemoryTrace.shared.mark(traceContext, stage: .beforeDrain)
+        }
         let done = DispatchSemaphore(value: 0)
         Task.detached(priority: .utility) {
-            defer { done.signal() }
+            defer {
+                if let traceContext {
+                    DAMMemoryTrace.shared.mark(
+                        traceContext,
+                        stage: .afterDrainWait,
+                        flags: .asyncCompleted
+                    )
+                }
+                done.signal()
+            }
             await work()
         }
-        _ = done.wait(timeout: .now() + Self.drainWaitSeconds)
+        let result = done.wait(timeout: .now() + Self.drainWaitSeconds)
+        if let traceContext {
+            DAMMemoryTrace.shared.mark(
+                traceContext,
+                stage: .afterDrainWait,
+                flags: result == .success ? .waitCompleted : .waitTimedOut
+            )
+        }
     }
 
     private func handleV2MeteringThreshold(
         event: DeviceActivityEvent.Name,
-        activity: DeviceActivityName
+        activity: DeviceActivityName,
+        traceContext: DAMMemoryTrace.Context
     ) {
         let project: ([String: ShieldRecord]) -> Void = { [weak self] shields in
             self?.recomputeAndApplyShields(shields)
         }
         do {
+            DAMMemoryTrace.shared.mark(traceContext, stage: .beforeState)
             let outcome = try DAMMeteringEntry.shared.handle(
                 activityName: activity.rawValue,
                 eventName: event.rawValue,
                 observedAt: Date(),
                 projectShields: project
             )
+            DAMMemoryTrace.shared.mark(traceContext, stage: .afterState)
+            DAMMemoryTrace.shared.mark(traceContext, stage: .afterJournal)
             // Observability (no behavior change): record every callback outcome in
             // ALL builds, and emit an uploadable drop event whenever the guard
             // discards a callback. A silently-dropped late callback is exactly what
@@ -428,6 +497,11 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             }
             NSLog("[Evlin/Ext] v2 metering callback %@", String(describing: outcome))
         } catch {
+            DAMMemoryTrace.shared.mark(
+                traceContext,
+                stage: .afterState,
+                flags: .failed
+            )
 #if DEBUG
             defaults?.set(
                 "\(ISO8601DateFormatter().string(from: Date())) failed=\(String(describing: error))",
@@ -447,13 +521,14 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         // The journal import and network drain are non-MainActor work. Wait for
         // them briefly before this synchronous extension callback returns, or
         // iOS can suspend the extension with a valid sample stranded on disk.
-        awaitBounded {
+        awaitBounded(traceContext: traceContext) {
             await DAMMeteringEntry.shared.deliverPendingCallbacksIfConfigured()
         }
         Task { @MainActor in
             await DAMMeteringEntry.shared.recoverShieldEffectsIfConfigured(
                 projectShields: project
             )
+            DAMMemoryTrace.shared.mark(traceContext, stage: .afterShield)
         }
     }
 
@@ -485,7 +560,8 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
 
     private func handleValidatedAppLimitThreshold(
         event: DeviceActivityEvent.Name,
-        activity: DeviceActivityName
+        activity: DeviceActivityName,
+        traceContext: DAMMemoryTrace.Context
     ) {
         let context = EarnedTimeStore.shared.currentPolicyDateContext()
         // Record the ARRIVAL — but as a single defaults key, NEVER a durable
@@ -503,6 +579,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             forKey: "evlin.appLimit.lastCallback"
         )
         do {
+            DAMMemoryTrace.shared.mark(traceContext, stage: .beforeState)
             let decision = try appLimitCallbackValidator.process(
                 activityName: activity.rawValue,
                 eventName: event.rawValue,
@@ -512,6 +589,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             ) { [self] callback in
                 try appLimitEffectJournal.enqueue(callback)
             }
+            DAMMemoryTrace.shared.mark(traceContext, stage: .afterState)
             switch decision {
             case .rejected(let reason):
                 NSLog("[Evlin/Ext] app limit callback rejected: %@", reason)
@@ -526,15 +604,23 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                 )
                 return
             case .accepted:
+                DAMMemoryTrace.shared.mark(traceContext, stage: .afterJournal)
                 break
             }
-            drainAcceptedAppLimitEffects()
+            drainAcceptedAppLimitEffects(traceContext: traceContext)
         } catch {
+            DAMMemoryTrace.shared.mark(
+                traceContext,
+                stage: .afterState,
+                flags: .failed
+            )
             NSLog("[Evlin/Ext] app limit callback validation failed: %@", String(describing: error))
         }
     }
 
-    private func drainAcceptedAppLimitEffects() {
+    private func drainAcceptedAppLimitEffects(
+        traceContext: DAMMemoryTrace.Context? = nil
+    ) {
         do {
             while let claim = try appLimitEffectJournal.claimNext(
                 workerID: appLimitEffectWorkerID
@@ -559,7 +645,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                     // `awaitBounded`. The per-app ladder is the one a parent watches
                     // hit its budget, so a report that lands only when someone opens
                     // the app is a limit that appears not to work.
-                    awaitBounded {
+                    awaitBounded(traceContext: traceContext) {
                         do {
                             _ = try await journal.submitUsage(
                                 claim,
@@ -576,6 +662,9 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                 }
                 if claim.effect.key.effectKind == .enforcement {
                     projectLimitShield(callback: claim.effect.callback)
+                    if let traceContext {
+                        DAMMemoryTrace.shared.mark(traceContext, stage: .afterShield)
+                    }
                 }
             }
         } catch {

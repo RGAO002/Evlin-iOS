@@ -190,6 +190,7 @@
 				Services/AppLimitRuleStore.swift,
 				Services/AppLimitUsageReporter.swift,
 				Services/DatedRouteInstaller.swift,
+				Services/DAMMemoryTrace.swift,
 				Services/DefaultLockGroup.swift,
 				Services/DefaultLockGroupStore.swift,
 				Services/DeviceEpochStore.swift,

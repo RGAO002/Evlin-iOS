@@ -281,6 +281,9 @@ final class MeteringDaemonDiagnosticsViewTests: XCTestCase {
         ] {
             XCTAssertFalse(source.contains(forbidden), "read-only diagnostic view contains \(forbidden)")
         }
+        XCTAssertTrue(source.contains("DAM callback memory trace"))
+        XCTAssertTrue(source.contains("DAMMemoryTrace.shared.readRecords()"))
+        XCTAssertFalse(source.contains("ScreenTimeEventLog"))
     }
 
     func testKidDiagnosticEntryLivesInCommandDeliveryNotParentControls() throws {

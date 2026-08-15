@@ -20,6 +20,8 @@ struct MeteringDaemonDiagnosticsView: View {
         entries: []
     )
     @State private var pendingWork: MeteringDaemonPendingWorkEvidence?
+    @State private var memoryTraceRecords: [DAMMemoryTrace.Record] = []
+    @State private var memoryTraceExportText = "No DAM memory trace recorded."
 
     var body: some View {
         List {
@@ -76,6 +78,55 @@ struct MeteringDaemonDiagnosticsView: View {
                 ForEach(snapshot.namespaceCounts, id: \.namespace) { item in
                     row(item.namespace, String(item.count))
                 }
+            }
+
+            Section {
+                row("records", String(memoryTraceRecords.count))
+                row(
+                    "completed callbacks",
+                    String(DAMMemoryTraceLifecycle.summarize(memoryTraceRecords).completedCallbackCount)
+                )
+                row(
+                    "entries without exit",
+                    String(DAMMemoryTraceLifecycle.summarize(memoryTraceRecords).incompleteCallbacks.count)
+                )
+                row(
+                    "timed-out drains not completed",
+                    String(
+                        DAMMemoryTraceLifecycle.summarize(memoryTraceRecords)
+                            .unfinishedTimedOutDrainCallbackIDs.count
+                    )
+                )
+                if let latest = memoryTraceRecords.last {
+                    row("latest available", memoryText(latest.availableBytes))
+                    row("latest footprint", memoryText(latest.footprintBytes))
+                    row("process peak", memoryText(latest.peakFootprintBytes))
+                    row("metering state file", memoryText(latest.stateFileBytes))
+                }
+                if memoryTraceRecords.isEmpty {
+                    Text("No callback trace recorded.")
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(Array(memoryTraceRecords.suffix(64).reversed()), id: \.sequence) { record in
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("#\(record.sequence) cb=\(record.callbackID) \(kindText(record.kind)) · \(stageText(record.stage))")
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        Text("pid=\(record.pid) avail=\(memoryText(record.availableBytes)) footprint=\(memoryText(record.footprintBytes)) peak=\(memoryText(record.peakFootprintBytes))")
+                            .font(.system(size: 9, design: .monospaced))
+                        Text("state=\(record.stateFileBytes)B flags=0x\(String(record.flags.rawValue, radix: 16)) act=\(String(record.activityHash, radix: 16)) evt=\(String(record.eventHash, radix: 16))")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                    .textSelection(.enabled)
+                }
+
+                ShareLink(item: memoryTraceExportText) {
+                    Label("Export memory trace", systemImage: "square.and.arrow.up")
+                }
+            } header: {
+                Text("DAM callback memory trace")
+            } footer: {
+                Text("Read-only fixed-size trace. An entry without exit is evidence of an interrupted callback, but is not by itself proof of a memory kill.")
             }
 
             Section("Latest daemon readback") {
@@ -191,6 +242,54 @@ struct MeteringDaemonDiagnosticsView: View {
         )
     }
 
+    private func memoryText(_ bytes: UInt32) -> String {
+        String(format: "%.2f MB", Double(bytes) / 1_048_576)
+    }
+
+    private func kindText(_ kind: DAMMemoryTrace.CallbackKind) -> String {
+        switch kind {
+        case .intervalStart: "interval-start"
+        case .intervalEnd: "interval-end"
+        case .thresholdPool: "threshold-pool"
+        case .thresholdAppLimit: "threshold-app-limit"
+        case .thresholdOther: "threshold-other"
+        }
+    }
+
+    private func stageText(_ stage: DAMMemoryTrace.Stage) -> String {
+        switch stage {
+        case .entry: "entry"
+        case .beforeState: "before-state"
+        case .afterState: "after-state"
+        case .afterJournal: "after-journal"
+        case .beforeDrain: "before-drain"
+        case .afterDrainWait: "after-drain-wait"
+        case .afterShield: "after-shield"
+        case .exit: "exit"
+        }
+    }
+
+    private func memoryTraceExport(_ records: [DAMMemoryTrace.Record]) -> String {
+        records.map { record in
+            [
+                "seq=\(record.sequence)",
+                "callback=\(record.callbackID)",
+                "kind=\(kindText(record.kind))",
+                "stage=\(stageText(record.stage))",
+                "flags=\(record.flags.rawValue)",
+                "pid=\(record.pid)",
+                "available=\(record.availableBytes)",
+                "footprint=\(record.footprintBytes)",
+                "peak=\(record.peakFootprintBytes)",
+                "state=\(record.stateFileBytes)",
+                "wall=\(record.wallEpochSeconds)",
+                "monotonic=\(record.monotonicMilliseconds)",
+                "activity=\(record.activityHash)",
+                "event=\(record.eventHash)",
+            ].joined(separator: " ")
+        }.joined(separator: "\n")
+    }
+
     @MainActor
     private func refreshReadbacks() async {
         refreshing = true
@@ -227,6 +326,8 @@ struct MeteringDaemonDiagnosticsView: View {
             ownerChildDeviceID: owner,
             state: state
         )
+        memoryTraceRecords = DAMMemoryTrace.shared.readRecords()
+        memoryTraceExportText = memoryTraceExport(memoryTraceRecords)
         exportText = String(data: journal.exportData(), encoding: .utf8) ?? "{}"
     }
 }
