@@ -236,6 +236,83 @@ final class MeteringColdReopenRecoveryTests: XCTestCase {
         XCTAssertEqual(transport.requestCount, 1)
     }
 
+    func testDrainBudgetStopsAfterReservedRequestsAndLeavesTheRestPending() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanUp() }
+        let journalURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("metering-budget-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: journalURL) }
+        let journal = EarnedV2CallbackJournal(fileURL: journalURL)
+        let activeRoute = try activateTodayRoute(in: fixture)
+        let callbackClock = ColdReopenCallbackClock(
+            now: fixture.clock.now.addingTimeInterval(10 * 60)
+        )
+        let callback = EarnedMeteringCallback(
+            store: fixture.store,
+            clock: callbackClock,
+            journal: journal
+        )
+        let transport = ColdReopenRecordingTransport(owner: fixture.owner)
+
+        for threshold in [5, 10] {
+            let queued = try callback.handleDurably(
+                MeteringAppleCallback(
+                    activityName: activeRoute.activityName,
+                    eventName: MeteringRouteNamespace.eventName(
+                        routeID: activeRoute.routeID,
+                        thresholdMinutes: threshold
+                    ),
+                    observedAt: callbackClock.now
+                ),
+                expectedOwnerChildDeviceID: fixture.owner
+            )
+            guard case .queued = queued else {
+                return XCTFail("expected a durable callback fact for t\(threshold)")
+            }
+        }
+        XCTAssertEqual(try journal.pending(owner: fixture.owner).count, 2)
+
+        // One pass, one request allowed: exactly one entry gets a receipt, the
+        // other is left untouched (no receipt, no claim) for a later pass.
+        let budget = MeteringDrainBudget(maxRequests: 1, deadline: .distantFuture)
+        let delivered = try await journal.submitPendingTransport(
+            owner: fixture.owner,
+            baseURL: URL(string: "https://example.invalid/api/v1")!,
+            transport: transport,
+            recordedAt: callbackClock.now,
+            budget: budget
+        )
+        XCTAssertEqual(delivered, 1)
+        XCTAssertEqual(transport.requestCount, 1)
+        XCTAssertEqual(budget.requestsUsed, 1)
+        let afterOne = try journal.pending(owner: fixture.owner)
+        XCTAssertEqual(afterOne.filter { $0.transportReceipt != nil }.count, 1)
+        XCTAssertEqual(afterOne.filter { $0.transportReceipt == nil }.count, 1)
+
+        // An already-expired deadline reserves nothing at all.
+        let expired = MeteringDrainBudget(maxRequests: 8, deadline: .distantPast)
+        let none = try await journal.submitPendingTransport(
+            owner: fixture.owner,
+            baseURL: URL(string: "https://example.invalid/api/v1")!,
+            transport: transport,
+            recordedAt: callbackClock.now,
+            budget: expired
+        )
+        XCTAssertEqual(none, 0)
+        XCTAssertEqual(transport.requestCount, 1)
+
+        // The next unlimited pass finishes the job.
+        let rest = try await journal.submitPendingTransport(
+            owner: fixture.owner,
+            baseURL: URL(string: "https://example.invalid/api/v1")!,
+            transport: transport,
+            recordedAt: callbackClock.now.addingTimeInterval(1)
+        )
+        XCTAssertEqual(rest, 1)
+        XCTAssertEqual(transport.requestCount, 2)
+        XCTAssertTrue(try journal.pending(owner: fixture.owner).allSatisfy { $0.transportReceipt != nil })
+    }
+
     func testCompactEarnedCallbackTrustsExactReadbackWhenSynchronizeHintIsFalse() async throws {
         let fixture = try makeFixture()
         defer { fixture.cleanUp() }
@@ -451,7 +528,11 @@ final class MeteringColdReopenRecoveryTests: XCTestCase {
         let childRoot = try source(root, "Evlin iOS/Views/Child/BigKid/BigKidRootView.swift")
 
         XCTAssertTrue(app.contains("AppMeteringEntry.shared.recoverIfConfigured"))
-        XCTAssertTrue(dam.contains("DAMMeteringEntry.shared.recoverMeteringIfConfigured"))
+        // 2026-08-19: the extension no longer runs the FULL recovery driver
+        // (network + DeviceActivityCenter reconciliation) inside a callback —
+        // that was the XS Max's every re-arm-time death. Heavy recovery is the
+        // host app's job; the extension keeps local shield re-projection only.
+        XCTAssertFalse(dam.contains("DAMMeteringEntry.shared.recoverMeteringIfConfigured"))
         XCTAssertTrue(dam.contains("DAMMeteringEntry.shared.recoverShieldEffectsIfConfigured"))
         XCTAssertTrue(dam.contains("DAMMeteringEntry.shared.handle"))
         XCTAssertFalse(dam.contains("DAMMeteringEntry.shared.handleIntervalDidEnd"))
@@ -467,14 +548,24 @@ final class MeteringColdReopenRecoveryTests: XCTestCase {
                 range: synchronousHandle.upperBound..<dam.endIndex
             )
         )
-        let boundedRecovery = try XCTUnwrap(
+        // The earned threshold path: synchronous handle (state + journal +
+        // terminal shield) → non-blocking drain kick → MainActor shield
+        // continuation. Nothing in between may wait.
+        let drainKick = try XCTUnwrap(
             dam.range(
-                of: "awaitBounded {",
+                of: "DAMDrainCoordinator.shared.requestDrain(",
                 range: synchronousHandle.upperBound..<asyncRecovery.lowerBound
             )
         )
-        XCTAssertLessThan(synchronousHandle.lowerBound, asyncRecovery.lowerBound)
-        XCTAssertLessThan(synchronousHandle.lowerBound, boundedRecovery.lowerBound)
+        XCTAssertNil(
+            dam.range(
+                of: "awaitBounded",
+                range: synchronousHandle.upperBound..<asyncRecovery.lowerBound
+            ),
+            "the earned threshold callback must not block on uploads"
+        )
+        XCTAssertLessThan(synchronousHandle.lowerBound, drainKick.lowerBound)
+        XCTAssertLessThan(drainKick.lowerBound, asyncRecovery.lowerBound)
         XCTAssertTrue(auth.contains("EarnedBudgetArming.teardownFamilyIdentity"))
         XCTAssertTrue(familyGone.contains("EarnedBudgetArming.teardownFamilyIdentity"))
         XCTAssertTrue(childRoot.contains("EarnedBudgetArming.mirrorChildIdentity"))
@@ -522,7 +613,7 @@ final class MeteringColdReopenRecoveryTests: XCTestCase {
         )
     }
 
-    func testMeteringIntervalStartBeginsRolloverRecoveryBeforeTheCallbackReturns() throws {
+    func testMeteringIntervalStartKeepsOnlyLocalShieldRecoveryAndNeverBlocks() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -539,24 +630,30 @@ final class MeteringColdReopenRecoveryTests: XCTestCase {
         )
         let branch = tail[..<branchEnd.lowerBound]
 
-        XCTAssertTrue(
-            branch.contains("awaitBounded {")
-                && branch.contains(
-                    "DAMMeteringEntry.shared.recoverMeteringIfConfigured()"
-                ),
-            "midnight recovery must begin inside the synchronous DAM callback lifetime"
+        // 2026-08-19 contract: the interval boundary does NOT run the full
+        // recovery driver and does NOT wait on anything. Heavy recovery
+        // (network drain, DeviceActivityCenter reconciliation, route repair)
+        // belongs to the host app's watchdog; the extension re-projects
+        // pending shield effects locally, without blocking.
+        XCTAssertFalse(
+            branch.contains("awaitBounded"),
+            "intervalDidStart must not block the callback"
+        )
+        XCTAssertFalse(
+            branch.contains("recoverMeteringIfConfigured"),
+            "intervalDidStart must not run the full recovery driver"
         )
         XCTAssertTrue(
             branch.contains("recoverShieldEffectsIfConfigured"),
-            "ManagedSettings projection remains a separate MainActor continuation"
+            "local shield re-projection remains a MainActor continuation"
         )
         XCTAssertFalse(
             branch.contains("DAMMeteringEntry.shared.recoverIfConfigured("),
-            "the bounded callback must not wait on MainActor-only shield projection"
+            "the callback must not wait on MainActor-only shield projection"
         )
     }
 
-    func testMeteringIntervalEndBeginsRolloverRecoveryBeforeTheCallbackReturns() throws {
+    func testMeteringIntervalEndKeepsOnlyLocalShieldRecoveryAndNeverBlocks() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -577,20 +674,23 @@ final class MeteringColdReopenRecoveryTests: XCTestCase {
         )
         let branch = branchTail[..<branchEnd.lowerBound]
 
-        XCTAssertTrue(
-            branch.contains("awaitBounded {")
-                && branch.contains(
-                    "DAMMeteringEntry.shared.recoverMeteringIfConfigured()"
-                ),
-            "old-route cleanup must begin inside the synchronous DAM callback lifetime"
+        // Same 2026-08-19 contract as intervalDidStart: no blocking, no full
+        // recovery driver; local shield re-projection only.
+        XCTAssertFalse(
+            branch.contains("awaitBounded"),
+            "intervalDidEnd must not block the callback"
+        )
+        XCTAssertFalse(
+            branch.contains("recoverMeteringIfConfigured"),
+            "intervalDidEnd must not run the full recovery driver"
         )
         XCTAssertTrue(
             branch.contains("recoverShieldEffectsIfConfigured"),
-            "ManagedSettings projection remains a separate MainActor continuation"
+            "local shield re-projection remains a MainActor continuation"
         )
         XCTAssertFalse(
             branch.contains("handleIntervalDidEnd("),
-            "the callback must not defer all rollover recovery to an unawaited MainActor task"
+            "the callback must not route rollover work through a MainActor-only entry"
         )
     }
 

@@ -165,7 +165,11 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         return try JSONDecoder.bigKid.decode(ChildStateResponse.self, from: data)
     }
 
-    func drain(owner: UUID, importLegacyWork: Bool = true) async {
+    func drain(
+        owner: UUID,
+        importLegacyWork: Bool = true,
+        budget: MeteringDrainBudget = .unlimited()
+    ) async {
         if importLegacyWork, await self.importLegacyWork(owner: owner) {
             return
         }
@@ -179,6 +183,9 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             if settleLeadingInvalidNetworkWork(owner: owner) {
                 continue
             }
+            // Reserve BEFORE claiming: a claim taken and then abandoned would
+            // sit on its lease; an exhausted budget must leave work unclaimed.
+            guard budget.reserveRequest() else { return }
             guard let claimed = claimFirstDispatchable(owner: owner) else { return }
             switch claimed {
             case let .registration(work, claim):

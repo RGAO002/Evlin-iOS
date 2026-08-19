@@ -129,8 +129,12 @@ nonisolated final class EarnedV2CallbackJournal: @unchecked Sendable {
         owner: UUID,
         baseURL: URL,
         transport: any MeteringHTTPTransport,
-        recordedAt: Date = Date()
+        recordedAt: Date = Date(),
+        budget: MeteringDrainBudget = .unlimited()
     ) async throws -> Int {
+        // ONE snapshot per pass, on purpose: a pass never re-reads the journal
+        // to chase entries that arrived while it was running — those belong
+        // to the next kick.
         let snapshot = try withLock { try load() }
         var committed = 0
 
@@ -140,6 +144,9 @@ nonisolated final class EarnedV2CallbackJournal: @unchecked Sendable {
                 && entry.work.authorization == .v2Deliverable
                 && entry.work.request.lane == .v2
                 && entry.work.request.deviceID == owner {
+            // Budget check BEFORE building the request: an exhausted pass
+            // leaves the entry untouched (no receipt, no claim) for later.
+            guard budget.reserveRequest() else { break }
             var request = try MeteringEpochRequests.sample(
                 baseURL: baseURL,
                 ownerChildDeviceID: owner,

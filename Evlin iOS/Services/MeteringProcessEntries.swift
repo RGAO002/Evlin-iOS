@@ -490,23 +490,36 @@ nonisolated final class DAMMeteringEntry: @unchecked Sendable {
     /// DeviceActivityCenter. A threshold callback has only a short synchronous
     /// lifetime; spending it on daemon reconciliation can strand a valid sample
     /// until the child opens the host app.
-    func deliverPendingCallbacksIfConfigured() async {
+    ///
+    /// `budget` caps the network work of ONE pass (the extension passes
+    /// `MeteringDrainBudget.extensionDefault()`; the host app keeps
+    /// `.unlimited()`). Whatever the pass leaves behind stays in the journal
+    /// for the next callback, the app's foreground drain, or a background wake.
+    func deliverPendingCallbacksIfConfigured(
+        budget: MeteringDrainBudget = .unlimited()
+    ) async {
         guard let configuration = MeteringProcessConfiguration.load(defaults: defaults) else {
             return
         }
         await deliverPendingCallbacks(
             owner: configuration.owner,
-            baseURL: configuration.baseURL
+            baseURL: configuration.baseURL,
+            budget: budget
         )
     }
 
-    private func deliverPendingCallbacks(owner: UUID, baseURL: URL) async {
+    private func deliverPendingCallbacks(
+        owner: UUID,
+        baseURL: URL,
+        budget: MeteringDrainBudget = .unlimited()
+    ) async {
         do {
             _ = try await callbackJournal.submitPendingTransport(
                 owner: owner,
                 baseURL: baseURL,
                 transport: transport,
-                recordedAt: clock.now
+                recordedAt: clock.now,
+                budget: budget
             )
         } catch {
             MeteringFlightRecorder.emitError(
@@ -521,7 +534,7 @@ nonisolated final class DAMMeteringEntry: @unchecked Sendable {
             transport: transport,
             clock: clock
         )
-        await delivery.drain(owner: owner, importLegacyWork: false)
+        await delivery.drain(owner: owner, importLegacyWork: false, budget: budget)
     }
 
     @MainActor

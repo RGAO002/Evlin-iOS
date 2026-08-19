@@ -103,11 +103,15 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             let project: ([String: ShieldRecord]) -> Void = { [weak self] shields in
                 self?.recomputeAndApplyShields(shields)
             }
-            memoryTrace.mark(traceContext, stage: .beforeState)
-            awaitBounded(traceContext: traceContext) {
-                await DAMMeteringEntry.shared.recoverMeteringIfConfigured()
-            }
-            memoryTrace.mark(traceContext, stage: .afterState)
+            // Interval boundaries used to run the FULL metering recovery
+            // driver here (network drain + DeviceActivityCenter reconciliation
+            // + route repair) and block on it. That was every one of the XS
+            // Max's re-arm-time deaths (5/5 `intervalStart`, 2026-08-16). The
+            // extension is not the load-bearing installer — the host app fills
+            // the whole dated horizon and DAM-role recovery never fresh-starts
+            // today's route — so heavy recovery belongs to the app's watchdog
+            // (foreground / hourly background wake). Keep only what is local
+            // and cheap: re-project pending shield effects, without waiting.
             Task { @MainActor in
                 await DAMMeteringEntry.shared.recoverShieldEffectsIfConfigured(
                     projectShields: project
@@ -242,11 +246,15 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             let project: ([String: ShieldRecord]) -> Void = { [weak self] shields in
                 self?.recomputeAndApplyShields(shields)
             }
-            memoryTrace.mark(traceContext, stage: .beforeState)
-            awaitBounded(traceContext: traceContext) {
-                await DAMMeteringEntry.shared.recoverMeteringIfConfigured()
-            }
-            memoryTrace.mark(traceContext, stage: .afterState)
+            // Interval boundaries used to run the FULL metering recovery
+            // driver here (network drain + DeviceActivityCenter reconciliation
+            // + route repair) and block on it. That was every one of the XS
+            // Max's re-arm-time deaths (5/5 `intervalStart`, 2026-08-16). The
+            // extension is not the load-bearing installer — the host app fills
+            // the whole dated horizon and DAM-role recovery never fresh-starts
+            // today's route — so heavy recovery belongs to the app's watchdog
+            // (foreground / hourly background wake). Keep only what is local
+            // and cheap: re-project pending shield effects, without waiting.
             Task { @MainActor in
                 await DAMMeteringEntry.shared.recoverShieldEffectsIfConfigured(
                     projectShields: project
@@ -433,6 +441,14 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     /// And if the wait expires, the entry is still durably queued and the app's
     /// foreground drain still picks it up — i.e. exactly today's behaviour.
     /// This can only make delivery earlier, never later.
+    ///
+    /// UPDATE 2026-08-19: the premise above turned out to be wrong for the
+    /// earned/interval paths — blocking here is what got the extension
+    /// terminated and its callback re-delivered 6–36 minutes later (see
+    /// `DAMDrainCoordinator`). Those paths no longer call this. It survives
+    /// ONLY for the per-app limit drain (`drainAcceptedAppLimitEffects`),
+    /// which is scheduled to move to the same non-blocking shape (P0-3) once
+    /// the event ring leaves App Group UserDefaults (P0-2).
     private func awaitBounded(
         traceContext: DAMMemoryTrace.Context? = nil,
         _ work: @escaping @Sendable () async -> Void
@@ -518,12 +534,18 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                 detail: MeteringFlightRecorder.detail([("evt", event.rawValue)])
             )
         }
-        // The journal import and network drain are non-MainActor work. Wait for
-        // them briefly before this synchronous extension callback returns, or
-        // iOS can suspend the extension with a valid sample stranded on disk.
-        awaitBounded(traceContext: traceContext) {
-            await DAMMeteringEntry.shared.deliverPendingCallbacksIfConfigured()
-        }
+        // The sample is durable (state + journal committed above) and the
+        // terminal shield, if any, was projected inside `handle()`. Do NOT
+        // wait for the upload here. This callback used to block on a
+        // semaphore for up to six seconds; when the daemon had another
+        // callback queued it terminated the blocked extension and re-delivered
+        // the killed rung with growing backoff (2026-08-16 trace: 16/16
+        // entry-without-exit deaths at exactly this spot, plus real
+        // per-process-limit jetsams inside the drain's memory spike). Kick a
+        // budgeted, single-flight, opportunistic drain and return; the journal
+        // + host-app foreground drain + background wakes remain the durable
+        // delivery path exactly as before.
+        DAMDrainCoordinator.shared.requestDrain(traceContext: traceContext)
         Task { @MainActor in
             await DAMMeteringEntry.shared.recoverShieldEffectsIfConfigured(
                 projectShields: project
@@ -850,7 +872,10 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                     store: .shared
                 )
             }
-            awaitBounded {
+            // Legacy (v1) earned path: same rule — the sample is already in
+            // the retry queue; upload opportunistically, never block the
+            // callback on it.
+            Task.detached(priority: .utility) {
                 guard authorizationIsCurrent() else { return }
                 await EarnedSampleReporter.drainRetryQueue(
                     baseURL: baseURL,
