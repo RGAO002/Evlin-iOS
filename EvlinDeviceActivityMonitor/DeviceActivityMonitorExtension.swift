@@ -111,13 +111,15 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             // the whole dated horizon and DAM-role recovery never fresh-starts
             // today's route — so heavy recovery belongs to the app's watchdog
             // (foreground / hourly background wake). Keep only what is local
-            // and cheap: re-project pending shield effects, without waiting.
-            Task { @MainActor in
-                await DAMMeteringEntry.shared.recoverShieldEffectsIfConfigured(
-                    projectShields: project
-                )
-                memoryTrace.mark(traceContext, stage: .afterShield)
-            }
+            // and cheap — and do it SYNCHRONOUSLY: a Task scheduled after
+            // return may never run if the extension is suspended immediately,
+            // and a pending terminal shield left unprojected is "time is up
+            // but not locked". No network, no DeviceActivityCenter in here.
+            memoryTrace.mark(traceContext, stage: .beforeState)
+            DAMMeteringEntry.shared.recoverShieldEffectsSynchronouslyIfConfigured(
+                projectShields: project
+            )
+            memoryTrace.mark(traceContext, stage: .afterShield)
             return
         }
 
@@ -254,13 +256,15 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             // the whole dated horizon and DAM-role recovery never fresh-starts
             // today's route — so heavy recovery belongs to the app's watchdog
             // (foreground / hourly background wake). Keep only what is local
-            // and cheap: re-project pending shield effects, without waiting.
-            Task { @MainActor in
-                await DAMMeteringEntry.shared.recoverShieldEffectsIfConfigured(
-                    projectShields: project
-                )
-                memoryTrace.mark(traceContext, stage: .afterShield)
-            }
+            // and cheap — and do it SYNCHRONOUSLY: a Task scheduled after
+            // return may never run if the extension is suspended immediately,
+            // and a pending terminal shield left unprojected is "time is up
+            // but not locked". No network, no DeviceActivityCenter in here.
+            memoryTrace.mark(traceContext, stage: .beforeState)
+            DAMMeteringEntry.shared.recoverShieldEffectsSynchronouslyIfConfigured(
+                projectShields: project
+            )
+            memoryTrace.mark(traceContext, stage: .afterShield)
             return
         }
 
@@ -874,8 +878,11 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             }
             // Legacy (v1) earned path: same rule — the sample is already in
             // the retry queue; upload opportunistically, never block the
-            // callback on it.
-            Task.detached(priority: .utility) {
+            // callback on it. Routed through the SAME single-flight
+            // coordinator so v1 callbacks cannot stack parallel uploads next
+            // to the v2 drain (the legacy queue drain has no budget of its
+            // own; single-flight is the bound it gets until v1 retires).
+            DAMDrainCoordinator.shared.requestLegacyDrain {
                 guard authorizationIsCurrent() else { return }
                 await EarnedSampleReporter.drainRetryQueue(
                     baseURL: baseURL,

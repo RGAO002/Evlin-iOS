@@ -331,6 +331,83 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         XCTAssertEqual(try store.read().sampleWork[sampleID]?.retry.terminal, .succeeded)
     }
 
+    /// P0-1 (2026-08-19): a bounded drain pass reserves BEFORE claiming, so an
+    /// exhausted budget leaves the work unclaimed (no lease to wait out) and
+    /// a request it does start is clamped to what is left of the pass.
+    func testExhaustedDrainBudgetLeavesWorkUnclaimedAndClampsRequestTimeouts() async throws {
+        let fileURL = temporaryStoreURL()
+        defer { removeTemporaryStore(fileURL) }
+        let store = makeStore(fileURL: fileURL)
+        let sampleID = UUID()
+        try store.transaction(expectedOwner: owner) { state in
+            state = makeBaseState()
+            let route = try XCTUnwrap(state.routes[routeID])
+            state.sampleWork[sampleID] = EpochSampleWork(
+                workID: sampleID,
+                ownerChildDeviceID: owner,
+                epochID: epochID,
+                routeID: routeID,
+                request: EpochSampleRequestDTO(
+                    deviceID: owner,
+                    usageDate: route.usageDate,
+                    timezone: route.plannedSchedule.timezoneIdentifier,
+                    activityName: MeteringSampleWireAliases.activityName(routeID: routeID),
+                    eventName: MeteringSampleWireAliases.eventName(thresholdMinutes: 5),
+                    thresholdMinutes: 5,
+                    estimatedMinutes: 5,
+                    observedAt: start,
+                    clientSampleID: "v2-budget",
+                    protocolVersion: 2,
+                    epochID: epochID,
+                    generationArmedAt: nil,
+                    generationOffsetMinutes: nil
+                ),
+                authorization: .v2Deliverable,
+                retry: MeteringRetryState(
+                    attemptCount: 0,
+                    nextAttemptAt: start,
+                    lastErrorCode: nil,
+                    terminal: .pending
+                ),
+                createdAt: start
+            )
+        }
+        let transport = DeliveryTestTransport()
+        transport.results = [(
+            try encoded(makeSnapshot(counted: true, warning: nil)),
+            HTTPURLResponse(url: baseURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        )]
+        let delivery = MeteringEpochDelivery(
+            baseURL: baseURL,
+            store: store,
+            transport: transport,
+            clock: DeliveryTestClock(now: start)
+        )
+
+        // Exhausted: nothing is sent AND nothing is claimed.
+        await delivery.drain(
+            owner: owner,
+            importLegacyWork: false,
+            budget: MeteringDrainBudget(maxRequests: 0, deadline: .distantFuture)
+        )
+        XCTAssertEqual(transport.requests.count, 0)
+        let untouched = try XCTUnwrap(try store.read().sampleWork[sampleID])
+        XCTAssertNil(untouched.claim, "an exhausted pass must not take a claim it will not deliver")
+        XCTAssertEqual(untouched.retry.terminal, .pending)
+
+        // Bounded with ~2s left: the one request it starts is clamped to ≤2s.
+        await delivery.drain(
+            owner: owner,
+            importLegacyWork: false,
+            budget: MeteringDrainBudget(maxRequests: 8, deadline: Date().addingTimeInterval(2))
+        )
+        XCTAssertEqual(transport.requests.count, 1)
+        let timeout = try XCTUnwrap(transport.requests.first?.timeoutInterval)
+        XCTAssertLessThanOrEqual(timeout, 2)
+        XCTAssertGreaterThanOrEqual(timeout, MeteringDrainBudget.minimumRequestSeconds)
+        XCTAssertEqual(try store.read().sampleWork[sampleID]?.retry.terminal, .succeeded)
+    }
+
     // Regression (iPad, 2026-07-25): an earned-cap shield reference was emitted
     // into dueWork as permanently-pending `.shield` work that NOTHING claims —
     // not claimFirstDispatchable, not dueInstallWork, not

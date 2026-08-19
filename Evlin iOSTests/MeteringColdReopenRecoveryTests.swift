@@ -285,6 +285,10 @@ final class MeteringColdReopenRecoveryTests: XCTestCase {
         XCTAssertEqual(delivered, 1)
         XCTAssertEqual(transport.requestCount, 1)
         XCTAssertEqual(budget.requestsUsed, 1)
+        XCTAssertEqual(
+            transport.lastRequestTimeout, 4,
+            "a far deadline keeps the journal's own 4s cap"
+        )
         let afterOne = try journal.pending(owner: fixture.owner)
         XCTAssertEqual(afterOne.filter { $0.transportReceipt != nil }.count, 1)
         XCTAssertEqual(afterOne.filter { $0.transportReceipt == nil }.count, 1)
@@ -301,15 +305,20 @@ final class MeteringColdReopenRecoveryTests: XCTestCase {
         XCTAssertEqual(none, 0)
         XCTAssertEqual(transport.requestCount, 1)
 
-        // The next unlimited pass finishes the job.
-        let rest = try await journal.submitPendingTransport(
+        // A pass with ~2s left clamps the request below the journal's 4s and
+        // finishes the remaining entry.
+        let short = MeteringDrainBudget(maxRequests: 8, deadline: Date().addingTimeInterval(2))
+        let clamped = try await journal.submitPendingTransport(
             owner: fixture.owner,
             baseURL: URL(string: "https://example.invalid/api/v1")!,
             transport: transport,
-            recordedAt: callbackClock.now.addingTimeInterval(1)
+            recordedAt: callbackClock.now.addingTimeInterval(1),
+            budget: short
         )
-        XCTAssertEqual(rest, 1)
+        XCTAssertEqual(clamped, 1)
         XCTAssertEqual(transport.requestCount, 2)
+        XCTAssertLessThanOrEqual(try XCTUnwrap(transport.lastRequestTimeout), 2)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(transport.lastRequestTimeout), 1)
         XCTAssertTrue(try journal.pending(owner: fixture.owner).allSatisfy { $0.transportReceipt != nil })
     }
 
@@ -644,8 +653,12 @@ final class MeteringColdReopenRecoveryTests: XCTestCase {
             "intervalDidStart must not run the full recovery driver"
         )
         XCTAssertTrue(
-            branch.contains("recoverShieldEffectsIfConfigured"),
-            "local shield re-projection remains a MainActor continuation"
+            branch.contains("recoverShieldEffectsSynchronouslyIfConfigured("),
+            "local shield re-projection runs synchronously inside the callback"
+        )
+        XCTAssertFalse(
+            branch.contains("Task {") || branch.contains("Task.detached"),
+            "a task scheduled after return may never run if the extension is suspended at once"
         )
         XCTAssertFalse(
             branch.contains("DAMMeteringEntry.shared.recoverIfConfigured("),
@@ -685,8 +698,12 @@ final class MeteringColdReopenRecoveryTests: XCTestCase {
             "intervalDidEnd must not run the full recovery driver"
         )
         XCTAssertTrue(
-            branch.contains("recoverShieldEffectsIfConfigured"),
-            "local shield re-projection remains a MainActor continuation"
+            branch.contains("recoverShieldEffectsSynchronouslyIfConfigured("),
+            "local shield re-projection runs synchronously inside the callback"
+        )
+        XCTAssertFalse(
+            branch.contains("Task {") || branch.contains("Task.detached"),
+            "a task scheduled after return may never run if the extension is suspended at once"
         )
         XCTAssertFalse(
             branch.contains("handleIntervalDidEnd("),
@@ -956,6 +973,10 @@ private final class ColdReopenRecordingTransport: MeteringHTTPTransport, @unchec
 
     var requestCount: Int {
         lock.withLock { requests.count }
+    }
+
+    var lastRequestTimeout: TimeInterval? {
+        lock.withLock { requests.last?.timeoutInterval }
     }
 
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {

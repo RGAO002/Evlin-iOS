@@ -152,7 +152,10 @@ nonisolated final class EarnedV2CallbackJournal: @unchecked Sendable {
                 ownerChildDeviceID: owner,
                 body: entry.work.request
             )
-            request.timeoutInterval = 4
+            // Bounded pass: never let one request outlive the pass. A timeout
+            // is a plain transport error here — the entry keeps no receipt and
+            // is picked up by a later pass.
+            request.timeoutInterval = min(4, budget.requestTimeout() ?? 4)
 
             let data: Data
             let response: URLResponse

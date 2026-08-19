@@ -189,11 +189,11 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             guard let claimed = claimFirstDispatchable(owner: owner) else { return }
             switch claimed {
             case let .registration(work, claim):
-                await deliverRegistration(work: work, owner: owner, claim: claim)
+                await deliverRegistration(work: work, owner: owner, claim: claim, budget: budget)
             case let .activation(work, claim):
-                await deliverActivation(work: work, owner: owner, claim: claim)
+                await deliverActivation(work: work, owner: owner, claim: claim, budget: budget)
             case let .sample(work, claim):
-                await deliverSample(work: work, owner: owner, claim: claim)
+                await deliverSample(work: work, owner: owner, claim: claim, budget: budget)
             }
         }
     }
@@ -761,9 +761,14 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         )
     }
 
-    private func deliverRegistration(work: EpochRegistrationWork, owner: UUID, claim: MeteringNetworkClaim) async {
+    private func deliverRegistration(
+        work: EpochRegistrationWork,
+        owner: UUID,
+        claim: MeteringNetworkClaim,
+        budget: MeteringDrainBudget = .unlimited()
+    ) async {
         let workID = work.workID
-        let request: URLRequest
+        var request: URLRequest
         do {
             request = try MeteringEpochRequests.registration(baseURL: baseURL, ownerChildDeviceID: owner, body: work.request)
         } catch {
@@ -779,6 +784,12 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             return
         }
 
+        if let timeout = budget.requestTimeout() {
+            // Bounded (extension) pass only; the host app keeps the URLSession
+            // default. A timeout surfaces as a transport error below and takes
+            // the normal retry path, which releases the claim.
+            request.timeoutInterval = timeout
+        }
         do {
             let (data, response) = try await transport.data(for: request)
             let status = httpStatus(response)
@@ -828,9 +839,14 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         }
     }
 
-    private func deliverActivation(work: EpochActivationWork, owner: UUID, claim: MeteringNetworkClaim) async {
+    private func deliverActivation(
+        work: EpochActivationWork,
+        owner: UUID,
+        claim: MeteringNetworkClaim,
+        budget: MeteringDrainBudget = .unlimited()
+    ) async {
         let workID = work.workID
-        let request: URLRequest
+        var request: URLRequest
         do {
             request = try MeteringEpochRequests.activation(
                 baseURL: baseURL,
@@ -851,6 +867,12 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             return
         }
 
+        if let timeout = budget.requestTimeout() {
+            // Bounded (extension) pass only; the host app keeps the URLSession
+            // default. A timeout surfaces as a transport error below and takes
+            // the normal retry path, which releases the claim.
+            request.timeoutInterval = timeout
+        }
         do {
             let (data, response) = try await transport.data(for: request)
             let status = httpStatus(response)
@@ -902,9 +924,14 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
         }
     }
 
-    private func deliverSample(work: EpochSampleWork, owner: UUID, claim: MeteringNetworkClaim) async {
+    private func deliverSample(
+        work: EpochSampleWork,
+        owner: UUID,
+        claim: MeteringNetworkClaim,
+        budget: MeteringDrainBudget = .unlimited()
+    ) async {
         let workID = work.workID
-        let request: URLRequest
+        var request: URLRequest
         do {
             request = try MeteringEpochRequests.sample(baseURL: baseURL, ownerChildDeviceID: owner, body: work.request)
         } catch {
@@ -920,6 +947,12 @@ nonisolated final class MeteringEpochDelivery: @unchecked Sendable {
             return
         }
 
+        if let timeout = budget.requestTimeout() {
+            // Bounded (extension) pass only; the host app keeps the URLSession
+            // default. A timeout surfaces as a transport error below and takes
+            // the normal retry path, which releases the claim.
+            request.timeoutInterval = timeout
+        }
         do {
             let (data, response) = try await transport.data(for: request)
             let status = httpStatus(response)

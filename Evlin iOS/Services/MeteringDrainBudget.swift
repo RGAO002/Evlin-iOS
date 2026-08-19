@@ -53,6 +53,28 @@ nonisolated final class MeteringDrainBudget: @unchecked Sendable {
         return true
     }
 
+    /// Per-request timeout for a request started under this budget, or `nil`
+    /// when the budget is unlimited (callers keep their own default).
+    ///
+    /// The deadline is not a real deadline if a request that started at
+    /// T-0.1s may run for 4s (callback journal) or 60s (URLSession default,
+    /// which the epoch requests used to inherit): the single-flight worker
+    /// would sit on it, later kicks would only pile up, and a claimed work
+    /// item would hold its lease. So every request under a bounded budget is
+    /// clamped to what is left of the pass — at least `minimumRequestSeconds`
+    /// so a request is never born dead, at most `maximumRequestSeconds`.
+    func requestTimeout(now: Date = Date()) -> TimeInterval? {
+        guard deadline != .distantFuture else { return nil }
+        let remaining = deadline.timeIntervalSince(now)
+        return min(
+            Self.maximumRequestSeconds,
+            max(Self.minimumRequestSeconds, remaining)
+        )
+    }
+
+    static let minimumRequestSeconds: TimeInterval = 1
+    static let maximumRequestSeconds: TimeInterval = 4
+
     /// Requests reserved so far (diagnostics/tests).
     var requestsUsed: Int {
         lock.lock()

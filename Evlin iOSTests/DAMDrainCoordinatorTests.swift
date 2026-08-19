@@ -27,6 +27,7 @@ final class DAMDrainCoordinatorTests: XCTestCase {
     /// Kicks that arrive while a round is running coalesce into ONE more
     /// round, and every waiting trace context is handed to that round.
     func testKicksDuringARunningRoundCoalesceIntoOneMoreRound() async throws {
+        let started = DispatchSemaphore(value: 0)
         let gate = DispatchSemaphore(value: 0)
         let roundsFinished = expectation(description: "two rounds")
         roundsFinished.expectedFulfillmentCount = 2
@@ -34,6 +35,10 @@ final class DAMDrainCoordinatorTests: XCTestCase {
         var contextsPerRound: [[UInt64]] = []
         let coordinator = DAMDrainCoordinator(
             work: { _ in
+                // Deterministic gate: the test only kicks again once round 1
+                // has TAKEN its snapshot of waiting contexts. Without this the
+                // worker may start late and swallow every kick into round 1.
+                started.signal()
                 await Task.detached { gate.wait() }.value
             },
             onRoundFinished: { contexts in
@@ -46,6 +51,7 @@ final class DAMDrainCoordinatorTests: XCTestCase {
         let trace = makeTrace()
         let first = trace.begin(kind: .thresholdPool, activityName: "a", eventName: "t1")
         XCTAssertTrue(coordinator.requestDrain(traceContext: first))
+        XCTAssertEqual(started.wait(timeout: .now() + 5), .success, "round 1 never started")
 
         var later: [UInt64] = []
         for n in 2...6 {
@@ -104,6 +110,56 @@ final class DAMDrainCoordinatorTests: XCTestCase {
         XCTAssertEqual(ext.deadline, Date(timeIntervalSince1970: MeteringDrainBudget.extensionWallClockSeconds))
     }
 
+    /// The legacy (v1) drain rides the same worker: it never runs concurrently
+    /// with the v2 work, kicks coalesce (latest closure wins), and a kick
+    /// during a running round yields exactly one more round.
+    func testLegacyDrainRunsOnTheSameWorkerAfterV2WorkAndCoalesces() async throws {
+        let started = DispatchSemaphore(value: 0)
+        let gate = DispatchSemaphore(value: 0)
+        let order = OrderRecorder()
+        let roundsFinished = expectation(description: "two rounds")
+        roundsFinished.expectedFulfillmentCount = 2
+        let coordinator = DAMDrainCoordinator(
+            work: { _ in
+                order.append("v2")
+                started.signal()
+                await Task.detached { gate.wait() }.value
+            },
+            onRoundFinished: { _ in roundsFinished.fulfill() }
+        )
+        XCTAssertTrue(coordinator.requestDrain())
+        XCTAssertEqual(started.wait(timeout: .now() + 5), .success)
+        // Two legacy kicks while round 1 runs: only the LAST closure runs, in
+        // round 2, after that round's v2 work.
+        XCTAssertFalse(coordinator.requestLegacyDrain { order.append("legacy-old") })
+        XCTAssertFalse(coordinator.requestLegacyDrain { order.append("legacy-new") })
+        gate.signal() // round 1 finishes
+        XCTAssertEqual(started.wait(timeout: .now() + 5), .success) // round 2 v2 started
+        gate.signal() // round 2 finishes
+        await fulfillment(of: [roundsFinished], timeout: 5)
+
+        XCTAssertEqual(order.snapshot, ["v2", "v2", "legacy-new"])
+        XCTAssertEqual(coordinator.roundCount, 2)
+    }
+
+    /// A bounded budget clamps every request it starts to what is left of
+    /// the pass (never below the floor, never above the cap); an unlimited
+    /// budget leaves the caller's default alone.
+    func testBudgetRequestTimeoutTracksTheDeadline() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let budget = MeteringDrainBudget(maxRequests: 8, deadline: now.addingTimeInterval(3))
+        XCTAssertEqual(budget.requestTimeout(now: now), 3)
+        XCTAssertEqual(budget.requestTimeout(now: now.addingTimeInterval(1.5)), 1.5)
+        XCTAssertEqual(
+            budget.requestTimeout(now: now.addingTimeInterval(2.9)),
+            MeteringDrainBudget.minimumRequestSeconds,
+            "a request is never born dead"
+        )
+        let generous = MeteringDrainBudget(maxRequests: 8, deadline: now.addingTimeInterval(60))
+        XCTAssertEqual(generous.requestTimeout(now: now), MeteringDrainBudget.maximumRequestSeconds)
+        XCTAssertNil(MeteringDrainBudget.unlimited().requestTimeout(now: now))
+    }
+
     /// Pin the callback contract in the extension source: earned threshold,
     /// both interval callbacks and the legacy earned path no longer wait; the
     /// only remaining `awaitBounded` caller is the per-app drain (P0-3).
@@ -133,6 +189,28 @@ final class DAMDrainCoordinatorTests: XCTestCase {
             1,
             "no new semaphores in the extension"
         )
+        XCTAssertEqual(
+            source.components(separatedBy: "Task.detached(").count - 1,
+            1,
+            "the only detached task left in the extension is awaitBounded's own (per-app, P0-3); "
+                + "the legacy earned drain must go through the coordinator"
+        )
+        XCTAssertEqual(
+            source.components(separatedBy: "DAMDrainCoordinator.shared.requestLegacyDrain").count - 1,
+            1
+        )
+        XCTAssertEqual(
+            source.components(separatedBy: "recoverShieldEffectsSynchronouslyIfConfigured(").count - 1,
+            2,
+            "both interval callbacks run the local shield recovery synchronously, inside the callback"
+        )
+    }
+
+    private final class OrderRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var items: [String] = []
+        func append(_ item: String) { lock.lock(); items.append(item); lock.unlock() }
+        var snapshot: [String] { lock.lock(); defer { lock.unlock() }; return items }
     }
 
     private func makeTrace() -> DAMMemoryTrace {

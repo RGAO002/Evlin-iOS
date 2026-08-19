@@ -541,6 +541,19 @@ nonisolated final class DAMMeteringEntry: @unchecked Sendable {
     func recoverShieldEffectsIfConfigured(
         projectShields: ([String: ShieldRecord]) -> Void = { _ in }
     ) async {
+        recoverShieldEffectsSynchronouslyIfConfigured(projectShields: projectShields)
+    }
+
+    /// Synchronous, local-only shield recovery for the extension's interval
+    /// callbacks. No network, no DeviceActivityCenter: it drains pending
+    /// terminal locks and re-projects persisted shield effects — the same
+    /// projection `handle()` performs synchronously for a threshold. It runs
+    /// INSIDE the callback on purpose: a `Task` scheduled after the callback
+    /// returns may never run if the extension is suspended right away, and
+    /// the failure mode of that is "time is up but the device is not locked".
+    func recoverShieldEffectsSynchronouslyIfConfigured(
+        projectShields: ([String: ShieldRecord]) -> Void = { _ in }
+    ) {
         guard let configuration = MeteringProcessConfiguration.load(defaults: defaults) else {
             return
         }

@@ -58,10 +58,13 @@ nonisolated final class DAMDrainCoordinator: @unchecked Sendable {
     private let onRoundFinished: RoundFinished
     private let makeBudget: @Sendable () -> MeteringDrainBudget
 
+    typealias LegacyWork = @Sendable () async -> Void
+
     private let lock = NSLock()
     private var running = false
     private var pendingKick = false
     private var waitingContexts: [DAMMemoryTrace.Context] = []
+    private var pendingLegacyWork: LegacyWork?
     private var roundsStarted = 0
 
     init(
@@ -97,6 +100,26 @@ nonisolated final class DAMDrainCoordinator: @unchecked Sendable {
         return true
     }
 
+    /// Legacy (v1) earned queue drain, coalesced onto the same worker: the
+    /// latest closure wins, it runs after the v2 work of the next round, and
+    /// it never runs concurrently with it. Non-blocking like `requestDrain`.
+    @discardableResult
+    func requestLegacyDrain(_ work: @escaping LegacyWork) -> Bool {
+        lock.lock()
+        pendingLegacyWork = work
+        if running {
+            pendingKick = true
+            lock.unlock()
+            return false
+        }
+        running = true
+        lock.unlock()
+        Task.detached(priority: .utility) { [self] in
+            await runRounds()
+        }
+        return true
+    }
+
     /// Rounds started so far (tests/diagnostics).
     var roundCount: Int {
         lock.lock()
@@ -109,11 +132,16 @@ nonisolated final class DAMDrainCoordinator: @unchecked Sendable {
             lock.lock()
             let contexts = waitingContexts
             waitingContexts = []
+            let legacy = pendingLegacyWork
+            pendingLegacyWork = nil
             pendingKick = false
             roundsStarted += 1
             lock.unlock()
 
             await work(makeBudget())
+            if let legacy {
+                await legacy()
+            }
             onRoundFinished(contexts)
 
             lock.lock()
