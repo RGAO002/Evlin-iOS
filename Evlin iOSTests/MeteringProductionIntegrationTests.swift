@@ -7,6 +7,60 @@ import XCTest
 
 @MainActor
 final class MeteringProductionIntegrationTests: XCTestCase {
+    func testSharedConfigurationRecoveryReadsEpochStoreOffMainThread() async throws {
+        let owner = UUID()
+        let baseURL = URL(string: "https://example.invalid/api/v1")!
+        let defaults = try XCTUnwrap(
+            UserDefaults(suiteName: MeteringProductionComposition.appGroupSuiteName)
+        )
+        let keys = [
+            MeteringProductionComposition.baseURLKey,
+            MeteringProductionComposition.ownerKey,
+            MeteringProductionComposition.selectionKey,
+            MeteringProductionComposition.lockedSetIDKey,
+        ]
+        let saved = keys.reduce(into: [String: Any]()) { values, key in
+            values[key] = defaults.object(forKey: key)
+        }
+        defer {
+            for key in keys {
+                if let value = saved[key] {
+                    defaults.set(value, forKey: key)
+                } else {
+                    defaults.removeObject(forKey: key)
+                }
+            }
+        }
+        defaults.set(baseURL.absoluteString, forKey: MeteringProductionComposition.baseURLKey)
+        defaults.set(owner.uuidString, forKey: MeteringProductionComposition.ownerKey)
+        defaults.removeObject(forKey: MeteringProductionComposition.selectionKey)
+        defaults.removeObject(forKey: MeteringProductionComposition.lockedSetIDKey)
+
+        let fileIO = ThreadRecordingDeviceEpochFileIO()
+        let store = DeviceEpochStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("metering-off-main-\(UUID().uuidString).json"),
+            fileIO: fileIO,
+            ownerProvider: { owner }
+        )
+
+        _ = try? await MeteringProductionComposition.recoverFromSharedConfiguration(
+            role: .app,
+            expectedOwner: owner,
+            expectedBaseURL: baseURL,
+            store: store,
+            transport: ProductionLinkTransport()
+        )
+
+        let observations = fileIO.readMainThreadObservations
+        XCTAssertFalse(observations.isEmpty)
+        XCTAssertEqual(
+            observations.filter { $0 },
+            [],
+            "the recovery composition must not decode DeviceEpochStoreState on MainActor"
+        )
+    }
+
     func testAppRecoveryFactoryLinks() async throws {
         let fixture = try makeFixture(seedPendingStart: true)
         let driver = MeteringProductionComposition.makeRecoveryDriverForTesting(
@@ -389,6 +443,31 @@ private final class ProductionLinkFixture {
 
     deinit {
         try? FileManager.default.removeItem(at: storeURL)
+    }
+}
+
+private nonisolated final class ThreadRecordingDeviceEpochFileIO: DeviceEpochFileIO, @unchecked Sendable {
+    private let lock = NSLock()
+    private var data: Data?
+    private var observations: [Bool] = []
+
+    var readMainThreadObservations: [Bool] {
+        lock.withLock { observations }
+    }
+
+    func read(from url: URL) throws -> Data? {
+        lock.withLock {
+            observations.append(Thread.isMainThread)
+            return data
+        }
+    }
+
+    func writeAtomically(_ data: Data, to url: URL) throws {
+        lock.withLock { self.data = data }
+    }
+
+    func remove(at url: URL) throws {
+        lock.withLock { data = nil }
     }
 }
 

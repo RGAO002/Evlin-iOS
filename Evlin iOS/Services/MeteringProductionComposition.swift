@@ -161,6 +161,36 @@ nonisolated enum MeteringProductionComposition {
         clock: any MeteringClock = MeteringRuntimeClock.live(),
         transport: any MeteringHTTPTransport = URLSession.shared
     ) async throws -> MeteringRecoveryOutcome {
+        // The recovery driver already detaches its daemon/XPC work, but this
+        // composition performs several full DeviceEpochStore reads before and
+        // after entering the driver. Those reads synchronously load, decode and
+        // validate the persisted root. A background push still enters here on
+        // MainActor, so a large mature root can otherwise freeze the host app
+        // before the driver's existing off-main boundary is reached.
+        try await Task.detached(priority: .utility) {
+            try await performRecoveryFromSharedConfiguration(
+                role: role,
+                runtime: runtime,
+                usageCountingAllowed: usageCountingAllowed,
+                expectedOwner: expectedOwner,
+                expectedBaseURL: expectedBaseURL,
+                store: store,
+                clock: clock,
+                transport: transport
+            )
+        }.value
+    }
+
+    private static func performRecoveryFromSharedConfiguration(
+        role: MeteringProcessRole,
+        runtime: EarnedTimeRuntime?,
+        usageCountingAllowed: Bool?,
+        expectedOwner: UUID?,
+        expectedBaseURL: URL?,
+        store: DeviceEpochStore,
+        clock: any MeteringClock,
+        transport: any MeteringHTTPTransport
+    ) async throws -> MeteringRecoveryOutcome {
         guard let configuration = sharedConfiguration() else {
             return .skippedMissingConfiguration
         }
