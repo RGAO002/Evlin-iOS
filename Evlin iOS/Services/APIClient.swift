@@ -501,6 +501,37 @@ struct PollTargetDTO: Decodable {
     }
 }
 
+/// GET /child/app-limits/snapshot wire shapes. `payload` deliberately mirrors
+/// PollCommandDTO minus `command_id` — the snapshot describes a command at
+/// rest, and the backend builds both from one canonical builder.
+struct AppLimitSnapshotDTO: Decodable {
+    let child_device_id: UUID
+    let child_profile_id: UUID?
+    let server_revision: String?
+    let rules_digest: String
+    let items: [AppLimitSnapshotItemDTO]
+}
+
+struct AppLimitSnapshotItemDTO: Decodable {
+    let kind: String              // "set" | "clear" | "unknown"
+    let rule_id: UUID
+    let ordering_token: Int64
+    let status: String
+    let payload: AppLimitSnapshotSetPayloadDTO?
+    let clear: PollClearDTO?
+    let unavailable_reason: String?
+    let updated_at: String?
+}
+
+struct AppLimitSnapshotSetPayloadDTO: Decodable {
+    let action: String
+    let tier: String?
+    let target: PollTargetDTO
+    let duration_minutes: Int?
+    let issued_at: String
+    let limit: PollLimitDTO?
+}
+
 struct PollCommandDTO: Decodable {
     let command_id: UUID
     let action: String
@@ -1872,6 +1903,25 @@ extension APIClient {
             throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
         }
         return try JSONDecoder().decode(LockSetupCatalog.self, from: data)
+    }
+
+    /// GET /child/app-limits/snapshot — the per-app recovery leg.
+    ///
+    /// An authoritative, side-effect-free description of every rule this
+    /// device should hold. Each `set` item's `payload` is byte-identical to a
+    /// wire `set_limit` command (single builder on the backend), so the client
+    /// re-uses the whole command pipeline to apply it.
+    func fetchAppLimitSnapshot(deviceID: UUID) async throws -> (AppLimitSnapshotDTO, Data) {
+        var comps = URLComponents(string: "\(baseURL)/child/app-limits/snapshot")!
+        comps.queryItems = [URLQueryItem(name: "device_id", value: deviceID.uuidString)]
+        var req = URLRequest(url: comps.url!)
+        req.timeoutInterval = 22
+        req.setValue(deviceID.uuidString, forHTTPHeaderField: "X-Evlin-Child-Device-ID")
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw APIError.serverError((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return (try JSONDecoder().decode(AppLimitSnapshotDTO.self, from: data), data)
     }
 
     func deleteChildAppControlTarget(deviceID: UUID, aliasKey: UUID) async throws {

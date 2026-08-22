@@ -35,9 +35,11 @@ nonisolated struct MeteringWatchdogVerdict: Equatable, Sendable {
 ///      that fire are not the rungs the store planned.
 ///   3. The store's own `coverage` is stale or exhausted, so `hasCallbackCoverage`
 ///      discards every arriving callback as `epoch_not_active`.
-/// All three are repaired by exactly one action: re-kick today's route
-/// (`MeteringTodayRouteRekick`, which absorbs credited progress first, so
-/// re-arming costs no dead time and has no dead zone).
+/// A route missing from Apple's daemon is repaired by minting fresh physical
+/// activity/event identities while preserving the durable base. Reusing the
+/// old names would reproduce callbacks whose deterministic sample IDs have
+/// already been accepted, so the backend would correctly deduplicate them and
+/// the bar would remain frozen.
 ///
 /// Runs in the MAIN APP ONLY. The extension gets seconds of CPU per callback and
 /// must never spend them on XPC round trips it did not need; the app both
@@ -71,6 +73,18 @@ nonisolated final class MeteringWatchdog: @unchecked Sendable {
     private let center: any MeteringDeviceActivityCenter
     private let now: @Sendable () -> Date
     private let heal: @Sendable () async -> String
+    /// A daemon registration miss must mint new physical event identities.
+    /// Other daemon/coverage reds keep their existing same-route diagnostic
+    /// repair; treating every red as a missing route would make that repair a
+    /// no-op whenever the activity still exists with a drifted configuration.
+    private let missingRouteHeal: @Sendable () async -> String
+    /// Heal for a stuck route handoff. A same-route re-kick cannot repair a
+    /// wedged cutover — only a full recovery pass can (it is what the 19:29
+    /// unshield accidentally ran on the 2026-08-11 iPad after the handoff sat
+    /// in cutoverReady for 7.5 hours with this watchdog reporting-but-not-
+    /// healing every 5 minutes). Separate seam so tests can observe which
+    /// heal fired.
+    private let handoffHeal: @Sendable () async -> String
     /// Seam for probe 4. A unit-test process never holds FamilyControls
     /// authorization, so reading `AuthorizationCenter` directly made every
     /// green-verdict test fail on a condition that only exists off-device.
@@ -91,6 +105,16 @@ nonisolated final class MeteringWatchdog: @unchecked Sendable {
         heal: @escaping @Sendable () async -> String = {
             await MeteringTodayRouteRekick.run(trigger: "watchdog")
         },
+        missingRouteHeal: @escaping @Sendable () async -> String = {
+            await MeteringTodayRouteRekick.replaceMissingActiveRoute(
+                trigger: "watchdog"
+            )
+        },
+        handoffHeal: @escaping @Sendable () async -> String = {
+            let outcome = try? await MeteringProductionComposition
+                .recoverFromSharedConfiguration(role: .app)
+            return "recovery_pass:\(String(describing: outcome))"
+        },
         screenTimeAuthorized: @escaping @Sendable () -> Bool = {
             AuthorizationCenter.shared.authorizationStatus == .approved
         }
@@ -99,6 +123,8 @@ nonisolated final class MeteringWatchdog: @unchecked Sendable {
         self.center = center
         self.now = now
         self.heal = heal
+        self.missingRouteHeal = missingRouteHeal
+        self.handoffHeal = handoffHeal
         self.screenTimeAuthorized = screenTimeAuthorized
     }
 
@@ -171,24 +197,42 @@ nonisolated final class MeteringWatchdog: @unchecked Sendable {
         let cooling: Bool = throttleLock.withLock {
             lastRekickAt.map { now().timeIntervalSince($0) < Self.rekickCooldown } ?? false
         }
-        let healable = !verdict.reds.isEmpty
+        let stuckHandoff = verdict.reportOnlyReds.contains {
+            $0.hasPrefix("handoff_stuck")
+        }
+        let daemonRegistrationMissing = verdict.reds.contains("daemon_registration")
+        let healable = !verdict.reds.isEmpty || stuckHandoff
+        let requestedHeal = stuckHandoff
+            ? "recovery_pass"
+            : (daemonRegistrationMissing ? "fresh_route" : "rekick")
         MeteringFlightRecorder.emit(
             kind: .meteringWatch,
             site: "watchdog.selfcheck",
             verdict: "red:" + (verdict.reds + verdict.reportOnlyReds).joined(separator: ","),
             detail: MeteringFlightRecorder.detail([
                 ("trigger", trigger),
-                ("heal", healable ? (cooling ? "cooling_down" : "rekick") : "none_applicable"),
+                ("heal", healable ? (cooling ? "cooling_down" : requestedHeal) : "none_applicable"),
             ]) + " " + verdict.detail,
             corrID: verdict.routeID
         )
         guard healable, !cooling else { return }
         throttleLock.withLock { lastRekickAt = now() }
-        let report = await heal()
+        // A stuck handoff needs the full recovery pass, not a same-route
+        // re-kick — re-kicking the route whose handoff is wedged just re-arms
+        // the wrong side of the cutover. When both are present the recovery
+        // pass wins: it subsumes the re-kick's effect for a wedged day.
+        let report: String
+        if stuckHandoff {
+            report = await handoffHeal()
+        } else if daemonRegistrationMissing {
+            report = await missingRouteHeal()
+        } else {
+            report = await heal()
+        }
         MeteringFlightRecorder.emit(
             kind: .meteringWatch,
             site: "watchdog.heal",
-            verdict: "rekicked",
+            verdict: requestedHeal,
             detail: MeteringFlightRecorder.detail([
                 ("reds", verdict.reds.joined(separator: ",")),
                 ("report", report),

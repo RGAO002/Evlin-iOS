@@ -470,10 +470,15 @@ final class MeteringEpochContractTests: XCTestCase {
                 active: active,
                 next: epochKey(enforcementSetID: Self.otherEnforcementSetID),
                 explicitRecovery: nil
+            ),
+            MeteringEpochContract.replacementReason(
+                active: active,
+                next: active,
+                explicitRecovery: .deliveryRecovery
             )
         ].compactMap { $0 }
 
-        XCTAssertEqual(reasons.count, 8)
+        XCTAssertEqual(reasons.count, 9)
         XCTAssertEqual(Set(reasons), Set(MeteringEpochReplacementReason.allCases))
     }
 

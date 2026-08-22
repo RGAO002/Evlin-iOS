@@ -1161,7 +1161,8 @@ final class MeteringConservativeResumeTests: XCTestCase {
             ),
             center: fixture.center,
             processIdentity: identity,
-            clock: clock
+            clock: clock,
+            resetRolloverEffect: { _, _ in }
         )
     }
 

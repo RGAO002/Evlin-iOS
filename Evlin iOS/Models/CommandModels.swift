@@ -15,6 +15,7 @@ enum CommandAction: String, Codable, Sendable {
     /// A4: same-day pool/cap change sync from the backend. Handled inline in
     /// CommandPoller; never reaches ActionExecutor.
     case earnedTimeConfig = "earned_time_config"
+    case meteringRearm = "metering_rearm"
 }
 
 enum OrderingTokenDecoding {

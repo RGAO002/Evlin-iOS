@@ -168,10 +168,16 @@ final class AppLimitOwnerRecoveryDriver {
                   currentSlot.latestPayloadDigest == work.payloadDigest,
                   currentSlot.appliedReceipt == receipt
             else { throw RecoveryError.staleWork }
-            try await readbackPort.confirm(
-                commandID: work.commandID,
-                receipt: receipt
-            )
+            if work.confirmationMode != .localSnapshot {
+                try await readbackPort.confirm(
+                    commandID: work.commandID,
+                    receipt: receipt
+                )
+            }
+            // Snapshot-hydrated work carries a synthetic command id the
+            // backend never issued; confirming it would 404 forever and pin
+            // the pending work (2026-08-11 collab, Codable-rollback note).
+            // The durable receipt above IS the completion record.
             try store.transaction(
                 source: .wakeRecovery,
                 expectedOwner: ownerChildDeviceID
@@ -778,9 +784,7 @@ struct MeteringProcessConfiguration {
     static func load(defaults: UserDefaults?) -> MeteringProcessConfiguration? {
         guard let defaults,
               let baseRaw = defaults.string(forKey: MeteringProductionComposition.baseURLKey),
-              let baseURL = URL(string: baseRaw),
-              ["http", "https"].contains(baseURL.scheme?.lowercased() ?? ""),
-              baseURL.host != nil,
+              let baseURL = MeteringProductionComposition.sanitizedBaseURL(baseRaw),
               let ownerRaw = defaults.string(forKey: MeteringProductionComposition.ownerKey),
               let owner = UUID(uuidString: ownerRaw)
         else { return nil }

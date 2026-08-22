@@ -181,7 +181,9 @@ struct BigKidRootView: View {
             if status == .approved {
                 AppControlsIdentityGuard.noteAuthorizationApproved()
             } else {
-                AppControlsIdentityGuard.noteAuthorizationRevoked()
+                AppControlsIdentityGuard.noteAuthorizationRevoked(
+                    denied: status == .denied
+                )
             }
         }
         .onChange(of: scenePhase) { _, newPhase in

@@ -396,6 +396,52 @@ final class AppLimitWakeRecoveryTests: XCTestCase {
         )
     }
 
+    func testLocalSnapshotWorkCompletesWithoutEverCallingTheBackendAck() async throws {
+        // Snapshot-hydrated work carries a SYNTHETIC command id the backend
+        // never issued — /child/ack would 404 on it forever and the pending
+        // work would be pinned for good (the old-build regression the
+        // rollback probe watches for). Local completion: effect applies,
+        // receipt commits, pending work clears, and the readback port is
+        // NEVER consulted.
+        let harness = makeHarness()
+        var envelope = setEnvelope(token: 10)
+        envelope = AppLimitCommandEnvelope(
+            commandID: envelope.commandID,
+            ruleID: envelope.ruleID,
+            orderingToken: envelope.orderingToken,
+            kind: envelope.kind,
+            payloadDigest: envelope.payloadDigest,
+            receivedAt: envelope.receivedAt,
+            source: .wakeRecovery,
+            rule: envelope.rule,
+            confirmationMode: .localSnapshot
+        )
+        _ = try harness.coordinator.ingest(envelope)
+        let readback = RecordingReadback(store: harness.store)
+        let effects = RecordingEffects(store: harness.store)
+        let driver = AppLimitOwnerRecoveryDriver(
+            store: harness.store,
+            effectPort: effects,
+            readbackPort: readback
+        )
+
+        await driver.recover(ownerChildDeviceID: ownerID)
+
+        let appliedTokens = await effects.tokens
+        let confirmationCount = await readback.count
+        XCTAssertEqual(appliedTokens, [10], "the effect must still apply")
+        XCTAssertEqual(
+            confirmationCount, 0,
+            "a synthetic command id must never reach /child/ack"
+        )
+        let slot = try XCTUnwrap(harness.store.read().slots[ruleID])
+        XCTAssertNotNil(slot.appliedReceipt)
+        XCTAssertNil(
+            slot.pendingOwnerWork,
+            "local completion clears the pending work — nothing left to retry"
+        )
+    }
+
     private func setEnvelope(token: Int64) -> AppLimitCommandEnvelope {
         let rule = AppLimitRule(
             id: ruleID,

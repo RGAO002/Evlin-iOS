@@ -499,7 +499,10 @@ final class MeteringEpochGoldenVectorTests: XCTestCase {
 
             if testCase.input.kind == .generationReadinessReplacement {
                 let reasons = actual.replacementReasons ?? []
-                XCTAssertEqual(reasons.count, 8, testCase.id)
+                // 9 = the closed reason set incl. delivery_recovery
+                // (2026-08-11). The Set equality below is the real guarantee;
+                // the count only catches duplicates.
+                XCTAssertEqual(reasons.count, 9, testCase.id)
                 XCTAssertEqual(
                     Set(reasons),
                     Set(MeteringEpochReplacementReason.allCases.map(\.rawValue)),

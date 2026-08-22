@@ -54,6 +54,48 @@ enum MeteringRecoveryOutcome: Equatable {
 nonisolated enum MeteringProductionComposition {
     static let appGroupSuiteName = "group.com.evlin.ios"
     static let baseURLKey = "evlin.baseURL"
+
+    /// The App Group backend URL, rejected in a production build when it names
+    /// a development host.
+    ///
+    /// There are TWO stored backend addresses. `APIClient` already drops a dev
+    /// URL from `UserDefaults.standard` on every Release launch — but the
+    /// metering stack, the DeviceActivity monitor and the push extension read
+    /// this SECOND copy out of the App Group, and nothing ever sanitised it.
+    /// The App Group container survives replacing the app, so a LAN address
+    /// written by a debug build stayed behind after a TestFlight install: the
+    /// main app healed itself while the extensions kept talking to a Mac that
+    /// was not on the user's network (2026-08-08 — only an uninstall cleared
+    /// it). Worse than merely being unreachable, a real user's metering
+    /// samples would be posted to whatever answers on that private address.
+    ///
+    /// Rejecting is safe: the app rewrites this key from its own sanitised
+    /// base URL on the next configuration pass, so the extensions resume as
+    /// soon as a legitimate address is stored.
+    nonisolated static func sanitizedBaseURL(_ raw: String) -> URL? {
+        guard let url = URL(string: raw),
+              let scheme = url.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              let host = url.host?.lowercased()
+        else { return nil }
+        #if DEBUG
+        return url
+        #else
+        if scheme != "https" { return nil }
+        if host == "localhost" || host.hasSuffix(".local") { return nil }
+        if host == "127.0.0.1" || host.hasPrefix("192.168.") || host.hasPrefix("10.") {
+            return nil
+        }
+        // 172.16.0.0/12
+        if host.hasPrefix("172.") {
+            let parts = host.split(separator: ".")
+            if parts.count > 1, let second = Int(parts[1]), (16...31).contains(second) {
+                return nil
+            }
+        }
+        return url
+        #endif
+    }
     static let ownerKey = "evlin.childId"
     static let selectionKey = "earned.measurementSelection"
     static let lockedSetIDKey = "earned.lockedSetID"
@@ -624,9 +666,7 @@ nonisolated enum MeteringProductionComposition {
     )? {
         guard let defaults = UserDefaults(suiteName: appGroupSuiteName),
               let baseRaw = defaults.string(forKey: baseURLKey),
-              let baseURL = URL(string: baseRaw),
-              ["http", "https"].contains(baseURL.scheme?.lowercased() ?? ""),
-              baseURL.host != nil,
+              let baseURL = sanitizedBaseURL(baseRaw),
               let ownerRaw = defaults.string(forKey: ownerKey),
               let owner = UUID(uuidString: ownerRaw)
         else { return nil }

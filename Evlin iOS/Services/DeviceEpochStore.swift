@@ -83,6 +83,12 @@ nonisolated enum MeteringEpochRetireReason: String, Codable, Sendable {
     case dayRollover, policyChange, selectionChange, enforcementSetChange
     case identityRecovery, gateResumeConservative, authoritativeBaseMismatch
     case coverageExpired, activationSuperseded
+    // The route stopped delivering while nothing about the key changed —
+    // retired so a fresh physical route can be minted under the paired
+    // `delivery_recovery` replacement reason (the registry keeps the
+    // switchover window alive only when retire and replacement reasons
+    // match).
+    case deliveryRecovery
 }
 
 nonisolated struct DeviceDailyEpoch: Codable, Equatable, Sendable {
@@ -200,7 +206,8 @@ nonisolated enum MeteringLadderMath {
     static func plannedEvents(
         routeID: UUID,
         ladderBaseMinutes: Int,
-        ceilingMinutes: Int
+        ceilingMinutes: Int,
+        physicalGenerationOffsetMinutes: Int = 0
     ) -> [MeteringEventPlan]? {
         let remaining = ceilingMinutes - max(0, ladderBaseMinutes)
         guard remaining >= bucketMinutes else { return nil }
@@ -208,9 +215,10 @@ nonisolated enum MeteringLadderMath {
         guard !cut.isEmpty else { return nil }
         let activityName = "evlin.earned.v2.\(routeID.uuidString.lowercased())"
         return cut.map { threshold in
-            MeteringEventPlan(
-                eventName: "\(activityName).t\(threshold)",
-                thresholdMinutes: threshold
+            let physicalThreshold = threshold + max(0, physicalGenerationOffsetMinutes)
+            return MeteringEventPlan(
+                eventName: "\(activityName).t\(physicalThreshold)",
+                thresholdMinutes: physicalThreshold
             )
         }
     }
@@ -255,6 +263,16 @@ nonisolated struct MeteringCallbackRoute: Codable, Equatable, Sendable {
     /// on the ceiling clamp; `repairLadderBaseInvariantIfNeeded` re-cuts it into
     /// a self-consistent state on the next recovery pass.
     var ladderBaseMinutes: Int? = nil
+
+    /// Physical minutes already present in Apple's counter when this route was
+    /// armed. Its event thresholds are shifted by this amount, while accounting
+    /// subtracts it. Route scope is essential: late callbacks from an older
+    /// route must continue to use that route's own physical scale.
+    ///
+    /// Optional for backward-compatible decoding. Nil means zero and every new
+    /// day, identity, or policy generation starts at zero unless an arm-grace
+    /// calibration explicitly re-cuts this exact route lineage.
+    var physicalGenerationOffsetMinutes: Int? = nil
 }
 
 nonisolated struct MeteringRouteTombstone: Codable, Equatable, Sendable {
@@ -415,6 +433,7 @@ private nonisolated struct MeteringCallbackVerdictContext {
     let baseAcceptedMinutes: Int?
     let lastRawThresholdMinutes: Int?
     let excludedWhilePausedMinutes: Int?
+    let physicalGenerationOffsetMinutes: Int?
     let sampleAlreadyExisted: Bool
 }
 
@@ -2675,7 +2694,8 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 base: context?.baseAcceptedMinutes,
                 raw: context?.lastRawThresholdMinutes,
                 threshold: input.thresholdMinutes,
-                excluded: context?.excludedWhilePausedMinutes
+                excluded: context?.excludedWhilePausedMinutes,
+                offset: context?.physicalGenerationOffsetMinutes
             ),
             corrID: input.routeID
         )
@@ -2698,6 +2718,7 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             baseAcceptedMinutes: epoch?.baseAcceptedMinutes,
             lastRawThresholdMinutes: epoch?.lastRawThresholdMinutes,
             excludedWhilePausedMinutes: epoch?.excludedWhilePausedMinutes,
+            physicalGenerationOffsetMinutes: route?.physicalGenerationOffsetMinutes,
             sampleAlreadyExisted: sampleAlreadyExisted
         )
     }
@@ -2870,8 +2891,10 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         // still synchronously consume every new one-shot event. The guard below
         // rejects that false progress and marks the physical route for a fresh
         // identity; it must never weaken the elapsed-time bound.
+        let physicalOffset = max(0, route.physicalGenerationOffsetMinutes ?? 0)
+        let logicalThreshold = max(0, input.thresholdMinutes - physicalOffset)
         let earliest = epoch.startedAt.addingTimeInterval(
-            TimeInterval(input.thresholdMinutes * 60 - input.jitterSeconds)
+            TimeInterval(logicalThreshold * 60 - input.jitterSeconds)
         )
         guard input.observedAt >= earliest else {
             // FIX-Q: a rung firing within seconds of ARM is Apple back-firing
@@ -2893,6 +2916,15 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                     epoch.excludedWhilePausedMinutes, input.thresholdMinutes
                 )
                 state.epochs[epoch.epochID] = epoch
+                let installKeys = state.installWork.compactMap { key, work in
+                    work.routeID == route.routeID ? key : nil
+                }
+                if input.thresholdMinutes > physicalOffset,
+                   installKeys.count == 1,
+                   let installKey = installKeys.first {
+                    state.installWork[installKey]?.retry.lastErrorCode =
+                        "arm_grace_calibration_requires_offset_recut"
+                }
                 return .discarded(reason: "arm_grace_calibration")
             }
             let installKeys = state.installWork.compactMap { key, work in
@@ -2996,7 +3028,12 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             return .discarded(reason: "resume_boundary")
         }
 
-        if let reference = preparedShieldReference {
+        // A calibration high-water above this route's planned physical offset
+        // means its terminal bell is physically early. Keep the sample (it is
+        // still useful ledger evidence), but never install the terminal shield
+        // until recovery has re-cut the route with the matching offset.
+        if let reference = preparedShieldReference,
+           epoch.excludedWhilePausedMinutes <= physicalOffset {
             guard let terminal = route.plannedEvents.max(by: {
                 $0.thresholdMinutes < $1.thresholdMinutes
             }),
@@ -3909,6 +3946,7 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             // transaction.
             let carried: Int
             let candidateLadder: [MeteringEventPlan]?
+            let physicalOffset = max(0, route.physicalGenerationOffsetMinutes ?? 0)
             if let ceiling = state.ladderCeilingMinutes(for: route) {
                 // The base may never pass the day's ceiling, whatever the raw
                 // high-water says. Without this the absorb COMPOUNDS: a rung of
@@ -3921,7 +3959,8 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 candidateLadder = MeteringLadderMath.plannedEvents(
                     routeID: route.routeID,
                     ladderBaseMinutes: carried,
-                    ceilingMinutes: ceiling
+                    ceilingMinutes: ceiling,
+                    physicalGenerationOffsetMinutes: physicalOffset
                 )
             } else {
                 // Generation predates the pool/cap capture, so there is no
@@ -3935,7 +3974,12 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 candidateLadder = MeteringLadderMath.plannedEvents(
                     routeID: route.routeID,
                     ladderBaseMinutes: 0,
-                    ceilingMinutes: route.plannedEvents.map(\.thresholdMinutes).max() ?? 0
+                    ceilingMinutes: max(
+                        0,
+                        (route.plannedEvents.map(\.thresholdMinutes).max() ?? 0)
+                            - physicalOffset
+                    ),
+                    physicalGenerationOffsetMinutes: physicalOffset
                 )
             }
             guard let recut = candidateLadder else {
@@ -3965,11 +4009,11 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 registeredAt: epoch.registeredAt,
                 baseAcceptedMinutes: carried,
                 baseSource: epoch.baseSource,
-                lastRawThresholdMinutes: 0,
+                lastRawThresholdMinutes: physicalOffset,
                 // Zeroed together with the raw high-water: the paused minutes it
                 // recorded were measured on the raw scale that just collapsed
                 // into the base, so keeping it would subtract them twice.
-                excludedWhilePausedMinutes: 0,
+                excludedWhilePausedMinutes: physicalOffset,
                 status: epoch.status,
                 resumeBoundaryPending: epoch.resumeBoundaryPending,
                 retiredAt: epoch.retiredAt,
@@ -4018,6 +4062,38 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
     /// away would be a milder version of the same bug.
     @discardableResult
     func repairLadderBaseInvariantIfNeeded(owner: UUID, now: Date) throws -> Bool {
+        try replaceActiveRouteIfNeeded(
+            owner: owner,
+            daemonMissingRouteID: nil,
+            now: now
+        )
+    }
+
+    /// Replaces an active logical route that Apple's daemon no longer holds.
+    ///
+    /// Re-registering the same activity/event names is not recovery: threshold
+    /// callbacks and sample work IDs are deterministic, so accepted rungs are
+    /// consumed forever under that physical identity. Use the same proven
+    /// make-before-break transition as ladder repair, preserving the durable
+    /// ledger while minting fresh activity and event names.
+    @discardableResult
+    func replaceMissingActiveRouteIfNeeded(
+        owner: UUID,
+        missingRouteID: UUID,
+        now: Date
+    ) throws -> Bool {
+        try replaceActiveRouteIfNeeded(
+            owner: owner,
+            daemonMissingRouteID: missingRouteID,
+            now: now
+        )
+    }
+
+    private func replaceActiveRouteIfNeeded(
+        owner: UUID,
+        daemonMissingRouteID: UUID?,
+        now: Date
+    ) throws -> Bool {
         var verdict = "consistent"
         var beforeSummary = ""
         var afterSummary = ""
@@ -4072,7 +4148,9 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             else { return false }
 
             let ladderBase = state.ladderBaseMinutes(for: route)
-            let overrunsPool = ladderBase + topRung > ceiling
+            let routeOffset = max(0, route.physicalGenerationOffsetMinutes ?? 0)
+            let logicalTopRung = max(0, topRung - routeOffset)
+            let overrunsPool = ladderBase + logicalTopRung > ceiling
             let disagreesWithEpoch = route.ladderBaseMinutes != epoch.baseAcceptedMinutes
             // A base that has already climbed past the whole pool is the
             // compounded form of the same split (iPad: base 460 against a
@@ -4102,6 +4180,11 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 routeInstallRows.count == 1
                 && routeInstallRows[0].retry.lastErrorCode
                     == "physical_events_consumed_too_early"
+            let armCalibrationRequiresOffsetRecut =
+                routeInstallRows.count == 1
+                && routeInstallRows[0].retry.lastErrorCode
+                    == "arm_grace_calibration_requires_offset_recut"
+            let daemonLostActiveRoute = daemonMissingRouteID == routeID
             // An arm-time burst absorbed by the FIX-Q grace path raises the
             // exclusion high-water without a death stamp. When it swallows the
             // TOP rung, every armed one-shot has already fired and no future
@@ -4112,7 +4195,8 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             // fresh ladder is based at the durably accepted value, so its
             // rungs sit above Apple's day counter and survive the re-arm.
             let exclusionSwallowedWholeLadder =
-                epoch.excludedWhilePausedMinutes >= topRung
+                max(0, epoch.excludedWhilePausedMinutes - routeOffset) >= logicalTopRung
+                && logicalTopRung > 0
             // A poisoned base can be internally self-consistent: the affected
             // iPad held base=225, ladderBase=225 and rungs 5/10/15 under a
             // 240-minute ceiling. Only the succeeded backend work proves that
@@ -4151,7 +4235,9 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                     || disagreesWithDurableAuthority
                     || reusedPhysicalIdentityAfterInPlaceRepair
                     || physicalEventsConsumedTooEarly
+                    || armCalibrationRequiresOffsetRecut
                     || exclusionSwallowedWholeLadder
+                    || daemonLostActiveRoute
             else { return false }
 
             // Already clamped as far as this repair can go — do not re-run.
@@ -4186,13 +4272,17 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             // `absorbCreditedProgressForRearm` had just removed.
             let accepted = durablyAccepted ?? epoch.baseAcceptedMinutes
             let ledger = min(accepted, ceiling)
+            let candidateOffset = armCalibrationRequiresOffsetRecut
+                ? max(routeOffset, epoch.excludedWhilePausedMinutes)
+                : routeOffset
             let candidateEpochID = UUID()
             let candidateRouteID = UUID()
             let candidateInstallID = UUID()
             guard let candidateEvents = MeteringLadderMath.plannedEvents(
                 routeID: candidateRouteID,
                 ladderBaseMinutes: ledger,
-                ceilingMinutes: ceiling
+                ceilingMinutes: ceiling,
+                physicalGenerationOffsetMinutes: candidateOffset
             ) else {
                 // The pool is spent: there is nothing left to cut, so the rungs
                 // Apple still holds stay armed. They can no longer over-report —
@@ -4266,8 +4356,8 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 registeredAt: nil,
                 baseAcceptedMinutes: ledger,
                 baseSource: .childState200,
-                lastRawThresholdMinutes: 0,
-                excludedWhilePausedMinutes: 0,
+                lastRawThresholdMinutes: candidateOffset,
+                excludedWhilePausedMinutes: candidateOffset,
                 status: .active,
                 resumeBoundaryPending: false,
                 retiredAt: nil,
@@ -4296,7 +4386,8 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 installedEvents: nil,
                 lifecycle: .planned,
                 createdAt: now,
-                ladderBaseMinutes: ledger
+                ladderBaseMinutes: ledger,
+                physicalGenerationOffsetMinutes: candidateOffset
             )
             state.epochs[candidateEpochID] = candidateEpoch
             state.routes[candidateRouteID] = candidateRoute
@@ -4332,17 +4423,22 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 createdAt: now,
                 explicitRecovery: .identityRecovery
             )
-            if reusedPhysicalIdentityAfterInPlaceRepair {
+            if daemonLostActiveRoute {
+                verdict = "replacement_daemon_missing"
+            } else if reusedPhysicalIdentityAfterInPlaceRepair {
                 verdict = "replacement_reused_identity"
             } else if physicalEventsConsumedTooEarly {
                 verdict = "replacement_consumed_events"
+            } else if armCalibrationRequiresOffsetRecut {
+                verdict = "replacement_arm_calibration_offset"
             } else {
                 verdict = overrunsPool || baseExceedsPool
                     ? "replacement_overrun"
                     : "replacement_desync"
             }
-            afterSummary = "base:\(ledger)+raw:0"
+            afterSummary = "base:\(ledger)+raw:\(candidateOffset)"
                 + "/route:\(candidateRouteID.uuidString.lowercased())"
+                + "/offset:\(candidateOffset)"
                 + "/ladder:\(ledger)+\(candidateEvents.map(\.thresholdMinutes).max() ?? 0)"
             return true
         }
@@ -4801,7 +4897,15 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                         // this switch already documents).
                         return install.authorization == .futurePlanned
                             || install.authorization == .registrationRequired
-                    case .starting, .installed, .pendingStop:
+                    case .starting, .installed:
+                        // A future-horizon daemon install can outlive the short
+                        // NSE recovery window. It must not hold the already
+                        // authorized current route's activation behind its
+                        // install claim; activation is a network acknowledgement
+                        // and does not mutate DeviceActivityCenter state.
+                        return item.kind == .activation
+                            && install.authorization == .futurePlanned
+                    case .pendingStop:
                         return false
                     }
                 }
@@ -6134,7 +6238,9 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                   $0.routeID == prior.toRouteID
                       && $0.phase == .pendingStop
                       && $0.retry.terminal == .pending
-                      && $0.retry.lastErrorCode == "physical_events_consumed_too_early"
+                      && ($0.retry.lastErrorCode == "physical_events_consumed_too_early"
+                          || $0.retry.lastErrorCode
+                              == "arm_grace_calibration_requires_offset_recut")
               }).count == 1,
               let replacementEpoch = state.epochs[replacement.toEpochID],
               replacementEpoch.status == .active,
@@ -6148,8 +6254,13 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                       && $0.retry.terminal == .pending
               }).count == 1
         else { return false }
-        return replacementRoute.plannedEvents.map(\.thresholdMinutes)
-            == state.routes[prior.toRouteID]?.plannedEvents.map(\.thresholdMinutes)
+        guard let priorRoute = state.routes[prior.toRouteID] else { return false }
+        let priorOffset = max(0, priorRoute.physicalGenerationOffsetMinutes ?? 0)
+        let replacementOffset = max(
+            0, replacementRoute.physicalGenerationOffsetMinutes ?? 0
+        )
+        return replacementRoute.plannedEvents.map { $0.thresholdMinutes - replacementOffset }
+            == priorRoute.plannedEvents.map { $0.thresholdMinutes - priorOffset }
     }
 
     private func canAbandonConsumedPhysicalCandidate(
@@ -6176,8 +6287,9 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         guard installs.count == 1,
               installs[0].phase == .pendingStop,
               installs[0].retry.terminal == .pending,
-              installs[0].retry.lastErrorCode
-                == "physical_events_consumed_too_early"
+              (installs[0].retry.lastErrorCode == "physical_events_consumed_too_early"
+                || installs[0].retry.lastErrorCode
+                    == "arm_grace_calibration_requires_offset_recut")
         else { return false }
         return !state.registrationWork.values.contains {
             $0.routeID == handoff.toRouteID && $0.retry.terminal == .pending
@@ -6905,8 +7017,10 @@ extension DeviceEpochStoreState {
               installWork.values.filter({
                   $0.routeID == rejectedRoute.routeID
               }).count == 1,
-              installWork[rejectedInstallKey]?.retry.lastErrorCode
-                == "physical_events_consumed_too_early",
+              (installWork[rejectedInstallKey]?.retry.lastErrorCode
+                == "physical_events_consumed_too_early"
+                || installWork[rejectedInstallKey]?.retry.lastErrorCode
+                    == "arm_grace_calibration_requires_offset_recut"),
               !rejectedRoute.plannedEvents.isEmpty,
               let dayEnd = canonicalDayEnd(
                   usageDate: rejectedRoute.usageDate,
@@ -6914,13 +7028,22 @@ extension DeviceEpochStoreState {
               )
         else { return false }
 
+        let rejectedOffset = max(
+            0, rejectedRoute.physicalGenerationOffsetMinutes ?? 0
+        )
+        let replacementOffset = max(
+            rejectedOffset,
+            rejectedEpoch.excludedWhilePausedMinutes
+        )
         let replacementEvents = rejectedRoute.plannedEvents.map {
-            MeteringEventPlan(
+            let logicalThreshold = max(0, $0.thresholdMinutes - rejectedOffset)
+            let physicalThreshold = logicalThreshold + replacementOffset
+            return MeteringEventPlan(
                 eventName: callbackEventName(
                     routeID: replacementRouteID,
-                    thresholdMinutes: $0.thresholdMinutes
+                    thresholdMinutes: physicalThreshold
                 ),
-                thresholdMinutes: $0.thresholdMinutes
+                thresholdMinutes: physicalThreshold
             )
         }
         let replacementGenerationID = UUID()
@@ -7047,8 +7170,8 @@ extension DeviceEpochStoreState {
             registeredAt: nil,
             baseAcceptedMinutes: rejectedEpoch.baseAcceptedMinutes,
             baseSource: rejectedEpoch.baseSource,
-            lastRawThresholdMinutes: 0,
-            excludedWhilePausedMinutes: 0,
+            lastRawThresholdMinutes: replacementOffset,
+            excludedWhilePausedMinutes: replacementOffset,
             status: .active,
             resumeBoundaryPending: rejectedEpoch.resumeBoundaryPending,
             retiredAt: nil,
@@ -7077,7 +7200,8 @@ extension DeviceEpochStoreState {
             installedEvents: nil,
             lifecycle: .planned,
             createdAt: now,
-            ladderBaseMinutes: rejectedEpoch.baseAcceptedMinutes
+            ladderBaseMinutes: rejectedEpoch.baseAcceptedMinutes,
+            physicalGenerationOffsetMinutes: replacementOffset
         )
         generations[replacementGenerationID] = replacementGeneration
         epochs[replacementEpochID] = replacementEpoch
@@ -7475,6 +7599,26 @@ extension DeviceEpochStoreState {
             )
         if hasActivePrior { return true }
 
+        // A closed accounting gate must not erase the next canonical day.
+        // Task and reflection locks intentionally pause the predecessor, and
+        // the server registers the new-day epoch as paused until the gate
+        // reopens. The tuple below is still an exact canonical rollover: same
+        // owner, generation and immutable policy fields, advancing by exactly
+        // one local calendar day. Allowing that tuple to activate as paused
+        // gives the device a registered identity for today without permitting
+        // accounting while the gate remains closed.
+        let hasPausedCanonicalRolloverPrior = fromEpoch.status == .paused
+            && fromEpoch.retiredAt == nil
+            && isExactCanonicalDayRolloverPrior(
+                handoff: handoff,
+                fromRoute: fromRoute,
+                fromEpoch: fromEpoch,
+                toRoute: toRoute,
+                toEpoch: toEpoch,
+                generation: fromGeneration
+            )
+        if hasPausedCanonicalRolloverPrior { return true }
+
         // `.active` is accepted alongside `.paused`: the SERVER now reopens the
         // gate in place (`mark_metering_gate_open`), so by the time this
         // resume handoff reaches its cutover the predecessor it was minted for
@@ -7627,7 +7771,7 @@ extension DeviceEpochStoreState {
               toRoute.generationID == generation.generationID,
               fromRoute.usageDate == fromEpoch.usageDate,
               toRoute.usageDate == toEpoch.usageDate,
-              toEpoch.status == .active,
+              (toEpoch.status == .active || toEpoch.status == .paused),
               toEpoch.retiredAt == nil,
               toEpoch.childDeviceID == fromEpoch.childDeviceID,
               toEpoch.canonicalTimezone == fromEpoch.canonicalTimezone,

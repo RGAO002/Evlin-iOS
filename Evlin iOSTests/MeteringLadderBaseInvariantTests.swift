@@ -357,6 +357,79 @@ final class MeteringLadderBaseInvariantTests: XCTestCase {
         XCTAssertEqual(replay.v2RouteHandoff?.toRouteID, handoff.toRouteID)
     }
 
+    /// A watchdog repair must never restart a route whose deterministic sample
+    /// IDs have already been accepted. The iPad re-kicked the same t20 identity
+    /// after carrying 65 minutes into the base, so the callback was correctly
+    /// deduplicated and the bar stayed frozen.
+    func testMissingDaemonRouteRecoveryMintsFreshPhysicalIdentity() throws {
+        let fixture = try LadderFixture.healthy(epochBase: 0, poolMinutes: 180)
+        defer { fixture.cleanup() }
+        try fixture.recordThreshold(65, terminal: .succeeded)
+        let repairAt = fixture.start.addingTimeInterval(2 * 60 * 60)
+
+        XCTAssertTrue(try fixture.store.replaceMissingActiveRouteIfNeeded(
+            owner: fixture.owner,
+            missingRouteID: fixture.routeID,
+            now: repairAt
+        ))
+
+        let state = try fixture.store.read()
+        let handoff = try XCTUnwrap(state.v2RouteHandoff)
+        let candidateEpoch = try XCTUnwrap(state.epochs[handoff.toEpochID])
+        let candidateRoute = try XCTUnwrap(state.routes[handoff.toRouteID])
+        XCTAssertEqual(state.activeRouteID, fixture.routeID)
+        XCTAssertNotEqual(candidateRoute.routeID, fixture.routeID)
+        XCTAssertNotEqual(
+            candidateRoute.activityName,
+            state.routes[fixture.routeID]?.activityName
+        )
+        XCTAssertEqual(candidateEpoch.baseAcceptedMinutes, 65)
+        XCTAssertEqual(candidateRoute.ladderBaseMinutes, 65)
+        XCTAssertEqual(candidateRoute.plannedSchedule.intervalStartAt, repairAt)
+        XCTAssertTrue(candidateRoute.plannedEvents.allSatisfy {
+            $0.eventName.contains(candidateRoute.routeID.uuidString.lowercased())
+        })
+        XCTAssertEqual(handoff.explicitRecovery, .identityRecovery)
+    }
+
+    func testMissingDaemonRouteRecoveryDoesNotMintAgainWhileHandoffIsInFlight() throws {
+        let fixture = try LadderFixture.healthy(epochBase: 0, poolMinutes: 180)
+        defer { fixture.cleanup() }
+        try fixture.recordThreshold(65, terminal: .succeeded)
+
+        XCTAssertTrue(try fixture.store.replaceMissingActiveRouteIfNeeded(
+            owner: fixture.owner,
+            missingRouteID: fixture.routeID,
+            now: fixture.start.addingTimeInterval(60)
+        ))
+        let first = try XCTUnwrap(fixture.store.read().v2RouteHandoff)
+
+        XCTAssertFalse(try fixture.store.replaceMissingActiveRouteIfNeeded(
+            owner: fixture.owner,
+            missingRouteID: fixture.routeID,
+            now: fixture.start.addingTimeInterval(120)
+        ))
+        let replay = try XCTUnwrap(fixture.store.read().v2RouteHandoff)
+        XCTAssertEqual(replay.toEpochID, first.toEpochID)
+        XCTAssertEqual(replay.toRouteID, first.toRouteID)
+    }
+
+    func testMissingDaemonRouteRecoveryRejectsAStaleRouteObservation() throws {
+        let fixture = try LadderFixture.healthy(epochBase: 0, poolMinutes: 180)
+        defer { fixture.cleanup() }
+
+        XCTAssertFalse(try fixture.store.replaceMissingActiveRouteIfNeeded(
+            owner: fixture.owner,
+            missingRouteID: UUID(),
+            now: fixture.start.addingTimeInterval(60)
+        ))
+
+        let state = try fixture.store.read()
+        XCTAssertNil(state.v2RouteHandoff)
+        XCTAssertEqual(state.activeRouteID, fixture.routeID)
+        XCTAssertEqual(state.routes.count, 1)
+    }
+
     func testRepairNormalizesVerifiedInstallForLogicallyActivePriorRoute() throws {
         let fixture = try LadderFixture.corrupted(
             epochBase: 225,
@@ -634,23 +707,95 @@ final class MeteringLadderBaseInvariantTests: XCTestCase {
         XCTAssertEqual(state.routes[handoff.toRouteID]?.ladderBaseMinutes, 25)
     }
 
-    /// A burst absorbed BELOW the top rung leaves live rungs armed — that
-    /// ladder still credits and must be left alone.
-    func testPartialGraceAbsorptionDoesNotTriggerIdentityRecovery() throws {
-        let fixture = try LadderFixture.healthy(epochBase: 25, poolMinutes: 65)
+    /// A partial arm-time burst leaves later bells alive, but it also consumes
+    /// part of the physical distance to the terminal event. Keeping that route
+    /// would fire its terminal N minutes before the logical ledger reaches the
+    /// pool ceiling (iPad 2026-08-21: base 65, t115, excluded 25 => 155/180).
+    /// Re-cut on a fresh identity with every physical threshold shifted by N.
+    func testPartialGraceAbsorptionOffsetsFreshPhysicalRouteTerminal() throws {
+        let fixture = try LadderFixture.healthy(epochBase: 65, poolMinutes: 180)
         defer { fixture.cleanup() }
-        try fixture.store.transaction(expectedOwner: fixture.owner) { state in
-            guard var epoch = state.epochs[fixture.epochID] else { return }
-            epoch.lastRawThresholdMinutes = 10
-            epoch.excludedWhilePausedMinutes = 10
-            state.epochs[fixture.epochID] = epoch
-        }
 
-        XCTAssertFalse(try fixture.store.repairLadderBaseInvariantIfNeeded(
+        XCTAssertEqual(
+            try fixture.store.enqueueAuthorizedV2Callback(
+                fixture.input(threshold: 25, minutesAfterStart: 0),
+                owner: fixture.owner
+            ),
+            .discarded(reason: "arm_grace_calibration")
+        )
+        XCTAssertTrue(try fixture.store.repairLadderBaseInvariantIfNeeded(
             owner: fixture.owner,
             now: fixture.start.addingTimeInterval(60)
         ))
-        XCTAssertNil(try fixture.store.read().v2RouteHandoff)
+
+        let state = try fixture.store.read()
+        let handoff = try XCTUnwrap(state.v2RouteHandoff)
+        let candidateEpoch = try XCTUnwrap(state.epochs[handoff.toEpochID])
+        let candidateRoute = try XCTUnwrap(state.routes[handoff.toRouteID])
+        XCTAssertEqual(candidateEpoch.baseAcceptedMinutes, 65)
+        XCTAssertEqual(candidateEpoch.excludedWhilePausedMinutes, 25)
+        XCTAssertEqual(candidateEpoch.lastRawThresholdMinutes, 25)
+        XCTAssertEqual(candidateRoute.physicalGenerationOffsetMinutes, 25)
+        XCTAssertEqual(candidateRoute.plannedEvents.map(\.thresholdMinutes).max(), 140)
+    }
+
+    func testRepeatedArmCalibrationAccumulatesRoutePhysicalOffset() throws {
+        let fixture = try LadderFixture.healthy(epochBase: 65, poolMinutes: 180)
+        defer { fixture.cleanup() }
+        try fixture.store.transaction(expectedOwner: fixture.owner) { state in
+            state.routes[fixture.routeID]?.physicalGenerationOffsetMinutes = 25
+            state.routes[fixture.routeID]?.plannedEvents = try XCTUnwrap(
+                MeteringLadderMath.plannedEvents(
+                    routeID: fixture.routeID,
+                    ladderBaseMinutes: 65,
+                    ceilingMinutes: 180,
+                    physicalGenerationOffsetMinutes: 25
+                )
+            )
+            state.epochs[fixture.epochID]?.lastRawThresholdMinutes = 30
+            state.epochs[fixture.epochID]?.excludedWhilePausedMinutes = 30
+            let installID = try XCTUnwrap(
+                state.installWork.first(where: { $0.value.routeID == fixture.routeID })?.key
+            )
+            state.installWork[installID]?.retry.lastErrorCode =
+                "arm_grace_calibration_requires_offset_recut"
+        }
+
+        XCTAssertTrue(try fixture.store.repairLadderBaseInvariantIfNeeded(
+            owner: fixture.owner,
+            now: fixture.start.addingTimeInterval(60)
+        ))
+
+        let state = try fixture.store.read()
+        let candidateID = try XCTUnwrap(state.v2RouteHandoff?.toRouteID)
+        let candidate = try XCTUnwrap(state.routes[candidateID])
+        XCTAssertEqual(candidate.physicalGenerationOffsetMinutes, 30)
+        XCTAssertEqual(candidate.plannedEvents.map(\.thresholdMinutes).max(), 145)
+    }
+
+    func testLatePriorRouteCallbackDoesNotUseCandidatePhysicalOffset() throws {
+        let fixture = try LadderFixture.healthy(epochBase: 65, poolMinutes: 180)
+        defer { fixture.cleanup() }
+        _ = try fixture.store.enqueueAuthorizedV2Callback(
+            fixture.input(threshold: 25, minutesAfterStart: 0),
+            owner: fixture.owner
+        )
+        XCTAssertTrue(try fixture.store.repairLadderBaseInvariantIfNeeded(
+            owner: fixture.owner,
+            now: fixture.start.addingTimeInterval(60)
+        ))
+
+        let state = try fixture.store.read()
+        let candidateID = try XCTUnwrap(state.v2RouteHandoff?.toRouteID)
+        XCTAssertNil(state.routes[fixture.routeID]?.physicalGenerationOffsetMinutes)
+        XCTAssertEqual(state.routes[candidateID]?.physicalGenerationOffsetMinutes, 25)
+        XCTAssertEqual(
+            try fixture.store.enqueueAuthorizedV2Callback(
+                fixture.input(threshold: 30, minutesAfterStart: 5),
+                owner: fixture.owner
+            ),
+            .discarded(reason: "too_early")
+        )
     }
 
     // MARK: - Ladder shape (#94)
@@ -667,6 +812,21 @@ final class MeteringLadderBaseInvariantTests: XCTestCase {
         XCTAssertEqual(cut.first, 1)
         XCTAssertLessThanOrEqual(cut.count, MeteringLadderMath.guardEventCount)
         XCTAssertEqual(cut.last, 240)
+    }
+
+    func testPhysicalOffsetMovesEventsWithoutChangingLogicalLadder() throws {
+        let events = try XCTUnwrap(MeteringLadderMath.plannedEvents(
+            routeID: UUID(),
+            ladderBaseMinutes: 65,
+            ceilingMinutes: 180,
+            physicalGenerationOffsetMinutes: 25
+        ))
+        XCTAssertEqual(events.first?.thresholdMinutes, 26)
+        XCTAssertEqual(events.last?.thresholdMinutes, 140)
+        XCTAssertEqual(
+            events.map { $0.thresholdMinutes - 25 },
+            MeteringLadderMath.thresholds(remainingMinutes: 115)
+        )
     }
 }
 

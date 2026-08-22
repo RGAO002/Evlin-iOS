@@ -84,6 +84,20 @@ nonisolated enum AppLimitCommandSource: String, Codable, Sendable {
     case wakeRecovery
 }
 
+/// How a command's application gets confirmed to the backend.
+///
+/// `.localSnapshot` marks work hydrated from GET /child/app-limits/snapshot
+/// (the re-login recovery leg, 2026-08-11). Such work has a SYNTHETIC command
+/// id — /child/ack would 404 on it forever — so the recovery driver clears the
+/// pending work locally after the receipt readback instead of confirming.
+/// Optional + Codable on purpose: persisted stores written by old builds
+/// decode to nil (= backend ack, the historical behaviour), and old builds
+/// decoding new stores ignore the unknown key.
+nonisolated enum AppLimitConfirmationMode: String, Codable, Sendable {
+    case backendAck
+    case localSnapshot
+}
+
 nonisolated enum AppLimitCommandKind: String, Codable, Sendable {
     case set
     case clear
@@ -99,6 +113,7 @@ nonisolated struct AppLimitCommandEnvelope: Codable, Equatable, Sendable {
     let source: AppLimitCommandSource
     let rule: AppLimitRule?
     let authoritativeUsedTodayMinutes: Int?
+    let confirmationMode: AppLimitConfirmationMode?
 
     init(
         commandID: UUID,
@@ -109,7 +124,8 @@ nonisolated struct AppLimitCommandEnvelope: Codable, Equatable, Sendable {
         receivedAt: Date,
         source: AppLimitCommandSource,
         rule: AppLimitRule?,
-        authoritativeUsedTodayMinutes: Int? = nil
+        authoritativeUsedTodayMinutes: Int? = nil,
+        confirmationMode: AppLimitConfirmationMode? = nil
     ) {
         self.commandID = commandID
         self.ruleID = ruleID
@@ -120,6 +136,7 @@ nonisolated struct AppLimitCommandEnvelope: Codable, Equatable, Sendable {
         self.source = source
         self.rule = rule
         self.authoritativeUsedTodayMinutes = authoritativeUsedTodayMinutes
+        self.confirmationMode = confirmationMode
     }
 }
 
@@ -140,6 +157,31 @@ nonisolated struct AppLimitOwnerWork: Codable, Equatable, Sendable {
     let payloadDigest: String
     let source: AppLimitCommandSource
     let createdAt: Date
+    // nil = backend ack (every command that arrived on the wire). See
+    // AppLimitConfirmationMode for why this exists and why it is optional.
+    var confirmationMode: AppLimitConfirmationMode?
+
+    init(
+        workID: UUID,
+        commandID: UUID,
+        ruleID: UUID,
+        orderingToken: Int64,
+        commandKind: AppLimitCommandKind,
+        payloadDigest: String,
+        source: AppLimitCommandSource,
+        createdAt: Date,
+        confirmationMode: AppLimitConfirmationMode? = nil
+    ) {
+        self.workID = workID
+        self.commandID = commandID
+        self.ruleID = ruleID
+        self.orderingToken = orderingToken
+        self.commandKind = commandKind
+        self.payloadDigest = payloadDigest
+        self.source = source
+        self.createdAt = createdAt
+        self.confirmationMode = confirmationMode
+    }
 }
 
 nonisolated struct AppLimitApplyReceipt: Codable, Equatable, Sendable {
@@ -364,7 +406,8 @@ nonisolated extension AppLimitVersionSlot {
             commandKind: command.kind,
             payloadDigest: command.payloadDigest,
             source: command.source,
-            createdAt: command.receivedAt
+            createdAt: command.receivedAt,
+            confirmationMode: command.confirmationMode
         )
         self.init(
             ruleID: command.ruleID,

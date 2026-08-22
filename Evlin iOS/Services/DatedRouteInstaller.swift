@@ -71,11 +71,44 @@ nonisolated final class DatedRouteInstaller: @unchecked Sendable {
                 attempts: claimed.work.retry.attemptCount
             )
             results.append(outcome.result)
-            if outcome.stopFilling {
+            let shouldYield = try shouldYieldAfterCurrentDayInstall(
+                outcome.result,
+                routeID: claimed.work.routeID,
+                ownerChildDeviceID: ownerChildDeviceID
+            )
+            if outcome.stopFilling || shouldYield {
                 break
             }
         }
         return results
+    }
+
+    /// An NSE has only one short execution window. Once it has made today's
+    /// physical route trustworthy, return control to the recovery driver so it
+    /// can register and activate that route before spending the remaining
+    /// window preinstalling future dates. App recovery still fills the complete
+    /// horizon, and later invocations can fill any future work left pending.
+    private func shouldYieldAfterCurrentDayInstall(
+        _ result: DatedRouteInstallResult,
+        routeID: UUID,
+        ownerChildDeviceID owner: UUID
+    ) throws -> Bool {
+        guard processIdentity.role == .pushApplier else { return false }
+        switch result {
+        case .adopted, .verified:
+            break
+        case .noWork, .claimed, .deferred:
+            return false
+        }
+        let state = try store.read()
+        guard state.ownerChildDeviceID == owner,
+              let route = state.routes[routeID],
+              let today = MeteringEpochContract.canonicalUsageDate(
+                  at: clock.now,
+                  timezoneIdentifier: route.plannedSchedule.timezoneIdentifier
+              )
+        else { return false }
+        return route.usageDate == today
     }
 
     /// Starting a fresh current-day activity from inside a DeviceActivity

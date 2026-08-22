@@ -62,6 +62,136 @@ final class MeteringSupersededRolloverRecoveryTests: XCTestCase {
         storeURL = nil
     }
 
+
+    // MARK: - Terminal replacement activation (2026-08-11 iPad wedge)
+
+    /// A cutoverReady handoff whose candidate activation went terminal with a
+    /// RECOVERABLE code had no way forward: the conservative and superseded
+    /// abandon paths require their own shapes, and a plain rollover matched
+    /// neither — the handoff squatted in cutoverReady while the watchdog filed
+    /// `handoff_stuck_cutoverReady` for hours. The reopen leg puts the same
+    /// candidate back to pending; once the backend answers, the cutover
+    /// completes with no fresh identity minted.
+    func testTerminalReplacementActivationReopensAndCompletes() async throws {
+        center = RecordingCenter()
+        let inner = RevisionAwareTransport(
+            acceptedRevision: staleRevision,
+            owner: owner,
+            usageDate: today
+        )
+        let failing = FailingActivationTransport(inner: inner, failures: 1)
+        transport = inner
+
+        let plan = try store.reconcileMeteringHorizon(MeteringHorizonRequest(
+            ownerChildDeviceID: owner,
+            today: yesterday,
+            generationKey: generationKey(revision: staleRevision),
+            persistedSelectionBytes: selectionBytes,
+            poolMinutes: 120,
+            deviceCapMinutes: 60,
+            authoritativeBaseAcceptedMinutes: 0,
+            now: yesterdayInstant
+        ))
+        let yesterdayRouteID = try XCTUnwrap(plan.routeIDsByUsageDate[yesterday])
+        let todayRouteID = try XCTUnwrap(plan.routeIDsByUsageDate[today])
+        let seeded = try store.read()
+        let yesterdayEpochID = try XCTUnwrap(seeded.routes[yesterdayRouteID]?.epochID)
+        try store.transaction(expectedOwner: owner) { state in
+            state.activeGenerationID = plan.generationID
+            state.activeEpochID = yesterdayEpochID
+            state.activeRouteID = yesterdayRouteID
+            state.routes[yesterdayRouteID]?.lifecycle = .active
+            state.epochs[yesterdayEpochID]?.registeredAt = self.yesterdayInstant
+            let activeInstallID = try XCTUnwrap(
+                state.installWork.first(where: { $0.value.routeID == yesterdayRouteID })?.key
+            )
+            state.installWork[activeInstallID]?.authorization = .registered
+            state.installWork[activeInstallID]?.phase = .active
+            state.installWork[activeInstallID]?.retry.terminal = .succeeded
+            let activeRegistrationID = try XCTUnwrap(
+                state.registrationWork.first(where: { $0.value.routeID == yesterdayRouteID })?.key
+            )
+            state.registrationWork[activeRegistrationID]?.retry.terminal = .succeeded
+            let futureInstallID = try XCTUnwrap(
+                state.installWork.first(where: { $0.value.routeID == todayRouteID })?.key
+            )
+            var installedRoute = try XCTUnwrap(state.routes[todayRouteID])
+            installedRoute.installedSchedule = installedRoute.plannedSchedule
+            installedRoute.installedEvents = installedRoute.plannedEvents
+            state.routes[todayRouteID] = installedRoute
+            state.installWork[futureInstallID]?.phase = .verified
+            state.installWork[futureInstallID]?.retry.terminal = .succeeded
+            state.ratchets[self.owner] = MeteringOwnerRatchet(
+                ownerChildDeviceID: self.owner,
+                advertisedVersion: 2,
+                localSelection: .v2,
+                registeredV2At: self.yesterdayInstant,
+                dualActiveAt: self.yesterdayInstant,
+                activatedV2At: self.yesterdayInstant
+            )
+        }
+        center.seed(DeviceActivityName(try XCTUnwrap(seeded.routes[yesterdayRouteID]?.activityName)))
+        center.seed(DeviceActivityName(try XCTUnwrap(seeded.routes[todayRouteID]?.activityName)))
+
+        // Drive the rollover into the wedge: registration succeeds (same
+        // revision), the single poisoned activation goes terminal.
+        var wedged = false
+        for _ in 1...4 {
+            try await makeDriver(transport: failing).recover(ownerChildDeviceID: owner)
+            let state = try store.read()
+            if let handoff = state.v2RouteHandoff,
+               handoff.phase == .cutoverReady,
+               state.activationWork.values.contains(where: {
+                   $0.routeID == handoff.toRouteID
+                       && $0.retry.terminal != .pending
+                       && $0.retry.terminal != .succeeded
+                       && $0.retry.lastErrorCode == "epoch_not_active"
+               }) {
+                wedged = true
+                break
+            }
+            if state.activeRouteID == todayRouteID {
+                break
+            }
+        }
+        // The reopen leg runs INSIDE the recovery pass, so observing the
+        // wedge mid-flight is timing-dependent; what must hold is the end
+        // state below. But if we never even saw a terminal activation and
+        // never completed, the fixture failed to reproduce the disease.
+        _ = wedged
+
+        for pass in 1...6 {
+            // The reopened activation carries a real backoff; a frozen clock
+            // would skip it forever, so completion passes run later.
+            try await makeDriver(
+                now: todayInstant.addingTimeInterval(TimeInterval(600 * pass)),
+                transport: failing
+            ).recover(ownerChildDeviceID: owner)
+            let st = try store.read()
+            if st.activeRouteID == todayRouteID { break }
+            XCTAssertLessThan(pass, 6, "recovery never completed the cutover")
+        }
+        // One settling pass: the committed handoff is collected at the TOP of
+        // a pass, so the cutover and its bookkeeping never land in the same one.
+        try await makeDriver(
+            now: todayInstant.addingTimeInterval(4_200),
+            transport: failing
+        ).recover(ownerChildDeviceID: owner)
+
+        let state = try store.read()
+        XCTAssertEqual(
+            state.activeRouteID, todayRouteID,
+            "the reopened activation must carry the SAME candidate through — "
+                + "no fresh identity, no abandoned day"
+        )
+        XCTAssertNil(state.v2RouteHandoff)
+        XCTAssertEqual(state.routes[yesterdayRouteID]?.lifecycle, .tombstoned)
+        XCTAssertGreaterThan(
+            failing.failed, 0,
+            "the poisoned activation never fired — the wedge was not exercised"
+        )
+    }
+
     // MARK: - The deadlock
 
     /// The exact wedge, end to end: yesterday still active, an unfinished
@@ -1034,13 +1164,14 @@ final class MeteringSupersededRolloverRecoveryTests: XCTestCase {
 
     private func makeDriver(
         now: Date? = nil,
+        transport transportOverride: (any MeteringHTTPTransport)? = nil,
         resetRolloverEffect: @escaping (MeteringRolloverLocalEffect, RolloverEffectsWork) throws -> Void = { _, _ in }
     ) -> EarnedMeteringRecoveryDriver {
         let clock = FixedClock(now: now ?? todayInstant)
         let delivery = MeteringEpochDelivery(
             baseURL: URL(string: "https://example.invalid/api/v1")!,
             store: store,
-            transport: transport,
+            transport: transportOverride ?? transport,
             clock: clock,
             legacySuiteName: "superseded-rollover-tests-\(UUID().uuidString)"
         )
@@ -1080,6 +1211,43 @@ private final class EffectRecorder: @unchecked Sendable {
 /// Speaks the backend's actual rule: a registration whose `policy_revision` is
 /// not the current one is a `409 policy_revision_mismatch`
 /// (`Evlin-Backend/app/services/metering_epoch_registry.py`).
+/// Poisons the first N `/activation` responses with a shape the delivery layer
+/// classifies as terminal `epoch_not_active`, then delegates. Everything else
+/// passes straight through.
+private final class FailingActivationTransport: MeteringHTTPTransport, @unchecked Sendable {
+    private let inner: RevisionAwareTransport
+    private var failuresRemaining: Int
+    private(set) var failed = 0
+
+    init(inner: RevisionAwareTransport, failures: Int) {
+        self.inner = inner
+        self.failuresRemaining = failures
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        let path = request.url?.path ?? ""
+        if path.hasSuffix("/activation"), failuresRemaining > 0 {
+            failuresRemaining -= 1
+            failed += 1
+            let epochID = UUID(
+                uuidString: path.split(separator: "/").dropLast().last.map(String.init) ?? ""
+            ) ?? UUID()
+            return (
+                try JSONEncoder().encode(EpochActivationResponseDTO(
+                    status: .activated,
+                    epochID: epochID,
+                    epochStatus: .retired,
+                    meteringProtocolVersion: 2,
+                    snapshot: inner.exposedSnapshot()
+                )),
+                RevisionAwareTransport.response(status: 200)
+            )
+        }
+        return try await inner.data(for: request)
+    }
+}
+
+
 private final class RevisionAwareTransport: MeteringHTTPTransport, @unchecked Sendable {
     let acceptedRevision: String
     let owner: UUID
@@ -1146,6 +1314,8 @@ private final class RevisionAwareTransport: MeteringHTTPTransport, @unchecked Se
         )
     }
 
+    func exposedSnapshot() -> DeviceDaySnapshotDTO { snapshot() }
+
     private func snapshot(usageDate: String? = nil) -> DeviceDaySnapshotDTO {
         DeviceDaySnapshotDTO(
             childDeviceID: owner,
@@ -1160,7 +1330,7 @@ private final class RevisionAwareTransport: MeteringHTTPTransport, @unchecked Se
         )
     }
 
-    private static func response(status: Int) -> HTTPURLResponse {
+    static func response(status: Int) -> HTTPURLResponse {
         HTTPURLResponse(
             url: URL(string: "https://example.invalid/api/v1")!,
             statusCode: status,

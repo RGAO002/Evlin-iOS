@@ -15,6 +15,10 @@ nonisolated enum EpochRegistrationReasonDTO: String, Codable, Sendable {
     case identityRecovery = "identity_recovery"
     case gateResumeExactRebase = "gate_resume_exact_rebase"
     case gateResumeConservative = "gate_resume_conservative"
+    // Fresh physical route minted because the previous one stopped (or never
+    // started) delivering callbacks. Backend CHECK whitelist gained this value
+    // in migration 2026_08_11_delivery_recovery — backend deploys first.
+    case deliveryRecovery = "delivery_recovery"
 }
 
 nonisolated enum EpochStatusDTO: String, Codable, Sendable { case active, paused, exhausted, retired }

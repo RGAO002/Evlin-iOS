@@ -79,6 +79,8 @@ struct ScreenTimeEvent: Codable, Equatable {
         var threshold: Int?
         /// `epoch.excludedWhilePausedMinutes` at the moment of the decision.
         var excluded: Int?
+        /// Route-scoped physical counter offset applied to this ladder.
+        var offset: Int?
         /// Generic counter (replayed callbacks, activities, events, …).
         var count: Int?
         /// HTTP status of the network leg this event describes.

@@ -44,6 +44,7 @@ enum CommandDeliveryDiagnostics {
     static let keyCommandPoll = "evlin.delivery.commandPoll"
     static let keyCommandAck = "evlin.delivery.commandAck"
     static let keyDAMHeartbeat = "evlin.delivery.damHeartbeat"
+    static let keyAppLimitSnapshot = "evlin.delivery.appLimitSnapshot"
     static let keyEarnedLastThreshold = "evlin.earned.lastThreshold"
     static let keyEarnedArmAttempt = "evlin.earned.armAttempt"
     static let keyEarnedIdentityTransition = "evlin.earned.identityTransition"
@@ -196,7 +197,10 @@ final class AppLimitEffectRecoveryEntry {
 enum AppLimitRecoveryTrigger {
     static func launch() async {
         await runLifecycleRecovery(
-            convergeIdentity: { await convergeCurrentIdentity() },
+            convergeIdentity: {
+                await convergeCurrentIdentity()
+                await hydrateFromSnapshotIfConfigured()
+            },
             recoverOwnerWork: { await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured() },
             recoverEffects: { await AppLimitEffectRecoveryEntry.shared.recoverIfConfigured() },
             reconcileRules: { await reconcileAlreadyAppliedRules() },
@@ -206,7 +210,10 @@ enum AppLimitRecoveryTrigger {
 
     static func foreground() async {
         await runLifecycleRecovery(
-            convergeIdentity: { await convergeCurrentIdentity() },
+            convergeIdentity: {
+                await convergeCurrentIdentity()
+                await hydrateFromSnapshotIfConfigured()
+            },
             recoverOwnerWork: { await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured() },
             recoverEffects: { await AppLimitEffectRecoveryEntry.shared.recoverIfConfigured() },
             reconcileRules: { await reconcileAlreadyAppliedRules() },
@@ -216,8 +223,23 @@ enum AppLimitRecoveryTrigger {
 
     static func silentRemoteNotification() async {
         await convergeCurrentIdentity()
+        await hydrateFromSnapshotIfConfigured()
         await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured()
         await AppLimitEffectRecoveryEntry.shared.recoverIfConfigured()
+    }
+
+    /// The re-login recovery leg (2026-08-11): after the owner converges, pull
+    /// the authoritative rule snapshot so a store emptied by an identity
+    /// teardown re-learns every rule the backend still holds. Runs on every
+    /// recovery pass — the coordinator's ordering-token arbitration makes a
+    /// no-change snapshot a cheap no-op — and a fetch failure changes nothing
+    /// (never "absent means delete").
+    private static func hydrateFromSnapshotIfConfigured() async {
+        guard let owner = MeteringOwnerMirror.current() else { return }
+        await AppLimitSnapshotRecovery.run(
+            apiClient: APIClient(),
+            deviceID: owner
+        )
     }
 
     static func pollCompletion() async {
@@ -636,7 +658,10 @@ final class CommandPoller {
         }
     }
 
-    static func lockCommand(from poll: PollCommandDTO) -> LockCommand {
+    // Pure DTO mapping — no poller state. `nonisolated` so the snapshot
+    // hydration leg (which must stay off the main actor: ingest takes the
+    // cross-process store lock) can reuse it.
+    nonisolated static func lockCommand(from poll: PollCommandDTO) -> LockCommand {
         // tier maps to new ShieldTier set; backend emits "exactApp"|"savedList"|"category"|"all"
         let tier = poll.tier.flatMap(ShieldTier.init(rawValue:))
         let trimmedHint = poll.target.category_hint?
@@ -706,7 +731,7 @@ final class CommandPoller {
     /// Parses the "HH:mm" schedule window into minutes-since-midnight and the
     /// ISO8601 timestamp strings into `Date`. Returns nil for a missing or
     /// malformed payload so a bad limit maps gracefully rather than crashing.
-    private static func limitRule(from dto: PollLimitDTO?) -> LimitRule? {
+    nonisolated private static func limitRule(from dto: PollLimitDTO?) -> LimitRule? {
         guard let dto else { return nil }
         guard
             let startMinute = minutesSinceMidnight(dto.schedule.starts_at),
@@ -731,7 +756,7 @@ final class CommandPoller {
     }
 
     /// Map a decoded `clear_limit.clear` DTO into the internal `ClearLimit` (P3).
-    private static func clearLimit(from dto: PollClearDTO?) -> ClearLimit? {
+    nonisolated private static func clearLimit(from dto: PollClearDTO?) -> ClearLimit? {
         guard let dto else { return nil }
         guard let updatedAt = CommandTimestampDecoding.parse(dto.updated_at) else { return nil }
         return ClearLimit(
@@ -744,7 +769,7 @@ final class CommandPoller {
 
     /// Parse a "HH:mm" 24h clock string into minutes-since-midnight (0...1439).
     /// Returns nil for malformed input.
-    private static func minutesSinceMidnight(_ hhmm: String) -> Int? {
+    nonisolated private static func minutesSinceMidnight(_ hhmm: String) -> Int? {
         let parts = hhmm.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
         guard parts.count == 2,
               let hours = Int(parts[0]), let minutes = Int(parts[1]),
@@ -773,6 +798,14 @@ final class CommandPoller {
             await handleEarnedTimeConfig(
                 poll: poll,
                 command: Self.lockCommand(from: poll),
+                expectedDeviceID: expectedDeviceID,
+                api: api
+            )
+            return
+        }
+        if poll.action == CommandAction.meteringRearm.rawValue {
+            await handleMeteringRearm(
+                poll: poll,
                 expectedDeviceID: expectedDeviceID,
                 api: api
             )
@@ -1319,6 +1352,51 @@ final class CommandPoller {
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyCommandAck,
                 "earned-policy-ingress-failed command=\(poll.command_id) error=\(error)"
+            )
+        }
+    }
+
+    private func handleMeteringRearm(
+        poll: PollCommandDTO,
+        expectedDeviceID: UUID,
+        api: APIClient
+    ) async {
+        guard isExpectedDeviceCurrent(expectedDeviceID) else {
+            coalescePollForCurrentIdentity(expectedDeviceID: expectedDeviceID)
+            return
+        }
+        do {
+            _ = try await MeteringProductionComposition.recoverFromSharedConfiguration(
+                role: .app
+            )
+            let report = await MeteringTodayRouteRekick.runReport(
+                trigger: "rejected_burst_command_foreground"
+            )
+            guard isExpectedDeviceCurrent(expectedDeviceID) else {
+                coalescePollForCurrentIdentity(expectedDeviceID: expectedDeviceID)
+                return
+            }
+            try await api.ack(
+                commandID: poll.command_id,
+                status: report.isHealthy ? "confirmed" : "failed",
+                detail: [
+                    "verb": "metering_rearm",
+                    "application_state": report.isHealthy ? "active" : "rearm_failed",
+                    "verdict": report.verdict,
+                    "message": report.message,
+                    "source": "foreground_daemon_readback",
+                ]
+            )
+        } catch {
+            try? await api.ack(
+                commandID: poll.command_id,
+                status: "failed",
+                detail: [
+                    "verb": "metering_rearm",
+                    "application_state": "rearm_failed",
+                    "reason": "recovery_error",
+                    "source": "foreground",
+                ]
             )
         }
     }

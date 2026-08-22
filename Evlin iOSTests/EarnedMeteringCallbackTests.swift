@@ -528,6 +528,54 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         XCTAssertTrue(try early.store.read().shieldReferences.isEmpty)
     }
 
+    func testTerminalCallbackAfterArmCalibrationQueuesSampleWithoutEarlyShield() throws {
+        let fixture = try CallbackFixture.active()
+        defer { fixture.cleanup() }
+        XCTAssertEqual(
+            try fixture.callbackHandler().handle(
+                fixture.callback(
+                    threshold: 5,
+                    observedAt: fixture.start.addingTimeInterval(30)
+                ),
+                expectedOwnerChildDeviceID: fixture.owner
+            ),
+            .discarded(reason: "arm_grace_calibration")
+        )
+        let reference = EarnedShieldReference(
+            operationID: fixture.routeID,
+            ownerChildDeviceID: fixture.owner,
+            generationID: fixture.generationID,
+            epochID: fixture.epochID,
+            routeID: fixture.routeID,
+            recordKey: "savedList:calibrated-terminal",
+            expectedRecordBytes: Data([0x01]),
+            retry: MeteringRetryState(
+                attemptCount: 0,
+                nextAttemptAt: fixture.start,
+                lastErrorCode: nil,
+                terminal: .pending
+            ),
+            createdAt: fixture.start
+        )
+
+        let outcome = try fixture.callbackHandler().handle(
+            fixture.callback(
+                threshold: 5,
+                observedAt: fixture.start.addingTimeInterval(5 * 60)
+            ),
+            expectedOwnerChildDeviceID: fixture.owner,
+            preparedShieldReference: reference
+        )
+
+        guard case .queued = outcome else { return XCTFail("terminal sample must queue") }
+        let state = try fixture.store.read()
+        XCTAssertEqual(state.sampleWork.count, 1)
+        XCTAssertTrue(
+            state.shieldReferences.isEmpty,
+            "an unshifted terminal must not lock while offset recovery is pending"
+        )
+    }
+
     func testOneSecondBeyondJitterMarksConsumedRouteAndQueuesNothing() throws {
         let fixture = try CallbackFixture.active()
         defer { fixture.cleanup() }
@@ -1638,6 +1686,44 @@ final class EarnedMeteringCallbackTests: XCTestCase {
             })?.phase,
             .pendingStart
         )
+    }
+
+    func testDualV2RepeatedArmCalibrationAccumulatesPhysicalOffset() throws {
+        let fixture = try CallbackFixture.dualV2()
+        defer { fixture.cleanup() }
+        try fixture.mutate { state in
+            guard var route = state.routes[fixture.candidateRouteID] else { return }
+            route.physicalGenerationOffsetMinutes = 25
+            route.plannedEvents = route.plannedEvents.map {
+                let shifted = $0.thresholdMinutes + 25
+                return MeteringEventPlan(
+                    eventName: MeteringRouteNamespace.eventName(
+                        routeID: route.routeID,
+                        thresholdMinutes: shifted
+                    ),
+                    thresholdMinutes: shifted
+                )
+            }
+            state.routes[route.routeID] = route
+            state.epochs[fixture.candidateEpochID]?.lastRawThresholdMinutes = 30
+            state.epochs[fixture.candidateEpochID]?.excludedWhilePausedMinutes = 30
+            state.installWork[fixture.candidateInstallID]?.retry.lastErrorCode =
+                "arm_grace_calibration_requires_offset_recut"
+        }
+
+        XCTAssertTrue(try fixture.store.repairLadderBaseInvariantIfNeeded(
+            owner: fixture.owner,
+            now: fixture.start.addingTimeInterval(60)
+        ))
+
+        let state = try fixture.store.read()
+        let replacementID = try XCTUnwrap(state.v2RouteHandoff?.toRouteID)
+        let replacement = try XCTUnwrap(state.routes[replacementID])
+        let replacementEpoch = try XCTUnwrap(state.epochs[replacement.epochID])
+        XCTAssertEqual(replacement.physicalGenerationOffsetMinutes, 30)
+        XCTAssertEqual(replacementEpoch.lastRawThresholdMinutes, 30)
+        XCTAssertEqual(replacementEpoch.excludedWhilePausedMinutes, 30)
+        XCTAssertEqual(replacement.plannedEvents.map(\.thresholdMinutes), [35])
     }
 
     func testConsumedCandidateReplacementIsStableAcrossRecoveryRestart() throws {

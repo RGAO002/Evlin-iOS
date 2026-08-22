@@ -68,7 +68,8 @@ nonisolated enum AppLimitProductionComposition {
 
     static func envelope(
         from command: LockCommand,
-        source: AppLimitCommandSource
+        source: AppLimitCommandSource,
+        confirmationMode: AppLimitConfirmationMode? = nil
     ) throws -> AppLimitCommandEnvelope {
         let kind: AppLimitCommandKind
         let ruleID: UUID
@@ -142,7 +143,8 @@ nonisolated enum AppLimitProductionComposition {
             receivedAt: command.issuedAt,
             source: source,
             rule: rule,
-            authoritativeUsedTodayMinutes: authoritativeUsedTodayMinutes
+            authoritativeUsedTodayMinutes: authoritativeUsedTodayMinutes,
+            confirmationMode: confirmationMode
         )
     }
 

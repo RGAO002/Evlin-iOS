@@ -318,6 +318,8 @@ final class ActionExecutor: @unchecked Sendable {
             // ActionExecutor is called. If it somehow arrives here, fail gracefully
             // rather than misrouting to shield or crashing.
             return .failed(.execution("earned_time_config must not reach ActionExecutor"))
+        case .meteringRearm:
+            return .failed(.execution("metering_rearm must not reach ActionExecutor"))
         }
     }
 

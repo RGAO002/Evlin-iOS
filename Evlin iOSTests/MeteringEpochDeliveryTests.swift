@@ -3155,7 +3155,7 @@ final class MeteringEpochDeliveryTests: XCTestCase {
         XCTAssertEqual(final.ratchets[owner]?.localSelection, .dualActive)
     }
 
-    func testFuturePendingInstallCannotBlockActivationOnceCandidateInstallIsDualActive() async throws {
+    func testClaimedFutureInstallCannotBlockActivationOnceCandidateInstallIsDualActive() async throws {
         let fileURL = temporaryStoreURL()
         defer { removeTemporaryStore(fileURL) }
         let store = makeStore(fileURL: fileURL)
@@ -3185,8 +3185,14 @@ final class MeteringEpochDeliveryTests: XCTestCase {
                 ownerChildDeviceID: owner,
                 routeID: plannedRouteID,
                 authorization: .futurePlanned,
-                phase: .pendingStart,
-                claim: nil,
+                phase: .starting,
+                claim: ActivityInstallClaim(
+                    token: UUID(),
+                    process: .pushApplier,
+                    instanceID: UUID(),
+                    claimedAt: start,
+                    expiresAt: start.addingTimeInterval(60)
+                ),
                 retry: MeteringRetryState(
                     attemptCount: 0,
                     nextAttemptAt: start.addingTimeInterval(-1),

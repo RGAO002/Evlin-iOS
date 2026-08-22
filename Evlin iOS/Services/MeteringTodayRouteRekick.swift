@@ -10,11 +10,46 @@ import FamilyControls
 /// and was discarded by the provenance guard — by the time this runs, the
 /// route is fully active, so the redelivered callback passes the guard.
 enum MeteringTodayRouteRekick {
+    /// Production recovery for an active route that disappeared from Apple's
+    /// daemon. Unlike `run`, this never reuses consumed activity/event names.
+    /// It prepares the existing make-before-break handoff, then lets the normal
+    /// recovery driver install, register, verify and activate the fresh route.
+    static func replaceMissingActiveRoute(
+        trigger: String,
+        role: MeteringProcessRole = .app
+    ) async -> String {
+        guard let preparation = await MeteringDeviceActivityGateway.perform(
+            "missingRoute.prepare",
+            { prepareMissingActiveRoute() }
+        ) else {
+            return "missing-route recovery refused: Screen Time gateway busy"
+        }
+        guard preparation.prepared else { return preparation.message }
+
+        do {
+            let outcome = try await MeteringProductionComposition
+                .recoverFromSharedConfiguration(role: role)
+            return "fresh route prepared for \(preparation.routeID?.uuidString ?? "unknown"); recovery=\(outcome) trigger=\(trigger)"
+        } catch {
+            return "fresh route prepared; recovery failed: \(error)"
+        }
+    }
+
     /// - Parameter trigger: who asked — `manual` for the debug button,
     ///   `watchdog` for the A3 self-heal. Recorded so an auto-heal loop is
     ///   distinguishable from a human hammering the button.
     @discardableResult
-    static func run(trigger: String = "manual") async -> String {
+    static func run(
+        trigger: String = "manual",
+        role: MeteringProcessRole = .app
+    ) async -> String {
+        await runReport(trigger: trigger, role: role).message
+    }
+
+    static func runReport(
+        trigger: String = "manual",
+        role: MeteringProcessRole = .app
+    ) async -> Report {
         // One hop for the whole rekick, not four. `perform` is a single coherent
         // daemon operation — stop, start, coverage refresh, probe — and splitting
         // it would let another arm interleave in the middle of it.
@@ -25,9 +60,13 @@ enum MeteringTodayRouteRekick {
         // running the riskiest daemon call at the moment it is most likely to
         // hang, and a hang there killed the app on 2026-08-08.
         guard let report = await MeteringDeviceActivityGateway.perform("rekick.perform", {
-            perform(trigger: trigger)
+            perform(trigger: trigger, role: role)
         }) else {
-            return "rekick_refused_gateway_busy"
+            return Report(
+                verdict: "gateway_busy",
+                message: "rekick refused: Screen Time gateway busy",
+                routeID: nil
+            )
         }
         MeteringFlightRecorder.emit(
             kind: .meteringRepair,
@@ -39,19 +78,98 @@ enum MeteringTodayRouteRekick {
             ]),
             corrID: report.routeID
         )
-        return report.message
+        return report
     }
 
     nonisolated struct Report: Sendable {
         let verdict: String
         let message: String
         let routeID: UUID?
+
+        var isHealthy: Bool { verdict == "rearmed" }
+    }
+
+    nonisolated private struct MissingRoutePreparation: Sendable {
+        let prepared: Bool
+        let message: String
+        let routeID: UUID?
+    }
+
+    nonisolated private static func prepareMissingActiveRoute() -> MissingRoutePreparation {
+        let store = DeviceEpochStore.shared
+        let state: DeviceEpochStoreState
+        do {
+            state = try store.read()
+        } catch {
+            return MissingRoutePreparation(
+                prepared: false,
+                message: "missing-route recovery read failed: \(error)",
+                routeID: nil
+            )
+        }
+        guard let routeID = state.activeRouteID,
+              let route = state.routes[routeID],
+              route.lifecycle == .active,
+              let timeZone = TimeZone(identifier: route.plannedSchedule.timezoneIdentifier)
+        else {
+            return MissingRoutePreparation(
+                prepared: false,
+                message: "no active route to replace",
+                routeID: state.activeRouteID
+            )
+        }
+        guard !MeteringDatedSchedule.hasElapsed(
+            usageDate: route.usageDate,
+            timeZone: timeZone,
+            now: Date()
+        ) else {
+            return MissingRoutePreparation(
+                prepared: false,
+                message: "missing route belongs to elapsed day \(route.usageDate)",
+                routeID: routeID
+            )
+        }
+
+        let liveActivities = Set(
+            SystemMeteringDeviceActivityCenter().activities.map(\.rawValue)
+        )
+        guard !liveActivities.contains(route.activityName) else {
+            return MissingRoutePreparation(
+                prepared: false,
+                message: "active route returned before recovery",
+                routeID: routeID
+            )
+        }
+
+        do {
+            let prepared = try store.replaceMissingActiveRouteIfNeeded(
+                owner: route.ownerChildDeviceID,
+                missingRouteID: routeID,
+                now: Date()
+            )
+            return MissingRoutePreparation(
+                prepared: prepared,
+                message: prepared
+                    ? "fresh physical route prepared"
+                    : "route state no longer permits replacement",
+                routeID: routeID
+            )
+        } catch {
+            return MissingRoutePreparation(
+                prepared: false,
+                message: "missing-route recovery failed: \(error)",
+                routeID: routeID
+            )
+        }
     }
 
     /// NOT `@MainActor`: every DeviceActivity call below is synchronous XPC, and
     /// `run` hops this whole function off the main thread. It touches only
     /// `DeviceEpochStore.shared`, which is `nonisolated` and internally locked.
-    nonisolated private static func perform(trigger: String) -> Report {
+    nonisolated private static func perform(
+        trigger: String,
+        role: MeteringProcessRole
+    ) -> Report {
         let store = DeviceEpochStore.shared
         let state: DeviceEpochStoreState
         do {
@@ -169,8 +287,8 @@ enum MeteringTodayRouteRekick {
                 store: store,
                 center: SystemMeteringDeviceActivityCenter(),
                 processIdentity: MeteringProcessIdentity(
-                    role: .app,
-                    instanceID: MeteringProductionComposition.instanceID(for: .app)
+                    role: role,
+                    instanceID: MeteringProductionComposition.instanceID(for: role)
                 )
             ).refreshCoverage(ownerChildDeviceID: route.ownerChildDeviceID)
         } catch {

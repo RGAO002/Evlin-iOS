@@ -609,6 +609,16 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             // handoffs) otherwise wait for a foreground that may be days out.
             // The hourly starvation kick makes this a steady background pulse.
             await MeteringWatchdog.shared.runIfDue(trigger: "background_push")
+            // The backend's rejected-burst lane means callbacks are dying
+            // against a dead epoch RIGHT NOW. A maintenance pass finds a green
+            // watchdog and does nothing (2026-08-11, post-19:29: armed, green,
+            // stone dead — the day's one-shot thresholds had already burned).
+            // Only a re-arm resets Apple's counter and re-exposes the rungs,
+            // so this wake kind forces one explicitly.
+            if let evlin = userInfo["evlin"] as? [AnyHashable: Any],
+               evlin["kind"] as? String == "metering_rearm" {
+                _ = await MeteringTodayRouteRekick.run(trigger: "rejected_burst_kick")
+            }
             // Ship the flight recorder too. Until now `uploadPending` had a
             // single call site — the foreground scene transition — so the
             // black box was blind for exactly the stretches worth diagnosing:

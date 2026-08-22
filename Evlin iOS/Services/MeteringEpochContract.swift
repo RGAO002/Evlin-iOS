@@ -34,12 +34,17 @@ nonisolated enum MeteringEpochReplacementReason: String, Codable, CaseIterable,
     case identityRecovery = "identity_recovery"
     case gateResumeExactRebase = "gate_resume_exact_rebase"
     case gateResumeConservative = "gate_resume_conservative"
+    // A fresh physical route minted because the previous epoch's monitor
+    // stopped (or never started) delivering callbacks — the 2026-08-11
+    // re-login incident's escape hatch. Same identity, same day, same policy.
+    case deliveryRecovery = "delivery_recovery"
 }
 
 nonisolated enum MeteringExplicitRecovery: String, Codable, Equatable, Sendable {
     case identityRecovery = "identity_recovery"
     case gateResumeExactRebase = "gate_resume_exact_rebase"
     case gateResumeConservative = "gate_resume_conservative"
+    case deliveryRecovery = "delivery_recovery"
 }
 
 nonisolated enum MeteringGenerationDecision: Equatable, Sendable {
@@ -157,10 +162,15 @@ nonisolated enum MeteringReplacementAxis: String, Codable, Equatable, Sendable {
     case enforcementSet = "enforcement_set"
     case identity
     case gate
+    // Nothing about the key changed — the monitor stopped delivering. Like
+    // `gate`, the axis leaves the reference key untouched; the recovery
+    // trigger alone carries the classification.
+    case delivery
 }
 
 nonisolated enum MeteringReplacementRecoveryTrigger: String, Codable, Equatable, Sendable {
     case identityRecovered = "identity_recovered"
+    case deliveryRecovered = "delivery_recovered"
     case resumeExactRebase = "resume_exact_rebase"
     case resumeConservative = "resume_conservative"
 }
@@ -1345,6 +1355,9 @@ nonisolated enum MeteringEpochContract {
         }
         if explicitRecovery == .gateResumeConservative {
             return .gateResumeConservative
+        }
+        if explicitRecovery == .deliveryRecovery {
+            return .deliveryRecovery
         }
         if active.usageDate != next.usageDate {
             return .dayRollover
@@ -2654,7 +2667,7 @@ nonisolated enum MeteringReferenceRules {
         let active = referenceEpochKey()
         let next: MeteringEpochKey
         switch classification.changedAxis {
-        case .none, .gate:
+        case .none, .gate, .delivery:
             next = active
         case .canonicalDate:
             next = referenceEpochKey(usageDate: "1970-01-02")
@@ -2684,6 +2697,8 @@ nonisolated enum MeteringReferenceRules {
             explicitRecovery = .gateResumeExactRebase
         case .resumeConservative:
             explicitRecovery = .gateResumeConservative
+        case .deliveryRecovered:
+            explicitRecovery = .deliveryRecovery
         case nil:
             explicitRecovery = nil
         }

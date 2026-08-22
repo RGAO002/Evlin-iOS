@@ -55,6 +55,22 @@ final class MeteringRolloverRecoveryTests: XCTestCase {
         XCTAssertEqual(state.routes[fixture.newRouteID]?.lifecycle, .planned)
     }
 
+    func testCanonicalRolloverDoesNotCarryPriorRoutePhysicalOffset() throws {
+        let fixture = try seedActiveAndReservedRoutes()
+        try store.transaction(expectedOwner: owner) { state in
+            state.routes[fixture.oldRouteID]?.physicalGenerationOffsetMinutes = 25
+        }
+
+        _ = try store.prepareCanonicalRollover(
+            owner: owner,
+            toUsageDate: "2026-07-18",
+            now: start.addingTimeInterval(86_400)
+        )
+
+        let nextRoute = try XCTUnwrap(try store.read().routes[fixture.newRouteID])
+        XCTAssertEqual(nextRoute.physicalGenerationOffsetMinutes ?? 0, 0)
+    }
+
     // Regression (iPad, 2026-07-25): after a day rolled over, ANY later policy
     // change / per-app limit edit / reset replaces the active route. The next
     // midnight then found a completed rollover whose product was no longer the
@@ -289,6 +305,83 @@ final class MeteringRolloverRecoveryTests: XCTestCase {
         XCTAssertEqual(state.rolloverEffectsWork?.retry.terminal, .succeeded)
         XCTAssertEqual(state.activeEpochID, fixture.newEpochID)
         XCTAssertEqual(state.activeRouteID, fixture.newRouteID)
+    }
+
+    func testPausedEpochStillRegistersCurrentDayAndActivatesAfterGateReopens() async throws {
+        let fixture = try seedActiveAndReservedRoutes()
+        let initial = try store.read()
+        let oldName = DeviceActivityName(
+            try XCTUnwrap(initial.routes[fixture.oldRouteID]?.activityName)
+        )
+        let newName = DeviceActivityName(
+            try XCTUnwrap(initial.routes[fixture.newRouteID]?.activityName)
+        )
+        try store.transaction(expectedOwner: owner) { state in
+            state.epochs[fixture.oldEpochID]?.status = .paused
+        }
+        let center = RolloverCenter()
+        center.seed(oldName)
+        center.seed(newName)
+        let pausedRegistration = EpochRegistrationResponseDTO(
+            status: .registered,
+            epochID: fixture.newEpochID,
+            meteringProtocolVersion: 2,
+            snapshot: snapshot(),
+            epochStatus: .paused
+        )
+        let pausedActivation = EpochActivationResponseDTO(
+            status: .paused,
+            epochID: fixture.newEpochID,
+            epochStatus: .paused,
+            meteringProtocolVersion: 2,
+            snapshot: snapshot()
+        )
+        let transport = RolloverTransport(results: [
+            (try JSONEncoder().encode(pausedRegistration), httpResponse(status: 200)),
+            (try JSONEncoder().encode(pausedActivation), httpResponse(status: 200)),
+        ])
+        let clock = RolloverClock(now: start.addingTimeInterval(86_430))
+
+        try await makeDriver(center: center, transport: transport, clock: clock)
+            .recover(ownerChildDeviceID: owner)
+
+        var state = try store.read()
+        let work = try XCTUnwrap(state.rolloverEffectsWork)
+        XCTAssertEqual(work.fromUsageDate, "2026-07-17")
+        XCTAssertEqual(work.toUsageDate, "2026-07-18")
+        XCTAssertTrue(
+            state.registrationWork.values.contains {
+                $0.epochID == fixture.newEpochID
+                    && $0.routeID == fixture.newRouteID
+                    && $0.request.reason == .dayRollover
+                    && $0.retry.terminal == .succeeded
+            },
+            "a closed gate may pause today's epoch, but must not leave the day without a registered identity"
+        )
+        XCTAssertTrue(
+            state.activationWork.values.contains {
+                $0.epochID == fixture.newEpochID
+                    && $0.routeID == fixture.newRouteID
+                    && $0.retry.terminal == .pending
+                    && $0.retry.lastErrorCode == "epoch_paused"
+            },
+            "activations=\(state.activationWork.values.map { ($0.epochID, $0.routeID, $0.retry) })"
+        )
+        XCTAssertEqual(state.activeEpochID, fixture.oldEpochID)
+
+        transport.results = [
+            activationResult(epochID: fixture.newEpochID),
+        ]
+        try await makeDriver(
+            center: center,
+            transport: transport,
+            clock: RolloverClock(now: clock.now.addingTimeInterval(5))
+        ).recover(ownerChildDeviceID: owner)
+
+        state = try store.read()
+        XCTAssertEqual(state.activeEpochID, fixture.newEpochID)
+        XCTAssertEqual(state.activeRouteID, fixture.newRouteID)
+        XCTAssertEqual(state.rolloverEffectsWork?.retry.terminal, .succeeded)
     }
 
     func testRolloverActivationKeepsExactPriorAuthorityAfterHorizonAdvances() async throws {

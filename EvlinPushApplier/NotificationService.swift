@@ -112,6 +112,14 @@ final class NotificationService: UNNotificationServiceExtension {
             )
             return
         }
+        if command.action == .meteringRearm {
+            await rearmMetering(
+                baseURL: baseURL,
+                deviceID: deviceID,
+                commandID: commandID
+            )
+            return
+        }
         guard let outcome = await NSELockApplier.apply(
             command,
             fetchedDeviceID: deviceID
@@ -171,11 +179,22 @@ final class NotificationService: UNNotificationServiceExtension {
                 // later never came: the rule sat `accepted_needs_owner`, iOS
                 // was never handed a monitor, and the limit silently did not
                 // exist until someone opened the app (2026-08-07, real device:
-                // a 1-minute Apple TV limit that never fired). The planner is
-                // idempotent and reconciles from the live DeviceActivity set,
-                // so running it here is safe even when the app later runs it
-                // too. Failure is non-fatal — the ack stays pending and the
-                // durable owner work remains pollable, exactly as before.
+                // a 1-minute Apple TV limit that never fired).
+                //
+                // Running it here is safe alongside the app's own arm, but NOT
+                // for the reason this comment used to give. It said the planner
+                // "reconciles from the live DeviceActivity set" — which was only
+                // safe while the arm held a cross-process flock that made the
+                // app and this extension mutually exclusive. That lock was
+                // removed to stop it wedging the app on an unanswered daemon
+                // call, and reconciling from the live set then let whichever
+                // side ran second tear down the other's monitor. What makes it
+                // safe now is that the planner stops only activities no arm
+                // provenance claims, so a concurrent arm's monitor is never
+                // mistaken for a leftover.
+                //
+                // Failure is non-fatal — the ack stays pending and the durable
+                // owner work remains pollable, exactly as before.
                 let owner = MeteringOwnerMirror.current()
                 let rules = AppLimitRuleStore.shared.all()
                 let armed = owner.map { _ in
@@ -355,6 +374,54 @@ final class NotificationService: UNNotificationServiceExtension {
         }
     }
 
+    private func rearmMetering(
+        baseURL: URL,
+        deviceID: UUID,
+        commandID: UUID
+    ) async {
+        do {
+            let report = try await Self.withDeadline(seconds: 24) {
+                _ = try await MeteringProductionComposition.recoverFromSharedConfiguration(
+                    role: .pushApplier
+                )
+                return await MeteringTodayRouteRekick.runReport(
+                    trigger: "rejected_burst_command",
+                    role: .pushApplier
+                )
+            }
+            try await NSENetwork.ack(
+                baseURL: baseURL,
+                deviceID: deviceID,
+                commandID: commandID,
+                status: report.isHealthy ? "confirmed" : "failed",
+                detail: [
+                    "verb": "metering_rearm",
+                    "application_state": report.isHealthy ? "active" : "rearm_failed",
+                    "verdict": report.verdict,
+                    "message": report.message,
+                    "source": "push_applier_daemon_readback",
+                ]
+            )
+            NSEConfig.log(
+                "metering rearm cmd=\(commandID) verdict=\(report.verdict)"
+            )
+        } catch {
+            try? await NSENetwork.ack(
+                baseURL: baseURL,
+                deviceID: deviceID,
+                commandID: commandID,
+                status: "failed",
+                detail: [
+                    "verb": "metering_rearm",
+                    "application_state": "rearm_failed",
+                    "reason": "deadline_or_recovery_error",
+                    "source": "push_applier",
+                ]
+            )
+            NSEConfig.log("metering rearm failed cmd=\(commandID) error=\(error)")
+        }
+    }
+
     /// Bounded await: races `work` against a deadline and cancels the loser.
     /// The recovery's durable work queue makes mid-flight cancellation safe —
     /// unfinished legs are re-driven by the app's next pass.
@@ -460,6 +527,8 @@ enum NSELockApplier {
             // A4: same-day pool/cap sync — handled inline in CommandPoller on the
             // main app side. The NSE has no DeviceActivity scheduling capability,
             // so leave this command pending for the full app poller.
+            return nil
+        case .meteringRearm:
             return nil
         }
     }

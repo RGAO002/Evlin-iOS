@@ -50,6 +50,41 @@ final class EarnedConfigCommandTests: XCTestCase {
         XCTAssertEqual(CommandAction(rawValue: "earned_time_config"), .earnedTimeConfig)
     }
 
+    func testMeteringRearmIsHandledByNSEAndForegroundCompensation() throws {
+        XCTAssertEqual(CommandAction(rawValue: "metering_rearm"), .meteringRearm)
+
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let nse = try String(
+            contentsOf: root.appendingPathComponent("EvlinPushApplier/NotificationService.swift"),
+            encoding: .utf8
+        )
+        let poller = try String(
+            contentsOf: root.appendingPathComponent("Evlin iOS/Services/CommandPoller.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(nse.contains("command.action == .meteringRearm"))
+        XCTAssertTrue(nse.contains("rearmMetering("))
+        XCTAssertTrue(poller.contains("CommandAction.meteringRearm.rawValue"))
+        XCTAssertTrue(poller.contains("handleMeteringRearm("))
+    }
+
+    func testMeteringRearmRequiresExactDaemonReadbackForConfirmedAck() {
+        XCTAssertTrue(MeteringTodayRouteRekick.Report(
+            verdict: "rearmed", message: "ok", routeID: nil
+        ).isHealthy)
+        XCTAssertFalse(MeteringTodayRouteRekick.Report(
+            verdict: "rearmed_event_payload_mismatch",
+            message: "mismatch",
+            routeID: nil
+        ).isHealthy)
+        XCTAssertFalse(MeteringTodayRouteRekick.Report(
+            verdict: "gateway_busy", message: "busy", routeID: nil
+        ).isHealthy)
+    }
+
     func testPollPersistsPendingThenInvokesSoleEpochOwnerWithoutDirectShield() async throws {
         let poller = CommandPoller.shared
         let saved = PollerSeams(poller)

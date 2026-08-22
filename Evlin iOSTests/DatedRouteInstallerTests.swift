@@ -731,6 +731,46 @@ final class DatedRouteInstallerTests: XCTestCase {
         XCTAssertEqual(center.startCalls.first?.rawValue, expectedTodayName)
     }
 
+    func testPushApplierYieldsAfterVerifyingCurrentDayBeforeInstallingFutureHorizon() throws {
+        let fixture = try makeFixture(leaveAllPending: true, registeredAll: true)
+        let initial = try fixture.firstStore.read()
+        let todayWork = try work(forUsageDate: "2026-07-18", in: initial)
+        let todayRoute = try XCTUnwrap(initial.routes[todayWork.routeID])
+        let futureWorkIDs = Set(initial.installWork.values.compactMap { work -> UUID? in
+            guard initial.routes[work.routeID]?.usageDate != "2026-07-18" else {
+                return nil
+            }
+            return work.workID
+        })
+        XCTAssertEqual(futureWorkIDs.count, 7)
+        let center = DatedCenter()
+        let installer = DatedRouteInstaller(
+            store: fixture.firstStore,
+            center: center,
+            processIdentity: MeteringProcessIdentity(
+                role: .pushApplier,
+                instanceID: UUID()
+            ),
+            clock: fixture.clock
+        )
+
+        XCTAssertEqual(
+            try installer.reconcile(ownerChildDeviceID: owner),
+            [.verified(workID: todayWork.workID)]
+        )
+        XCTAssertEqual(
+            center.startCalls,
+            [DeviceActivityName(todayRoute.activityName)]
+        )
+
+        let persisted = try fixture.firstStore.read()
+        XCTAssertEqual(persisted.installWork[todayWork.workID]?.phase, .verified)
+        XCTAssertTrue(futureWorkIDs.allSatisfy {
+            persisted.installWork[$0]?.phase == .pendingStart
+                && persisted.installWork[$0]?.claim == nil
+        })
+    }
+
     func testRetiredOrNonCandidateInstallWorkIsSupersededWithoutStartingApple() throws {
         for retired in [true, false] {
             let fixture = try makeFixture()

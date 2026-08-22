@@ -148,6 +148,13 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
             owner: effectiveOwner,
             now: clock.now
         )
+        // Same placement logic as the correction repair above: the rollover
+        // leg below RETURNS EARLY whenever rollover work is pending, and the
+        // wedge this repairs (cutoverReady + acknowledged registration + dead
+        // activation) is usually the rollover's own candidate — behind the
+        // early return it would never run (2026-08-11 iPad, 7.5 hours). The
+        // predicate is narrow enough to be a no-op in every healthy flow.
+        try recoverTerminalReplacementActivation(owner: effectiveOwner)
         // A terminal same-day candidate may still own the handoff slot when
         // midnight prepares the next dated route. Clear only a proven-dead
         // candidate before the rollover tries to claim that single slot.
@@ -445,7 +452,7 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
               let activeRouteID = state.activeRouteID,
               let activeRoute = state.routes[activeRouteID],
               let activeEpoch = state.epochs[activeRoute.epochID],
-              activeEpoch.status == .active,
+              (activeEpoch.status == .active || activeEpoch.status == .paused),
               activeEpoch.retiredAt == nil,
               let generation = state.generations[activeRoute.generationID],
               generation.childDeviceID == owner,
@@ -466,6 +473,25 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                   timezoneIdentifier: generation.canonicalTimezone
               ),
               activeRoute.usageDate < canonicalToday,
+              !state.routes.values.contains(where: { route in
+                  guard route.ownerChildDeviceID == owner,
+                        route.routeID != activeRouteID,
+                        route.usageDate == canonicalToday,
+                        route.lifecycle == .planned || route.lifecycle == .active,
+                        let epoch = state.epochs[route.epochID],
+                        epoch.status == .active,
+                        epoch.retiredAt == nil,
+                        epoch.resumeBoundaryPending,
+                        let candidateGeneration = state.generations[route.generationID],
+                        candidateGeneration.childDeviceID == owner,
+                        candidateGeneration.retiredAt == nil
+                  else { return false }
+                  return state.installWork.values.contains {
+                      $0.ownerChildDeviceID == owner
+                          && $0.routeID == route.routeID
+                          && $0.retry.terminal == .pending
+                  }
+              }),
               let nextUsageDate = state.routes.values
                 .filter({
                     $0.ownerChildDeviceID == owner
@@ -1800,6 +1826,13 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
             )
             if candidateEpoch.resumeBoundaryPending {
                 handoff.explicitRecovery = .gateResumeConservative
+            } else if epochKey(candidateEpoch) == epochKey(fromEpoch) {
+                // Nothing about the key changed and this is not a gate resume:
+                // the only honest meaning of a same-key replacement is that
+                // the previous route stopped delivering. Without the explicit
+                // marker the classifier returns nil, the registration reason
+                // derivation bails, and the handoff wedges before it starts.
+                handoff.explicitRecovery = .deliveryRecovery
             }
             state.v2RouteHandoff = handoff
             if state.installWork[candidateInstallKey]?.phase == .pendingStart {
@@ -1866,6 +1899,104 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
             state.installWork[installKey]?.phase = .dualActive
             handoff.phase = .dualV2
             state.v2RouteHandoff = handoff
+        }
+    }
+
+    /// The replacement twin of `recoverTerminalInitialActivation`.
+    ///
+    /// A cutoverReady handoff whose candidate ACTIVATION died had no way
+    /// forward: the conservative-resume and superseded abandon paths each
+    /// require their own shape, and a plain replacement (day rollover, policy
+    /// change) matched neither — the handoff squatted in cutoverReady forever
+    /// while the watchdog filed `handoff_stuck_cutoverReady` (2026-08-11 iPad,
+    /// 7.5 hours). Two dead shapes, one cure:
+    ///
+    /// - the activation work went terminal with a RECOVERABLE code
+    ///   (`epoch_not_active`, `epoch_paused`, first `activation_epoch_not_
+    ///   current`) → reopen the SAME work as pending;
+    /// - the terminal work was already compacted away entirely (the shape the
+    ///   wedge actually presents after a few passes) → enqueue a fresh
+    ///   activation for the same candidate.
+    ///
+    /// Identity-class codes (route/policy/enforcement mismatch, repeated
+    /// epoch mismatch) are deliberately NOT retried here — the backend said
+    /// this candidate can never activate; those stay with the abandon paths.
+    private func recoverTerminalReplacementActivation(owner: UUID) throws {
+        var verdict: (String, UUID, String)?
+        try store.transaction(expectedOwner: owner) { state in
+            guard let handoff = state.v2RouteHandoff,
+                  handoff.phase == .cutoverReady,
+                  handoff.activationAcknowledgedAt == nil,
+                  state.activeRouteID == handoff.fromRouteID,
+                  let candidate = state.routes[handoff.toRouteID],
+                  state.epochs[handoff.toEpochID] != nil,
+                  // Only after a usable registration: a failed registration is
+                  // the abandon paths' business (the backend never accepted
+                  // this candidate at all).
+                  handoff.registrationAcknowledgedAt != nil
+                      || state.registrationWork.values.contains(where: {
+                          $0.epochID == handoff.toEpochID
+                              && $0.routeID == handoff.toRouteID
+                              && $0.retry.terminal == .succeeded
+                      }),
+                  let installKey = uniqueInstallKey(for: handoff.toRouteID, in: state),
+                  state.installWork[installKey]?.phase == .dualActive
+            else { return }
+
+            let works = state.activationWork.filter {
+                $0.value.routeID == handoff.toRouteID
+                    && $0.value.epochID == handoff.toEpochID
+            }
+            // Anything still pending or already succeeded means the normal
+            // machinery is (or was) on the case — never double-drive it.
+            guard !works.values.contains(where: {
+                $0.retry.terminal == .pending || $0.retry.terminal == .succeeded
+            }) else { return }
+
+            if let (activationKey, activation) = works.first(where: { _, work in
+                let code = work.retry.lastErrorCode ?? "unknown_activation_error"
+                return code == "epoch_not_active"
+                    || code == "epoch_paused"
+                    || (code == "activation_epoch_not_current"
+                        && work.retry.attemptCount == 0)
+            }) {
+                var retried = activation
+                retried.claim = nil
+                retried.retry = MeteringRetryState(
+                    attemptCount: activation.retry.attemptCount + 1,
+                    nextAttemptAt: MeteringRetryPolicy.nextAttempt(
+                        after: activation.retry.attemptCount + 1,
+                        now: clock.now
+                    ),
+                    lastErrorCode: activation.retry.lastErrorCode,
+                    terminal: .pending
+                )
+                state.activationWork[activationKey] = retried
+                verdict = (
+                    "reopened_pending",
+                    handoff.toRouteID,
+                    activation.retry.lastErrorCode ?? "unknown"
+                )
+                return
+            }
+
+            // Identity-class terminal work still present → not ours.
+            guard works.isEmpty else { return }
+
+            // The terminal work was compacted away: registration is
+            // acknowledged, activation never was, and nothing exists to retry
+            // — the literal shape of the 2026-08-11 wedge. Re-enqueue.
+            enqueueActivationIfNeeded(route: candidate, owner: owner, state: &state)
+            verdict = ("re_enqueued", handoff.toRouteID, "activation_work_missing")
+        }
+        if let (outcome, routeID, code) = verdict {
+            MeteringFlightRecorder.emit(
+                kind: .meteringRepair,
+                site: "recovery.replacement_activation",
+                verdict: outcome,
+                detail: MeteringFlightRecorder.detail([("error", code)]),
+                corrID: routeID
+            )
         }
     }
 

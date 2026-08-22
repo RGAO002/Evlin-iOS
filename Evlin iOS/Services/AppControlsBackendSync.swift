@@ -443,6 +443,13 @@ enum AppControlsBackendSync {
 enum AppControlsIdentityGuard {
     private static let ownerKey = "evlin.appControls.ownerChildDeviceID"
     private static let revokedKey = "evlin.appControls.sawAuthorizationRevoked"
+    /// "approved" once a stable approved status has been observed, in ANY
+    /// process, ever. The cross-process half of the revoke detector: the old
+    /// process-local flag missed every revoke that happened while the app was
+    /// not running (Enerel's iPad, 2026-08-11 — twelve rotated-dead tokens,
+    /// endless `not_authorized` acks, and no re-pick prompt, because no
+    /// process ever witnessed the approved→revoked edge).
+    private static let lastStableKey = "evlin.appControls.lastStableAuthorization"
 
     private static var defaults: UserDefaults? {
         UserDefaults(suiteName: "group.com.evlin.ios")
@@ -480,15 +487,34 @@ enum AppControlsIdentityGuard {
 
     @MainActor
     static func noteAuthorizationApproved() {
-        defer { sawApprovedThisProcess = true }
+        defer {
+            sawApprovedThisProcess = true
+            defaults?.set("approved", forKey: lastStableKey)
+        }
         guard defaults?.bool(forKey: revokedKey) == true else { return }
         defaults?.set(false, forKey: revokedKey)
         purge(reason: "authorization_regranted")
     }
 
+    /// `denied` distinguishes the two non-approved worlds. `.denied` is a
+    /// STABLE fact — the user (or iOS) switched the grant off — and is what a
+    /// relaunch observes after an out-of-process revoke. `.notDetermined` is
+    /// ambiguous: the launch-time publisher emits it transiently before the
+    /// real value arrives, and treating that as a revoke wiped the selection
+    /// on every single launch (2026-08-07 02:47:31). So:
+    ///   - in-process edge (we saw approved earlier this process) → revoke,
+    ///     whatever the non-approved status is;
+    ///   - cross-process: only an explicit `.denied` counts, and only when a
+    ///     previous process persisted a stable approved.
     @MainActor
-    static func noteAuthorizationRevoked() {
-        guard sawApprovedThisProcess else { return }
+    static func noteAuthorizationRevoked(denied: Bool = false) {
+        if sawApprovedThisProcess {
+            defaults?.set(true, forKey: revokedKey)
+            return
+        }
+        guard denied,
+              defaults?.string(forKey: lastStableKey) == "approved"
+        else { return }
         defaults?.set(true, forKey: revokedKey)
     }
 
