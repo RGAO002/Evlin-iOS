@@ -161,11 +161,16 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         )
     }
 
-    func testRejectedConsumedCallbackUsesOneDecodeAndOneCommittedReadback() throws {
+    func testRejectedConsumedCallbackUsesSnapshotCASAndCommittedReadback() throws {
         let fileIO = CountingCallbackFileIO()
-        let fixture = try CallbackFixture.active(fileIO: fileIO)
+        let stateDecoder = CountingCallbackStateDecoder()
+        let fixture = try CallbackFixture.active(
+            fileIO: fileIO,
+            stateDecoder: stateDecoder.decode
+        )
         defer { fixture.cleanup() }
         fileIO.resetReadCount()
+        stateDecoder.reset()
 
         // 120s after arm: outside the 90s arm-grace calibration window (which
         // absorbs bursts instead of rejecting them — covered by
@@ -180,8 +185,14 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         XCTAssertEqual(outcome, .discarded(reason: "too_early"))
         XCTAssertEqual(
             fileIO.readCount,
-            2,
-            "Persisting the consumed-route marker requires exactly one transactional readback."
+            3,
+            "A committed CAS transaction reads the snapshot, compares current bytes, then verifies the atomic write."
+        )
+        XCTAssertEqual(fileIO.writeCount, 1)
+        XCTAssertEqual(
+            stateDecoder.decodeCount,
+            1,
+            "CAS comparison and durable readback must compare bytes without decoding the state again."
         )
     }
 
@@ -1871,7 +1882,7 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         XCTAssertEqual(try fixture.store.read().v2RouteHandoff?.phase, .cutoverReady)
     }
 
-    func testPriorCallbackWinningRealRootLockBarrierQueuesAndMakesBarrierFail() throws {
+    func testConcurrentPriorCallbackAndCutoverBarrierProduceSerializableState() throws {
         let lock = CallbackRaceLock()
         let fixture = try CallbackFixture.dualV2(lock: lock)
         defer { fixture.cleanup() }
@@ -1909,10 +1920,25 @@ final class EarnedMeteringCallbackTests: XCTestCase {
         lock.resume()
         wait(for: [callbackFinished, barrierFinished], timeout: 2)
 
-        guard case .queued = outcome.value else { return XCTFail("callback must win the shared root lock") }
-        XCTAssertFalse(barrierSucceeded.value)
-        XCTAssertEqual(try fixture.store.read().v2RouteHandoff?.phase, .dualV2)
-        XCTAssertEqual(try fixture.store.read().sampleWork.count, 1)
+        let state = try fixture.store.read()
+        switch outcome.value {
+        case .queued:
+            XCTAssertFalse(
+                barrierSucceeded.value,
+                "cutover must observe the committed prior-route sample after a CAS retry"
+            )
+            XCTAssertEqual(state.v2RouteHandoff?.phase, .dualV2)
+            XCTAssertEqual(state.sampleWork.count, 1)
+        case .discarded(reason: "handoff_prior_input_closed"):
+            XCTAssertTrue(
+                barrierSucceeded.value,
+                "a callback that loses the CAS race must observe the committed input closure"
+            )
+            XCTAssertEqual(state.v2RouteHandoff?.phase, .cutoverReady)
+            XCTAssertTrue(state.sampleWork.isEmpty)
+        default:
+            XCTFail("concurrent callback and cutover must serialize without dropping committed state")
+        }
     }
 
     func testExactRegistrationAcknowledgementKeepsCandidateSampleWaitingForActivation() async throws {
@@ -1973,7 +1999,8 @@ private final class CallbackFixture {
     init(
         owner: UUID,
         lock: any DeviceEpochStoreLocking = CallbackFixture.defaultLock,
-        fileIO: any DeviceEpochFileIO = SystemDeviceEpochFileIO()
+        fileIO: any DeviceEpochFileIO = SystemDeviceEpochFileIO(),
+        stateDecoder: (@Sendable (Data?) throws -> DeviceEpochStoreState)? = nil
     ) {
         self.owner = owner
         start = Date(timeIntervalSince1970: 1_784_937_600)
@@ -1983,7 +2010,8 @@ private final class CallbackFixture {
             fileURL: storeURL,
             lock: lock,
             fileIO: fileIO,
-            ownerProvider: { owner }
+            ownerProvider: { owner },
+            stateDecoder: stateDecoder
         )
     }
 
@@ -1992,9 +2020,15 @@ private final class CallbackFixture {
     static func active(
         usageDate: String = "2026-07-18",
         lock: any DeviceEpochStoreLocking = CallbackFixture.defaultLock,
-        fileIO: any DeviceEpochFileIO = SystemDeviceEpochFileIO()
+        fileIO: any DeviceEpochFileIO = SystemDeviceEpochFileIO(),
+        stateDecoder: (@Sendable (Data?) throws -> DeviceEpochStoreState)? = nil
     ) throws -> CallbackFixture {
-        let fixture = CallbackFixture(owner: UUID(), lock: lock, fileIO: fileIO)
+        let fixture = CallbackFixture(
+            owner: UUID(),
+            lock: lock,
+            fileIO: fileIO,
+            stateDecoder: stateDecoder
+        )
         try fixture.store.transaction(expectedOwner: fixture.owner) { state in
             state = fixture.activeState(usageDate: usageDate)
         }
@@ -2717,6 +2751,25 @@ private final class CountingCallbackFileIO: DeviceEpochFileIO, @unchecked Sendab
 
     func remove(at url: URL) throws {
         try backing.remove(at: url)
+    }
+}
+
+private final class CountingCallbackStateDecoder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var decodeCount: Int { lock.withLock { count } }
+
+    func reset() {
+        lock.withLock { count = 0 }
+    }
+
+    func decode(_ data: Data?) throws -> DeviceEpochStoreState {
+        lock.withLock { count += 1 }
+        guard let data else { return DeviceEpochStoreState() }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        return try decoder.decode(DeviceEpochStoreState.self, from: data)
     }
 }
 
