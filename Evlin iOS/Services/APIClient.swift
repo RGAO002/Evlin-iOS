@@ -1635,7 +1635,11 @@ extension APIClient {
         ]
         if let detail = detail { body["detail"] = detail }
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
-        _ = try await URLSession.shared.data(for: req)
+        let (_, response) = try await URLSession.shared.data(for: req)
+        guard let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode) else {
+            throw APIError.serverError((response as? HTTPURLResponse)?.statusCode ?? -1)
+        }
     }
 
     /// Child fetches an ephemeral Max-mode selection blob (one-shot).

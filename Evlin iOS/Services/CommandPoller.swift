@@ -104,6 +104,49 @@ enum CommandDeliveryDiagnostics {
     }
 }
 
+protocol TaskPauseSupersessionStoring: AnyObject {
+    func replacementID(for commandID: UUID) -> UUID?
+    func record(commandID: UUID, replacementID: UUID)
+    func remove(commandID: UUID)
+}
+
+final class UserDefaultsTaskPauseSupersessionStore: TaskPauseSupersessionStoring {
+    private let defaults: UserDefaults
+    private let key = "evlin.delivery.taskPauseSupersessions"
+
+    init(defaults: UserDefaults = UserDefaults(suiteName: "group.com.evlin.ios") ?? .standard) {
+        self.defaults = defaults
+    }
+
+    func replacementID(for commandID: UUID) -> UUID? {
+        dictionary()[commandID.uuidString].flatMap(UUID.init(uuidString:))
+    }
+
+    func record(commandID: UUID, replacementID: UUID) {
+        var values = dictionary()
+        values[commandID.uuidString] = replacementID.uuidString
+        defaults.set(values, forKey: key)
+    }
+
+    func remove(commandID: UUID) {
+        var values = dictionary()
+        values[commandID.uuidString] = nil
+        defaults.set(values, forKey: key)
+    }
+
+    private func dictionary() -> [String: String] {
+        defaults.dictionary(forKey: key) as? [String: String] ?? [:]
+    }
+}
+
+final class InMemoryTaskPauseSupersessionStore: TaskPauseSupersessionStoring {
+    private var values: [UUID: UUID] = [:]
+
+    func replacementID(for commandID: UUID) -> UUID? { values[commandID] }
+    func record(commandID: UUID, replacementID: UUID) { values[commandID] = replacementID }
+    func remove(commandID: UUID) { values[commandID] = nil }
+}
+
 @MainActor
 private final class AppLimitOwnerActionEffectPort: AppLimitOwnerEffectPort, @unchecked Sendable {
     private let executor: ActionExecutor
@@ -393,6 +436,9 @@ final class CommandPoller {
     var appLimitOwnerExecuteOverride: ((LockCommand, AppLimitCommandEnvelope, UUID) async -> AppLimitOwnerExecutionResult)?
     var appLimitReceiptReadbackOverride: ((UUID) throws -> AppLimitApplyReceipt?)?
     var ackCommandOverride: ((UUID, String, [String: Any]?) async throws -> Void)?
+    var commandExecutionOverride: ((PollCommandDTO, UUID, APIClient) async -> Void)?
+    var taskPauseSupersessionStore: TaskPauseSupersessionStoring =
+        UserDefaultsTaskPauseSupersessionStore()
     var earnedPolicyIngressOverride: ((LockCommand, UUID) throws -> MeteringPolicyIngressDisposition)?
     var earnedPolicyRecoveryOverride: (() async throws -> Void)?
 
@@ -541,12 +587,29 @@ final class CommandPoller {
                     CommandDeliveryDiagnostics.keyCommandPoll,
                     "ok device=\(deviceID.uuidString) commands=\(cmds.count)"
                 )
-                for poll in cmds {
+                let batch = coalesceTaskPauseCommands(cmds)
+                for superseded in batch.superseded {
                     guard isExpectedDeviceCurrent(deviceID) else {
                         coalescePollForCurrentIdentity(expectedDeviceID: deviceID)
                         break
                     }
-                    await execute(poll: poll, expectedDeviceID: deviceID, api: api)
+                    await ackSupersededTaskPause(
+                        superseded.command,
+                        by: superseded.replacementID,
+                        expectedDeviceID: deviceID,
+                        api: api
+                    )
+                }
+                for poll in batch.commands {
+                    guard isExpectedDeviceCurrent(deviceID) else {
+                        coalescePollForCurrentIdentity(expectedDeviceID: deviceID)
+                        break
+                    }
+                    if let commandExecutionOverride {
+                        await commandExecutionOverride(poll, deviceID, api)
+                    } else {
+                        await execute(poll: poll, expectedDeviceID: deviceID, api: api)
+                    }
                 }
             } catch {
                 guard isExpectedDeviceCurrent(deviceID) else {
@@ -591,6 +654,105 @@ final class CommandPoller {
             CommandDeliveryDiagnostics.keyCommandPoll,
             "discarded stale_device=\(expectedDeviceID.uuidString) current=\(current.uuidString)"
         )
+    }
+
+    private enum TaskPauseIntent {
+        case lock
+        case unlock
+    }
+
+    private struct TaskPauseBatch {
+        let commands: [PollCommandDTO]
+        let superseded: [(command: PollCommandDTO, replacementID: UUID)]
+    }
+
+    /// Backend polling returns commands in database order. If opposite task-gate
+    /// intents land in one response, executing both creates a visible unlock/lock
+    /// flip and can strand the device if the process is suspended between them.
+    /// Manual locks are deliberately outside this coalescing domain.
+    private func coalesceTaskPauseCommands(_ commands: [PollCommandDTO]) -> TaskPauseBatch {
+        let eligibleIndices = commands.indices.filter {
+            taskPauseSupersessionStore.replacementID(for: commands[$0].command_id) == nil
+        }
+        guard let latestIndex = eligibleIndices.last(where: {
+            Self.taskPauseIntent(commands[$0]) != nil
+        }), let latestIntent = Self.taskPauseIntent(commands[latestIndex]) else {
+            let durable = commands.compactMap { command -> (PollCommandDTO, UUID)? in
+                taskPauseSupersessionStore.replacementID(for: command.command_id)
+                    .map { (command, $0) }
+            }
+            let executable = commands.filter {
+                taskPauseSupersessionStore.replacementID(for: $0.command_id) == nil
+            }
+            return TaskPauseBatch(commands: executable, superseded: durable)
+        }
+
+        var executable: [PollCommandDTO] = []
+        var superseded: [(command: PollCommandDTO, replacementID: UUID)] = []
+        for (index, command) in commands.enumerated() {
+            if let replacementID = taskPauseSupersessionStore.replacementID(
+                for: command.command_id
+            ) {
+                superseded.append((command, replacementID))
+                continue
+            }
+            if index < latestIndex,
+               let intent = Self.taskPauseIntent(command),
+               intent != latestIntent {
+                superseded.append((command, commands[latestIndex].command_id))
+            } else {
+                executable.append(command)
+            }
+        }
+        return TaskPauseBatch(commands: executable, superseded: superseded)
+    }
+
+    private static func taskPauseIntent(_ command: PollCommandDTO) -> TaskPauseIntent? {
+        switch command.action {
+        case CommandAction.shield.rawValue:
+            let source = command.lock_source ?? command.target.lock_source
+            return source == "task_pause" ? .lock : nil
+        case CommandAction.unshield.rawValue, CommandAction.unshieldAll.rawValue:
+            let sources = command.unlock_sources ?? command.target.unlock_sources ?? []
+            return sources == ["task_pause"] ? .unlock : nil
+        default:
+            return nil
+        }
+    }
+
+    private func ackSupersededTaskPause(
+        _ command: PollCommandDTO,
+        by replacementID: UUID,
+        expectedDeviceID: UUID,
+        api: APIClient
+    ) async {
+        guard isExpectedDeviceCurrent(expectedDeviceID) else { return }
+        taskPauseSupersessionStore.record(
+            commandID: command.command_id,
+            replacementID: replacementID
+        )
+        let detail: [String: Any] = [
+            "reason": "superseded_by_newer_task_pause",
+            "superseded_by_command_id": replacementID.uuidString,
+        ]
+        do {
+            if let ackCommandOverride {
+                try await ackCommandOverride(command.command_id, "superseded", detail)
+            } else {
+                try await api.ack(
+                    commandID: command.command_id,
+                    status: "superseded",
+                    detail: detail
+                )
+            }
+            taskPauseSupersessionStore.remove(commandID: command.command_id)
+        } catch {
+            CommandDeliveryDiagnostics.record(
+                CommandDeliveryDiagnostics.keyCommandPoll,
+                "supersede_ack_failed command=\(command.command_id.uuidString) error=\(error.localizedDescription)"
+            )
+            SentrySDK.capture(error: error)
+        }
     }
 
     /// One-shot poll for the current child device WITHOUT starting the timer.

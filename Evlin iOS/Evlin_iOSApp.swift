@@ -97,6 +97,7 @@ struct Evlin_iOSApp: App {
                 .onAppear {
                     Task { await ParentPINSyncCoordinator.runForeground() }
                     refreshParentPushRegistrationIfNeeded()
+                    refreshChildPushRegistrationIfNeeded()
                     startPollerIfPaired()
                     armEarnedBudgetIfReady()
                     recoverMeteringEpochIfReady()
@@ -110,6 +111,7 @@ struct Evlin_iOSApp: App {
                     case .active:
                         Task { await ParentPINSyncCoordinator.runForeground() }
                         refreshParentPushRegistrationIfNeeded()
+                        refreshChildPushRegistrationIfNeeded()
                         startPollerIfPaired()
                         armEarnedBudgetIfReady()
                         recoverMeteringEpochIfReady()
@@ -173,6 +175,13 @@ struct Evlin_iOSApp: App {
         guard mode == "parent" else { return }
         AppDelegate.requestNotificationAuthorizationIfNeeded()
         AppDelegate.uploadCachedAPNsTokenIfPossible(using: apiClient)
+    }
+
+    private func refreshChildPushRegistrationIfNeeded(appMode explicitMode: String? = nil) {
+        AppDelegate.handleForegroundAPNsRegistration(
+            appMode: explicitMode ?? appMode,
+            using: apiClient
+        )
     }
 
     /// Start CommandPoller only when the user is in K mode. The poller
@@ -541,6 +550,31 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             appMode: appMode,
             uploadCachedToken: { uploadCachedAPNsTokenIfPossible(using: apiClient) }
         )
+    }
+
+    /// Replays the cached child token on every foreground entry. This repairs a
+    /// backend token cleared after APNs reported BadDeviceToken without waiting
+    /// for another pairing transition or a fresh token callback from iOS.
+    static func handleForegroundAPNsRegistration(
+        appMode: String,
+        using apiClient: APIClient
+    ) {
+        handleForegroundAPNsRegistration(
+            appMode: appMode,
+            uploadCachedToken: { uploadCachedAPNsTokenIfPossible(using: apiClient) }
+        )
+    }
+
+    static func handleForegroundAPNsRegistration(
+        appMode: String,
+        uploadCachedToken: () -> Void,
+        registerForRemoteNotifications: () -> Void = {
+            UIApplication.shared.registerForRemoteNotifications()
+        }
+    ) {
+        guard appMode == "child" else { return }
+        uploadCachedToken()
+        registerForRemoteNotifications()
     }
 
     static func handleChildDeviceIDAvailability(
