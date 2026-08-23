@@ -159,7 +159,8 @@ nonisolated enum MeteringProductionComposition {
         expectedBaseURL: URL? = nil,
         store: DeviceEpochStore = .shared,
         clock: any MeteringClock = MeteringRuntimeClock.live(),
-        transport: any MeteringHTTPTransport = URLSession.shared
+        transport: any MeteringHTTPTransport = URLSession.shared,
+        executionBudget: MeteringRecoveryExecutionBudget? = nil
     ) async throws -> MeteringRecoveryOutcome {
         // The recovery driver already detaches its daemon/XPC work, but this
         // composition performs several full DeviceEpochStore reads before and
@@ -167,17 +168,22 @@ nonisolated enum MeteringProductionComposition {
         // validate the persisted root. A background push still enters here on
         // MainActor, so a large mature root can otherwise freeze the host app
         // before the driver's existing off-main boundary is reached.
-        try await Task.detached(priority: .utility) {
-            try await performRecoveryFromSharedConfiguration(
-                role: role,
-                runtime: runtime,
-                usageCountingAllowed: usageCountingAllowed,
-                expectedOwner: expectedOwner,
-                expectedBaseURL: expectedBaseURL,
-                store: store,
-                clock: clock,
-                transport: transport
-            )
+        let effectiveExecutionBudget = executionBudget
+            ?? MeteringRecoveryExecutionContext.budget
+            ?? MeteringRecoveryExecutionBudget()
+        return try await Task.detached(priority: .utility) {
+            try await MeteringRecoveryExecutionContext.$budget.withValue(effectiveExecutionBudget) {
+                try await performRecoveryFromSharedConfiguration(
+                    role: role,
+                    runtime: runtime,
+                    usageCountingAllowed: usageCountingAllowed,
+                    expectedOwner: expectedOwner,
+                    expectedBaseURL: expectedBaseURL,
+                    store: store,
+                    clock: clock,
+                    transport: transport
+                )
+            }
         }.value
     }
 

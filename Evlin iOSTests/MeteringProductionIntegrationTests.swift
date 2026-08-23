@@ -7,6 +7,73 @@ import XCTest
 
 @MainActor
 final class MeteringProductionIntegrationTests: XCTestCase {
+    func testExpiredExecutionBudgetCrossesDetachedRecoveryBoundary() async throws {
+        let owner = UUID()
+        let baseURL = URL(string: "https://example.invalid/api/v1")!
+        let defaults = try XCTUnwrap(
+            UserDefaults(suiteName: MeteringProductionComposition.appGroupSuiteName)
+        )
+        let keys = [
+            MeteringProductionComposition.baseURLKey,
+            MeteringProductionComposition.ownerKey,
+            MeteringProductionComposition.selectionKey,
+            MeteringProductionComposition.lockedSetIDKey,
+        ]
+        let saved = keys.reduce(into: [String: Any]()) { values, key in
+            values[key] = defaults.object(forKey: key)
+        }
+        defer {
+            for key in keys {
+                if let value = saved[key] {
+                    defaults.set(value, forKey: key)
+                } else {
+                    defaults.removeObject(forKey: key)
+                }
+            }
+        }
+        defaults.set(baseURL.absoluteString, forKey: MeteringProductionComposition.baseURLKey)
+        defaults.set(owner.uuidString, forKey: MeteringProductionComposition.ownerKey)
+        var selection = FamilyActivitySelection()
+        selection.applicationTokens.insert(try syntheticApplicationToken(byte: 99))
+        defaults.set(
+            try JSONEncoder().encode(selection),
+            forKey: MeteringProductionComposition.selectionKey
+        )
+        defaults.set(UUID().uuidString, forKey: MeteringProductionComposition.lockedSetIDKey)
+
+        let budget = MeteringRecoveryExecutionBudget()
+        budget.expire()
+        let store = DeviceEpochStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("metering-expired-budget-\(UUID().uuidString).json"),
+            ownerProvider: { owner }
+        )
+
+        do {
+            _ = try await MeteringProductionComposition.recoverFromSharedConfiguration(
+                role: .app,
+                runtime: EarnedTimeRuntime(
+                    usageDate: "2026-08-23",
+                    timezone: "America/New_York",
+                    policyRevision: "expired-budget",
+                    dailyPoolMinutes: 120,
+                    deviceCapMinutes: 120,
+                    remainingMinutes: 120,
+                    estimatedMinutes: 0
+                ),
+                usageCountingAllowed: true,
+                expectedOwner: owner,
+                expectedBaseURL: baseURL,
+                store: store,
+                transport: ProductionLinkTransport(),
+                executionBudget: budget
+            )
+            XCTFail("expired background recovery must not start a persistent transaction")
+        } catch {
+            XCTAssertEqual(error as? DeviceEpochStoreError, .executionBudgetExpired)
+        }
+    }
+
     func testSharedConfigurationRecoveryReadsEpochStoreOffMainThread() async throws {
         let owner = UUID()
         let baseURL = URL(string: "https://example.invalid/api/v1")!

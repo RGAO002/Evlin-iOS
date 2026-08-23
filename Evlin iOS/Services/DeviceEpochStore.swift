@@ -1235,6 +1235,8 @@ nonisolated enum DeviceEpochStoreError: Error, Equatable {
     case unsupportedSchema(Int)
     case readbackMismatch
     case restorationFailed
+    case retryableConflict
+    case executionBudgetExpired
 }
 
 private enum DeviceEpochStoreInvariantError: Error {
@@ -1299,6 +1301,7 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
     private let fileIO: any DeviceEpochFileIO
     private let ownerProvider: @Sendable () -> UUID?
     private let legacyDefaults: UserDefaults?
+    private let stateDecoder: (@Sendable (Data?) throws -> DeviceEpochStoreState)?
 
     private static let legacyLifecycleKey = ["evlin", "earned", "activityLifecycle"]
         .joined(separator: ".")
@@ -1316,22 +1319,32 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         lock: any DeviceEpochStoreLocking = ActiveLockPersistenceLock.shared,
         fileIO: any DeviceEpochFileIO = SystemDeviceEpochFileIO(),
         ownerProvider: @escaping @Sendable () -> UUID? = MeteringOwnerMirror.current,
-        legacyDefaults: UserDefaults? = UserDefaults(suiteName: MeteringOwnerMirror.suiteName)
+        legacyDefaults: UserDefaults? = UserDefaults(suiteName: MeteringOwnerMirror.suiteName),
+        stateDecoder: (@Sendable (Data?) throws -> DeviceEpochStoreState)? = nil
     ) {
         self.fileURL = fileURL
         self.lock = lock
         self.fileIO = fileIO
         self.ownerProvider = ownerProvider
         self.legacyDefaults = legacyDefaults
+        self.stateDecoder = stateDecoder
     }
 
     func read() throws -> DeviceEpochStoreState {
-        try withLock { try loadState() }
+        let url = try resolvedFileURL()
+        let snapshot = try withLock { try fileIO.read(from: url) }
+        if let snapshot {
+            let state = try decodeState(snapshot)
+            try validateStatic(state, expectedOwner: nil, requireOwnerMatch: false)
+            try removeLegacyDefaultsAfterVerifiedRoot()
+            return state
+        }
+        return try readOrMigrateAbsentRoot(at: url)
     }
 
     /// Recovery primitive: delete the persisted metering state entirely so the
     /// next `read()`/`transaction` starts from a fresh empty store (the store is
-    /// file-backed with no in-memory cache — see `loadState()` — so removing the
+    /// file-backed with no in-memory cache, so removing the
     /// file is sufficient). Used only by the K-device nuclear reset (see
     /// `MeteringNuclearReset`) to dig out of a wedged state — paused epoch +
     /// `coverageExhausted` + churned retired epochs — that `Repair`
@@ -5118,17 +5131,16 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         debugLabel: String? = nil,
         _ mutate: (inout DeviceEpochStoreState) throws -> Value
     ) throws -> Value {
+        try requireRecoveryExecutionBudget()
         debugTransactionCheckpoint(debugLabel, stage: "before_lock")
-        return try withLock {
-            debugTransactionCheckpoint(debugLabel, stage: "lock_acquired")
-            let url = try resolvedFileURL()
-            let initialData = try fileIO.read(from: url)
+        let url = try resolvedFileURL()
+        for attempt in 0...2 {
+            let initialData = try withLock {
+                return try fileIO.read(from: url)
+            }
+            debugTransactionCheckpoint(debugLabel, stage: "snapshot_copied")
             debugTransactionCheckpoint(debugLabel, stage: "initial_read")
-            let loaded = try loadPersistedState(
-                at: url,
-                initialData: initialData,
-                didReadInitialData: true
-            )
+            let loaded = try decodeSnapshot(initialData)
             debugTransactionCheckpoint(debugLabel, stage: "state_loaded")
             let priorData = loaded.persistedData
             var state = loaded.state
@@ -5171,36 +5183,43 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 debugTransactionCheckpoint(debugLabel, stage: "same_bytes_complete")
                 return value
             }
-            var writeAttempted = false
-            do {
-                writeAttempted = true
-                try fileIO.writeAtomically(encoded, to: url)
+            let committed = try withLock { () throws -> Bool in
+                let currentData = try fileIO.read(from: url)
+                guard currentData == priorData else { return false }
+                guard ownerProvider() == expectedOwner else {
+                    throw DeviceEpochStoreError.ownerMismatch
+                }
+                var writeAttempted = false
+                do {
+                    writeAttempted = true
+                    try fileIO.writeAtomically(encoded, to: url)
+                    guard let readbackData = try fileIO.read(from: url),
+                          readbackData == encoded
+                    else { throw DeviceEpochStoreError.readbackMismatch }
+                    guard ownerProvider() == expectedOwner else {
+                        throw DeviceEpochStoreError.ownerMismatch
+                    }
+                    return true
+                } catch {
+                    if writeAttempted {
+                        do {
+                            try restore(priorData, at: url)
+                        } catch {
+                            throw DeviceEpochStoreError.restorationFailed
+                        }
+                    }
+                    throw error
+                }
+            }
+            if committed {
                 debugTransactionCheckpoint(debugLabel, stage: "candidate_written")
-                guard let readbackData = try fileIO.read(from: url) else {
-                    throw DeviceEpochStoreError.readbackMismatch
-                }
-                // File IO must return the exact canonical payload we wrote. Comparing
-                // decoded values can reject a valid write when Codable normalizes Date.
-                guard readbackData == encoded else {
-                    throw DeviceEpochStoreError.readbackMismatch
-                }
-                let readback = try decodeState(readbackData)
-                debugTransactionCheckpoint(debugLabel, stage: "readback_decoded")
-                try validateStatic(readback, expectedOwner: expectedOwner, requireOwnerMatch: true)
-                try checkOwner(expectedOwner: expectedOwner, state: readback)
+                try removeLegacyDefaultsAfterVerifiedRoot()
                 debugTransactionCheckpoint(debugLabel, stage: "transaction_complete")
                 return value
-            } catch {
-                if writeAttempted {
-                    do {
-                        try restore(priorData, at: url)
-                    } catch {
-                        throw DeviceEpochStoreError.restorationFailed
-                    }
-                }
-                throw error
             }
+            debugTransactionCheckpoint(debugLabel, stage: "cas_conflict_\(attempt + 1)")
         }
+        throw DeviceEpochStoreError.retryableConflict
     }
 
     private func debugTransactionCheckpoint(_ label: String?, stage: String) {
@@ -5225,14 +5244,11 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         workID: UUID,
         _ mutate: (inout DeviceEpochStoreState, inout IdentityCleanupWork) throws -> Value
     ) throws -> Value {
-        try withLock {
-            let url = try resolvedFileURL()
-            let initialData = try fileIO.read(from: url)
-            let loaded = try loadPersistedState(
-                at: url,
-                initialData: initialData,
-                didReadInitialData: true
-            )
+        try requireRecoveryExecutionBudget()
+        let url = try resolvedFileURL()
+        for _ in 0...2 {
+            let initialData = try withLock { try fileIO.read(from: url) }
+            let loaded = try decodeSnapshot(initialData)
             let priorData = loaded.persistedData
             let state = loaded.state
             guard let oldOwner = state.ownerChildDeviceID,
@@ -5255,30 +5271,30 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
             guard candidate != state else { return value }
 
             let encoded = try Self.encoder.encode(candidate)
-            var writeAttempted = false
-            do {
-                writeAttempted = true
-                try fileIO.writeAtomically(encoded, to: url)
-                guard let readbackData = try fileIO.read(from: url),
-                      readbackData == encoded
-                else { throw DeviceEpochStoreError.readbackMismatch }
-                let readback = try decodeState(readbackData)
-                guard readback.ownerChildDeviceID == oldOwner,
-                      readback.identityCleanupWork?.workID == workID
-                else { throw DeviceEpochStoreError.ownerMismatch }
-                try validateStatic(readback, expectedOwner: oldOwner, requireOwnerMatch: true)
-                return value
-            } catch {
-                if writeAttempted {
-                    do {
-                        try restore(priorData, at: url)
-                    } catch {
-                        throw DeviceEpochStoreError.restorationFailed
+            let committed = try withLock { () throws -> Bool in
+                guard try fileIO.read(from: url) == priorData else { return false }
+                var writeAttempted = false
+                do {
+                    writeAttempted = true
+                    try fileIO.writeAtomically(encoded, to: url)
+                    guard let readbackData = try fileIO.read(from: url),
+                          readbackData == encoded
+                    else { throw DeviceEpochStoreError.readbackMismatch }
+                    return true
+                } catch {
+                    if writeAttempted {
+                        do {
+                            try restore(priorData, at: url)
+                        } catch {
+                            throw DeviceEpochStoreError.restorationFailed
+                        }
                     }
+                    throw error
                 }
-                throw error
             }
+            if committed { return value }
         }
+        throw DeviceEpochStoreError.retryableConflict
     }
 
     /// Binds an already-prepared "remove this device" cleanup to the one
@@ -5360,14 +5376,11 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
     /// the mutable owner mirror before they can bootstrap work.
     @discardableResult
     func finalizeIdentityCleanup(workID: UUID) throws -> Bool {
-        try withLock {
-            let url = try resolvedFileURL()
-            let initialData = try fileIO.read(from: url)
-            let loaded = try loadPersistedState(
-                at: url,
-                initialData: initialData,
-                didReadInitialData: true
-            )
+        try requireRecoveryExecutionBudget()
+        let url = try resolvedFileURL()
+        for _ in 0...2 {
+            let initialData = try withLock { try fileIO.read(from: url) }
+            let loaded = try decodeSnapshot(initialData)
             let priorData = loaded.persistedData
             let state = loaded.state
             guard let oldOwner = state.ownerChildDeviceID,
@@ -5392,34 +5405,31 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                 requireOwnerMatch: true
             )
             let encoded = try Self.encoder.encode(candidate)
-            var writeAttempted = false
-            do {
-                writeAttempted = true
-                try fileIO.writeAtomically(encoded, to: url)
-                guard let readbackData = try fileIO.read(from: url),
-                      readbackData == encoded
-                else { throw DeviceEpochStoreError.readbackMismatch }
-                let readback = try decodeState(readbackData)
-                try validateStatic(
-                    readback,
-                    expectedOwner: cleanup.newOwnerChildDeviceID,
-                    requireOwnerMatch: true
-                )
-                guard readback.ownerChildDeviceID == cleanup.newOwnerChildDeviceID,
-                      readback.identityCleanupWork == nil
-                else { throw DeviceEpochStoreError.readbackMismatch }
-                return true
-            } catch {
-                if writeAttempted {
-                    do {
-                        try restore(priorData, at: url)
-                    } catch {
-                        throw DeviceEpochStoreError.restorationFailed
+            let committed = try withLock { () throws -> Bool in
+                guard try fileIO.read(from: url) == priorData else { return false }
+                guard ownerProvider() == cleanup.newOwnerChildDeviceID else { return false }
+                var writeAttempted = false
+                do {
+                    writeAttempted = true
+                    try fileIO.writeAtomically(encoded, to: url)
+                    guard let readbackData = try fileIO.read(from: url),
+                          readbackData == encoded
+                    else { throw DeviceEpochStoreError.readbackMismatch }
+                    return true
+                } catch {
+                    if writeAttempted {
+                        do {
+                            try restore(priorData, at: url)
+                        } catch {
+                            throw DeviceEpochStoreError.restorationFailed
+                        }
                     }
+                    throw error
                 }
-                throw error
             }
+            if committed { return true }
         }
+        throw DeviceEpochStoreError.retryableConflict
     }
 
     private static let encoder: JSONEncoder = {
@@ -5464,6 +5474,12 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         return try result.get()
     }
 
+    private func requireRecoveryExecutionBudget() throws {
+        guard MeteringRecoveryExecutionContext.budget?.canStartTransaction() != false else {
+            throw DeviceEpochStoreError.executionBudgetExpired
+        }
+    }
+
     private func resolvedFileURL() throws -> URL {
         if let fileURL { return fileURL }
         guard let container = FileManager.default.containerURL(
@@ -5474,14 +5490,10 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         return container.appendingPathComponent(Self.fileName)
     }
 
-    private func loadState() throws -> DeviceEpochStoreState {
-        let url = try resolvedFileURL()
-        let state = try loadPersistedState(at: url).state
-        try validateStatic(state, expectedOwner: nil, requireOwnerMatch: false)
-        return state
-    }
-
     private func decodeState(_ data: Data?) throws -> DeviceEpochStoreState {
+        if let stateDecoder {
+            return try stateDecoder(data)
+        }
         guard let data else { return DeviceEpochStoreState() }
         let state = try Self.decoder.decode(DeviceEpochStoreState.self, from: data)
         guard (1...DeviceEpochStoreState.currentSchemaVersion).contains(state.schemaVersion) else {
@@ -5492,41 +5504,50 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
         return migrated
     }
 
-    private func loadPersistedState(
-        at url: URL,
-        initialData: Data? = nil,
-        didReadInitialData: Bool = false
+    private func decodeSnapshot(
+        _ data: Data?
     ) throws -> (state: DeviceEpochStoreState, persistedData: Data?) {
-        let data = didReadInitialData ? initialData : try fileIO.read(from: url)
         if let data {
             let state = try decodeState(data)
             try validateStatic(state, expectedOwner: nil, requireOwnerMatch: false)
-            try removeLegacyDefaultsAfterVerifiedRoot()
             return (state, data)
         }
-        guard let migrated = try decodeLegacyState() else {
-            return (DeviceEpochStoreState(), nil)
+        if let migrated = try decodeLegacyState() {
+            try validateStatic(migrated, expectedOwner: nil, requireOwnerMatch: false)
+            return (migrated, nil)
         }
+        return (DeviceEpochStoreState(), nil)
+    }
 
+    private func readOrMigrateAbsentRoot(at url: URL) throws -> DeviceEpochStoreState {
+        guard let migrated = try decodeLegacyState() else {
+            return DeviceEpochStoreState()
+        }
         try validateStatic(migrated, expectedOwner: nil, requireOwnerMatch: false)
         let encoded = try Self.encoder.encode(migrated)
-        do {
-            try fileIO.writeAtomically(encoded, to: url)
-            guard let readback = try fileIO.read(from: url), readback == encoded else {
-                throw DeviceEpochStoreError.readbackMismatch
+        let committedData = try withLock { () throws -> Data in
+            if let concurrentData = try fileIO.read(from: url) {
+                return concurrentData
             }
-            let verified = try decodeState(readback)
-            try validateStatic(verified, expectedOwner: nil, requireOwnerMatch: false)
-            try removeLegacyDefaultsAfterVerifiedRoot()
-            return (verified, readback)
-        } catch {
             do {
-                try restore(nil, at: url)
+                try fileIO.writeAtomically(encoded, to: url)
+                guard let readback = try fileIO.read(from: url), readback == encoded else {
+                    throw DeviceEpochStoreError.readbackMismatch
+                }
+                return readback
             } catch {
-                throw DeviceEpochStoreError.restorationFailed
+                do {
+                    try restore(nil, at: url)
+                } catch {
+                    throw DeviceEpochStoreError.restorationFailed
+                }
+                throw error
             }
-            throw error
         }
+        let verified = try decodeState(committedData)
+        try validateStatic(verified, expectedOwner: nil, requireOwnerMatch: false)
+        try removeLegacyDefaultsAfterVerifiedRoot()
+        return verified
     }
 
     private func decodeLegacyState() throws -> DeviceEpochStoreState? {

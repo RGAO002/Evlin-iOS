@@ -113,6 +113,230 @@ final class DeviceEpochStoreTests: XCTestCase {
         XCTAssertNil(io.data)
     }
 
+    func testReadReleasesFileLockBeforeDecodingPersistedState() throws {
+        let io = TestFileIO()
+        io.data = try encode(makeState())
+        let lock = TestLock()
+        let decoderEntered = DispatchSemaphore(value: 0)
+        let allowDecoderToFinish = DispatchSemaphore(value: 0)
+        let readFinished = expectation(description: "read finished")
+        let store = DeviceEpochStore(
+            fileURL: URL(fileURLWithPath: "/tmp/evlin-device-epoch-store-test.json"),
+            lock: lock,
+            fileIO: io,
+            ownerProvider: { self.owner },
+            stateDecoder: { _ in
+                decoderEntered.signal()
+                allowDecoderToFinish.wait()
+                throw TestError.mutation
+            }
+        )
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = try? store.read()
+            readFinished.fulfill()
+        }
+
+        XCTAssertEqual(decoderEntered.wait(timeout: .now() + 2), .success)
+        XCTAssertTrue(lock.canAcquireImmediately(), "JSON decoding must not hold the cross-process file lock")
+        allowDecoderToFinish.signal()
+        wait(for: [readFinished], timeout: 2)
+    }
+
+    func testTransactionReleasesFileLockBeforeDecodingPersistedState() throws {
+        let io = TestFileIO()
+        io.data = try encode(makeState())
+        let lock = TestLock()
+        let decoderEntered = DispatchSemaphore(value: 0)
+        let allowDecoderToFinish = DispatchSemaphore(value: 0)
+        let transactionFinished = expectation(description: "transaction finished")
+        let store = DeviceEpochStore(
+            fileURL: URL(fileURLWithPath: "/tmp/evlin-device-epoch-store-test.json"),
+            lock: lock,
+            fileIO: io,
+            ownerProvider: { self.owner },
+            stateDecoder: { _ in
+                decoderEntered.signal()
+                allowDecoderToFinish.wait()
+                throw TestError.mutation
+            }
+        )
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = try? store.transaction(expectedOwner: self.owner) { _ in () }
+            transactionFinished.fulfill()
+        }
+
+        XCTAssertEqual(decoderEntered.wait(timeout: .now() + 2), .success)
+        XCTAssertTrue(lock.canAcquireImmediately(), "transaction JSON decoding must not hold the cross-process file lock")
+        allowDecoderToFinish.signal()
+        wait(for: [transactionFinished], timeout: 2)
+    }
+
+    func testIdentityCleanupTransactionReleasesFileLockBeforeDecoding() throws {
+        let state = makeState()
+        let io = TestFileIO()
+        io.data = try encode(state)
+        let lock = TestLock()
+        let decoderEntered = DispatchSemaphore(value: 0)
+        let allowDecoderToFinish = DispatchSemaphore(value: 0)
+        let transactionFinished = expectation(description: "cleanup transaction finished")
+        let store = DeviceEpochStore(
+            fileURL: URL(fileURLWithPath: "/tmp/evlin-device-epoch-store-test.json"),
+            lock: lock,
+            fileIO: io,
+            ownerProvider: { self.owner },
+            stateDecoder: { _ in
+                decoderEntered.signal()
+                allowDecoderToFinish.wait()
+                throw TestError.mutation
+            }
+        )
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = try? store.identityCleanupTransaction(
+                workID: state.identityCleanupWork!.workID
+            ) { _, _ in () }
+            transactionFinished.fulfill()
+        }
+
+        XCTAssertEqual(decoderEntered.wait(timeout: .now() + 2), .success)
+        XCTAssertTrue(lock.canAcquireImmediately(), "cleanup decoding must not hold the cross-process file lock")
+        allowDecoderToFinish.signal()
+        wait(for: [transactionFinished], timeout: 2)
+    }
+
+    func testFinalizeIdentityCleanupReleasesFileLockBeforeDecoding() throws {
+        let state = makeState()
+        let io = TestFileIO()
+        io.data = try encode(state)
+        let lock = TestLock()
+        let decoderEntered = DispatchSemaphore(value: 0)
+        let allowDecoderToFinish = DispatchSemaphore(value: 0)
+        let finalizeFinished = expectation(description: "cleanup finalize finished")
+        let store = DeviceEpochStore(
+            fileURL: URL(fileURLWithPath: "/tmp/evlin-device-epoch-store-test.json"),
+            lock: lock,
+            fileIO: io,
+            ownerProvider: { self.owner },
+            stateDecoder: { _ in
+                decoderEntered.signal()
+                allowDecoderToFinish.wait()
+                throw TestError.mutation
+            }
+        )
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = try? store.finalizeIdentityCleanup(workID: state.identityCleanupWork!.workID)
+            finalizeFinished.fulfill()
+        }
+
+        XCTAssertEqual(decoderEntered.wait(timeout: .now() + 2), .success)
+        XCTAssertTrue(lock.canAcquireImmediately(), "cleanup finalization decoding must not hold the cross-process file lock")
+        allowDecoderToFinish.signal()
+        wait(for: [finalizeFinished], timeout: 2)
+    }
+
+    func testConcurrentTransactionsPreserveBothMutationsAfterCASRetry() throws {
+        let io = TestFileIO()
+        let lock = TestLock()
+        let barrier = OneShotMutationBarrier(participants: 2)
+        let errors = LockedErrors()
+        let firstFinished = expectation(description: "first transaction finished")
+        let secondFinished = expectation(description: "second transaction finished")
+        let first = makeStore(io: io, lock: lock)
+        let second = makeStore(io: io, lock: lock)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try first.transaction(expectedOwner: self.owner) { state in
+                    barrier.arrive(id: 1)
+                    state.pendingRegistrationRecovery = .deliveryRecovery
+                }
+            } catch {
+                errors.append(error)
+            }
+            firstFinished.fulfill()
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try second.transaction(expectedOwner: self.owner) { state in
+                    barrier.arrive(id: 2)
+                    state.ratchets[self.owner] = MeteringOwnerRatchet(
+                        ownerChildDeviceID: self.owner,
+                        advertisedVersion: 1,
+                        localSelection: .v1,
+                        registeredV2At: nil,
+                        dualActiveAt: nil,
+                        activatedV2At: nil
+                    )
+                }
+            } catch {
+                errors.append(error)
+            }
+            secondFinished.fulfill()
+        }
+
+        wait(for: [firstFinished, secondFinished], timeout: 3)
+        XCTAssertTrue(errors.values.isEmpty, "concurrent transactions failed: \(errors.values)")
+        let final = try first.read()
+        XCTAssertEqual(final.pendingRegistrationRecovery, .deliveryRecovery)
+        XCTAssertEqual(final.ratchets[owner]?.localSelection, .v1)
+    }
+
+    func testExpiredRecoveryBudgetPreventsStartingANewTransaction() throws {
+        let io = TestFileIO()
+        let store = makeStore(io: io)
+        let budget = MeteringRecoveryExecutionBudget()
+        budget.expire()
+        var mutationStarted = false
+
+        XCTAssertThrowsError(
+            try MeteringRecoveryExecutionContext.$budget.withValue(budget) {
+                try store.transaction(expectedOwner: owner) { _ in
+                    mutationStarted = true
+                }
+            }
+        ) { error in
+            XCTAssertEqual(error as? DeviceEpochStoreError, .executionBudgetExpired)
+        }
+        XCTAssertFalse(mutationStarted)
+        XCTAssertNil(io.data)
+    }
+
+    func testCASConflictRetriesTwiceThenLeavesWorkForNextWake() throws {
+        let first = DeviceEpochStoreState(ownerChildDeviceID: owner)
+        var second = first
+        second.pendingRegistrationRecovery = .deliveryRecovery
+        let io = AlternatingSnapshotFileIO(
+            first: try encode(first),
+            second: try encode(second)
+        )
+        let store = DeviceEpochStore(
+            fileURL: URL(fileURLWithPath: "/tmp/evlin-device-epoch-store-test.json"),
+            lock: TestLock(),
+            fileIO: io,
+            ownerProvider: { self.owner }
+        )
+        var mutationAttempts = 0
+
+        XCTAssertThrowsError(try store.transaction(expectedOwner: owner) { state in
+            mutationAttempts += 1
+            state.ratchets[owner] = MeteringOwnerRatchet(
+                ownerChildDeviceID: owner,
+                advertisedVersion: 1,
+                localSelection: .v1,
+                registeredV2At: nil,
+                dualActiveAt: nil,
+                activatedV2At: nil
+            )
+        }) { error in
+            XCTAssertEqual(error as? DeviceEpochStoreError, .retryableConflict)
+        }
+        XCTAssertEqual(mutationAttempts, 3, "one initial attempt plus exactly two CAS retries")
+        XCTAssertEqual(io.writeCount, 0, "conflict exhaustion must never fall back to lock-held RMW")
+    }
+
     func testReadbackMismatchRestoresPriorBytes() throws {
         let io = TestFileIO()
         let store = makeStore(io: io)
@@ -196,7 +420,10 @@ final class DeviceEpochStoreTests: XCTestCase {
         }) { error in
             XCTAssertEqual(error as? DeviceEpochStoreError, .ownerMismatch)
         }
-        XCTAssertEqual(observedOwners, [owner, owner, otherOwner])
+        // The CAS commit rechecks authority once after reacquiring the lock,
+        // then again after exact-byte readback. The injected write changes the
+        // owner between those checks, so the prior bytes must be restored.
+        XCTAssertEqual(observedOwners, [owner, owner, owner, otherOwner])
         XCTAssertTrue(writeMutationObserved)
         XCTAssertEqual(io.data, priorBytes)
         XCTAssertGreaterThan(io.writeCount, initializationWriteCount)
@@ -1074,11 +1301,61 @@ final class DeviceEpochStoreTests: XCTestCase {
 
 private enum TestError: Error { case mutation }
 
+private final class OneShotMutationBarrier: @unchecked Sendable {
+    private let condition = NSCondition()
+    private let participants: Int
+    private var arrived: Set<Int> = []
+
+    init(participants: Int) {
+        self.participants = participants
+    }
+
+    func arrive(id: Int) {
+        condition.lock()
+        defer { condition.unlock() }
+        guard arrived.insert(id).inserted else { return }
+        if arrived.count == participants {
+            condition.broadcast()
+            return
+        }
+        while arrived.count < participants {
+            condition.wait()
+        }
+    }
+}
+
+private final class LockedErrors: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [Error] = []
+
+    var values: [Error] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func append(_ error: Error) {
+        lock.lock()
+        storage.append(error)
+        lock.unlock()
+    }
+}
+
 private final class TestLock: DeviceEpochStoreLocking, @unchecked Sendable {
     var available = true
+    private let lock = NSLock()
 
     func withLock<T>(_ body: () -> T) -> T? {
-        available ? body() : nil
+        guard available else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+
+    func canAcquireImmediately() -> Bool {
+        guard lock.try() else { return false }
+        lock.unlock()
+        return true
     }
 }
 
@@ -1126,5 +1403,27 @@ private final class TestFileIO: DeviceEpochFileIO, @unchecked Sendable {
     func remove(at url: URL) throws {
         data = nil
         readbackPending = false
+    }
+}
+
+private final class AlternatingSnapshotFileIO: DeviceEpochFileIO, @unchecked Sendable {
+    private let first: Data
+    private let second: Data
+    private var readCount = 0
+    private(set) var writeCount = 0
+
+    init(first: Data, second: Data) {
+        self.first = first
+        self.second = second
+    }
+
+    func read(from url: URL) throws -> Data? {
+        readCount += 1
+        return readCount.isMultiple(of: 2) ? second : first
+    }
+
+    func writeAtomically(_ data: Data, to url: URL) throws {
+        writeCount += 1
+        throw TestError.mutation
     }
 }

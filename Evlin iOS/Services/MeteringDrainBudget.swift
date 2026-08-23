@@ -1,5 +1,31 @@
 import Foundation
 
+/// Lifetime gate for one background recovery invocation. Unlike
+/// `MeteringDrainBudget`, this does not count network requests or impose a
+/// wall-clock deadline. The host expiration callback flips it atomically so
+/// recovery can stop opening new persistent transactions while allowing an
+/// already-started atomic commit to finish.
+nonisolated final class MeteringRecoveryExecutionBudget: @unchecked Sendable {
+    private let lock = NSLock()
+    private var expired = false
+
+    func expire() {
+        lock.lock()
+        expired = true
+        lock.unlock()
+    }
+
+    func canStartTransaction() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !expired
+    }
+}
+
+nonisolated enum MeteringRecoveryExecutionContext {
+    @TaskLocal static var budget: MeteringRecoveryExecutionBudget?
+}
+
 /// Work cap for ONE opportunistic drain pass.
 ///
 /// The DeviceActivity extension no longer waits for uploads inside its

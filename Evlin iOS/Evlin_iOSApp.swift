@@ -2,6 +2,7 @@ import SwiftUI
 import FamilyControls
 import UIKit
 import Sentry
+import os
 
 @main
 struct Evlin_iOSApp: App {
@@ -585,47 +586,64 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             CommandDeliveryDiagnostics.keyRemoteNotification,
             "received content_available=\(aps?["content-available"] ?? "unknown") keys=\(userInfo.keys.map { String(describing: $0) }.sorted().joined(separator: ","))"
         )
+        let executionBudget = MeteringRecoveryExecutionBudget()
+        let backgroundTaskID = application.beginBackgroundTask(
+            withName: "EvlinMeteringRecovery"
+        ) {
+            executionBudget.expire()
+            os_log(
+                .error,
+                "Metering background recovery expired; new persistent transactions are disabled"
+            )
+        }
         Task { @MainActor in
-            AppDelegate.invalidateRemoteNotificationDrivenStores()
-            await CommandPoller.shared.pollOnceForCurrentDevice(
-                recoveryReason: .silentRemoteNotification
-            )
-            // #96: a silent wake is the backend's only way to reach a closed
-            // app. The state-invalidated broadcast above only helps when a
-            // foreground poller is alive to hear it — in a background wake
-            // nothing is. Run one explicit metering recovery pass so a
-            // starving device re-paves its dated horizon, finishes wedged
-            // work, and crosses midnight without the kid opening the app.
-            _ = try? await MeteringProductionComposition.recoverFromSharedConfiguration(
-                role: .app
-            )
-            // Per-app owner recovery rides the same wake. The earned pool got
-            // this leg with #96; per-app was left off it, so a `set_limit`
-            // ingested here sat as `accepted_needs_owner` until someone opened
-            // Evlin — the "must open the app to arm a limit" complaint of
-            // 2026-08-07, twice on real hardware (iPhone 02:44, iPad 05:41).
-            await AppLimitRecoveryTrigger.foreground()
-            // Watchdog on the same wake: reds (revoked authorization, stuck
-            // handoffs) otherwise wait for a foreground that may be days out.
-            // The hourly starvation kick makes this a steady background pulse.
-            await MeteringWatchdog.shared.runIfDue(trigger: "background_push")
-            // The backend's rejected-burst lane means callbacks are dying
-            // against a dead epoch RIGHT NOW. A maintenance pass finds a green
-            // watchdog and does nothing (2026-08-11, post-19:29: armed, green,
-            // stone dead — the day's one-shot thresholds had already burned).
-            // Only a re-arm resets Apple's counter and re-exposes the rungs,
-            // so this wake kind forces one explicitly.
-            if let evlin = userInfo["evlin"] as? [AnyHashable: Any],
-               evlin["kind"] as? String == "metering_rearm" {
-                _ = await MeteringTodayRouteRekick.run(trigger: "rejected_burst_kick")
+            defer {
+                if backgroundTaskID != .invalid {
+                    application.endBackgroundTask(backgroundTaskID)
+                }
             }
-            // Ship the flight recorder too. Until now `uploadPending` had a
-            // single call site — the foreground scene transition — so the
-            // black box was blind for exactly the stretches worth diagnosing:
-            // whenever the kid was not looking at Evlin. Samples and command
-            // acks always flowed in the background; the diagnostics did not.
-            await ScreenTimeEventUploader.uploadPending()
-            completionHandler(.newData)
+            await MeteringRecoveryExecutionContext.$budget.withValue(executionBudget) {
+                AppDelegate.invalidateRemoteNotificationDrivenStores()
+                await CommandPoller.shared.pollOnceForCurrentDevice(
+                    recoveryReason: .silentRemoteNotification
+                )
+                // #96: a silent wake is the backend's only way to reach a closed
+                // app. The state-invalidated broadcast above only helps when a
+                // foreground poller is alive to hear it — in a background wake
+                // nothing is. Run one explicit metering recovery pass so a
+                // starving device re-paves its dated horizon, finishes wedged
+                // work, and crosses midnight without the kid opening the app.
+                _ = try? await MeteringProductionComposition.recoverFromSharedConfiguration(
+                    role: .app
+                )
+                // Per-app owner recovery rides the same wake. The earned pool got
+                // this leg with #96; per-app was left off it, so a `set_limit`
+                // ingested here sat as `accepted_needs_owner` until someone opened
+                // Evlin — the "must open the app to arm a limit" complaint of
+                // 2026-08-07, twice on real hardware (iPhone 02:44, iPad 05:41).
+                await AppLimitRecoveryTrigger.foreground()
+                // Watchdog on the same wake: reds (revoked authorization, stuck
+                // handoffs) otherwise wait for a foreground that may be days out.
+                // The hourly starvation kick makes this a steady background pulse.
+                await MeteringWatchdog.shared.runIfDue(trigger: "background_push")
+                // The backend's rejected-burst lane means callbacks are dying
+                // against a dead epoch RIGHT NOW. A maintenance pass finds a green
+                // watchdog and does nothing (2026-08-11, post-19:29: armed, green,
+                // stone dead — the day's one-shot thresholds had already burned).
+                // Only a re-arm resets Apple's counter and re-exposes the rungs,
+                // so this wake kind forces one explicitly.
+                if let evlin = userInfo["evlin"] as? [AnyHashable: Any],
+                   evlin["kind"] as? String == "metering_rearm" {
+                    _ = await MeteringTodayRouteRekick.run(trigger: "rejected_burst_kick")
+                }
+                // Ship the flight recorder too. Until now `uploadPending` had a
+                // single call site — the foreground scene transition — so the
+                // black box was blind for exactly the stretches worth diagnosing:
+                // whenever the kid was not looking at Evlin. Samples and command
+                // acks always flowed in the background; the diagnostics did not.
+                await ScreenTimeEventUploader.uploadPending()
+                completionHandler(.newData)
+            }
         }
     }
 
