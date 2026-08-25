@@ -1,5 +1,19 @@
 import SwiftUI
 
+nonisolated struct DeviceAppsDisplayState: Equatable {
+    let hasMatchedApps: Bool
+    let deviceCapMinutes: Int?
+    let poolMinutes: Int?
+
+    var showsDeviceCap: Bool {
+        deviceCapMinutes != nil || poolMinutes != nil
+    }
+
+    var showsPerAppLimits: Bool {
+        hasMatchedApps
+    }
+}
+
 /// Per-app management for one device. Mirrors HTML 563-625.
 /// Each row: app icon + name + toggle + tappable limit pill + progress bar.
 /// Tap pill → expands inline 7-option limit picker (15/20/30/45/60/90/120 min).
@@ -86,6 +100,14 @@ struct DeviceAppsSheet: View {
         )
     }
 
+    private var displayState: DeviceAppsDisplayState {
+        DeviceAppsDisplayState(
+            hasMatchedApps: !apps.isEmpty,
+            deviceCapMinutes: deviceCapMinutes,
+            poolMinutes: poolMinutes
+        )
+    }
+
     private var deviceTourSteps: [TourStep] {
         [
             TourStep(target: "device.cap",
@@ -115,7 +137,7 @@ struct DeviceAppsSheet: View {
                 Spacer()
                 ProgressView()
                 Spacer()
-            } else if apps.isEmpty {
+            } else if !displayState.showsPerAppLimits {
                 emptyPlaceholder
             } else {
                 // Reader lets the first-visit App Limits tour scroll targets
@@ -124,7 +146,7 @@ struct DeviceAppsSheet: View {
                 ScrollView {
                     // B9: Device-cap card — shown at the top when a cap or pool
                     // value is available. "Daily total for this device / of {pool} shared".
-                    if deviceCapMinutes != nil || poolMinutes != nil {
+                    if displayState.showsDeviceCap {
                         deviceCapCard
                             .padding(.horizontal, 20)
                             .padding(.top, 16)
@@ -401,6 +423,11 @@ struct DeviceAppsSheet: View {
     /// Empty state: honest message for "no apps yet" vs load failure.
     private var emptyPlaceholder: some View {
         VStack(spacing: 14) {
+            if displayState.showsDeviceCap {
+                deviceCapCard
+                    .padding(.horizontal, 20)
+                    .padding(.top, 16)
+            }
             Spacer()
             Image(systemName: loadFailed ? "wifi.slash" : "app.dashed")
                 .font(.system(size: 36, weight: .light))

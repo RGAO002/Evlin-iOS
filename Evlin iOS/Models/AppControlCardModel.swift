@@ -431,17 +431,100 @@ enum AppControlRouter {
         guard !trimmedOriginal.isEmpty, !trimmedCandidate.isEmpty else {
             return trimmedCandidate
         }
-        guard !trimmedTarget.isEmpty,
-              let range = trimmedOriginal.range(
-                of: trimmedTarget,
-                options: [.caseInsensitive, .diacriticInsensitive]
-              )
-        else {
+        // Already names the candidate — re-confirming the same card must not
+        // splice it in twice.
+        if trimmedOriginal.range(
+            of: trimmedCandidate,
+            options: [.caseInsensitive, .diacriticInsensitive]
+        ) != nil {
             return trimmedOriginal
+        }
+        guard !trimmedTarget.isEmpty,
+              let range = wordBoundedRange(of: trimmedTarget, in: trimmedOriginal)
+        else {
+            // The target is not in this sentence, so there is nothing to patch.
+            //
+            // Returning the original unchanged is the one thing we must not do:
+            // the caller re-sends it, and re-sending the exact text that
+            // produced the picker reproduces the picker — a closed loop with no
+            // exit and no diagnostic. It happens whenever the card's target
+            // differs from the parent's wording, or a later bubble displaced
+            // `lastUserMessageForCard`.
+            //
+            // Rebuild the command instead: keep the verb the parent used and
+            // name the app they just picked. The verb has to survive — block
+            // hides an app, lock overlays it, and they are not interchangeable
+            // — and a bare display name carries no verb at all, so the re-sent
+            // message could not execute even in principle.
+            //
+            // The duration is dropped, so the parent gets asked for one. A
+            // question is a worse outcome than executing, and a much better one
+            // than the same card forever.
+            if let verb = leadingCommandVerb(in: trimmedOriginal) {
+                return "\(verb) \(trimmedCandidate)"
+            }
+            return trimmedCandidate
         }
         var rewritten = trimmedOriginal
         rewritten.replaceSubrange(range, with: trimmedCandidate)
         return rewritten
+    }
+
+    /// The command verb `original` opens with, in the parent's own casing.
+    ///
+    /// Ordered longest-first so "unlock" is not read as "lock" — which would
+    /// invert the command.
+    private static func leadingCommandVerb(in original: String) -> String? {
+        let verbs = ["unblock", "unshield", "unlock", "block", "shield", "lock"]
+        guard let firstWord = original.split(
+            separator: " ",
+            maxSplits: 1,
+            omittingEmptySubsequences: true
+        ).first else { return nil }
+        let candidate = String(firstWord).trimmingCharacters(
+            in: CharacterSet.alphanumerics.inverted
+        )
+        guard verbs.contains(candidate.lowercased()) else { return nil }
+        return candidate
+    }
+
+    /// `target`'s range in `haystack`, but only where it stands as a whole word.
+    ///
+    /// A plain substring replace splices the candidate inside words that were
+    /// never the target: "lock fbi" with target "fb" became "lock Facebooki",
+    /// and because "block" contains "loc", a target of "loc" rewrote the verb
+    /// itself — turning a block into something that is not a command at all.
+    /// Both produce a re-sent command naming an app nobody chose.
+    ///
+    /// A boundary here is anything that is not a letter or digit. CJK has no
+    /// spaces, so a CJK target is accepted wherever it appears — the boundary
+    /// rule only applies when the target's own edges are alphanumeric.
+    private static func wordBoundedRange(
+        of target: String,
+        in haystack: String
+    ) -> Range<String.Index>? {
+        var searchStart = haystack.startIndex
+        while let range = haystack.range(
+            of: target,
+            options: [.caseInsensitive, .diacriticInsensitive],
+            range: searchStart..<haystack.endIndex
+        ) {
+            let leadingOK = !isWordCharacter(target.first)
+                || range.lowerBound == haystack.startIndex
+                || !isWordCharacter(haystack[haystack.index(before: range.lowerBound)])
+            let trailingOK = !isWordCharacter(target.last)
+                || range.upperBound == haystack.endIndex
+                || !isWordCharacter(haystack[range.upperBound])
+            if leadingOK && trailingOK { return range }
+            guard range.upperBound < haystack.endIndex else { return nil }
+            searchStart = haystack.index(after: range.lowerBound)
+        }
+        return nil
+    }
+
+    private static func isWordCharacter(_ character: Character?) -> Bool {
+        guard let character else { return false }
+        return character.isLetter || character.isNumber
     }
 
     static func aliasKind(for targetKind: String) -> AliasKind {

@@ -41,6 +41,9 @@ final class FamilyStore {
     private(set) var children: [ChildDTO] = []
     private(set) var parents: [ParentMemberDTO] = []
     private(set) var parentDevices: [EnrolledDeviceDTO] = []
+    /// The signed-in auth account (id / family / display name / email).
+    /// Settings reads `email` from here.
+    private(set) var selfAccount: AuthAccountDTO?
     private(set) var selfParent: ParentProfileDTO?
     private(set) var earnedSummariesByChildID: [String: APIClient.EarnedSummaryDTO] = [:]
 
@@ -123,6 +126,7 @@ final class FamilyStore {
     }
 
     private func apply(_ me: MeProfileResponseDTO) {
+        self.selfAccount = me.account
         self.selfParent = me.parent_profile
         self.family = me.family
         self.parents = me.family?.members ?? []

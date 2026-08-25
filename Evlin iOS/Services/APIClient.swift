@@ -1424,6 +1424,9 @@ struct EnrolledDeviceDTO: Codable, Sendable, Equatable, Identifiable {
     let parent_pin_status: String?
     let parent_pin: String?
     let metering_ready: Bool?
+    // Tri-state successor (2026-08-11): syncing / armed_awaiting_traffic /
+    // active_delivering / action_required. Nil from old servers.
+    let metering_state: String?
     var id: String { device_id }
 
     init(
@@ -1439,7 +1442,8 @@ struct EnrolledDeviceDTO: Codable, Sendable, Equatable, Identifiable {
         is_self: Bool,
         parent_pin_status: String? = nil,
         parent_pin: String? = nil,
-        metering_ready: Bool? = nil
+        metering_ready: Bool? = nil,
+        metering_state: String? = nil
     ) {
         self.device_id = device_id
         self.mode = mode
@@ -1454,6 +1458,7 @@ struct EnrolledDeviceDTO: Codable, Sendable, Equatable, Identifiable {
         self.parent_pin_status = parent_pin_status
         self.parent_pin = parent_pin
         self.metering_ready = metering_ready
+        self.metering_state = metering_state
     }
 }
 
@@ -3574,11 +3579,15 @@ struct AuthAccountDTO: Codable, Sendable, Equatable {
     let id: UUID
     let familyID: UUID?
     let displayName: String?
+    /// Optional by design: Apple can withhold the address, and older backends
+    /// don't send the field at all — Settings falls back rather than lying.
+    let email: String?
     let needsFamily: Bool
     enum CodingKeys: String, CodingKey {
         case id
         case familyID = "family_id"
         case displayName = "display_name"
+        case email
         case needsFamily = "needs_family"
     }
 }

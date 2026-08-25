@@ -113,6 +113,14 @@ struct CardContext {
     let u1Token: String?
     let u1ShieldList: [U1ShieldEntry]
     let u1Verb: String?
+    /// "locked" or "blocked", from the backend's `verb_past` detail.
+    ///
+    /// The duration card used to hardcode "shielded", so a parent who said
+    /// "block Facebook" was asked how long it should be *shielded* — naming a
+    /// different action than the one they asked for. Optional and defaulted:
+    /// when absent the copy falls back to the lock wording, which is correct
+    /// for every caller that does not deal in blocks.
+    let verbPast: String?
     var reflectionPrompt: String?
     var reflectionEssay: String?
     var reflectionReviewMode: ReflectionReviewMode?
@@ -134,6 +142,7 @@ struct CardContext {
         u1Token: String?,
         u1ShieldList: [U1ShieldEntry],
         u1Verb: String? = nil,
+        verbPast: String? = nil,
         reflectionPrompt: String? = nil,
         reflectionEssay: String? = nil,
         reflectionReviewMode: ReflectionReviewMode? = nil,
@@ -154,6 +163,7 @@ struct CardContext {
         self.u1Token = u1Token
         self.u1ShieldList = u1ShieldList
         self.u1Verb = u1Verb
+        self.verbPast = verbPast
         self.reflectionPrompt = reflectionPrompt
         self.reflectionEssay = reflectionEssay
         self.reflectionReviewMode = reflectionReviewMode

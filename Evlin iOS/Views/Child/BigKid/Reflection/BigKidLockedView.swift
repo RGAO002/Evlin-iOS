@@ -16,8 +16,11 @@ struct BigKidLockedView: View {
         state.reflectionRequest?.stepsCompleted.count ?? 0
     }
     private var allDone: Bool { progress >= 3 }
-    private var firstName: String {
-        String(state.childName.split(separator: " ").first ?? "there")
+    private var displayChildName: String {
+        BigKidDisplayName.resolve(
+            server: state.childName,
+            local: UserDefaults.standard.string(forKey: "evlin.childProfileName") ?? ""
+        )
     }
 
     var body: some View {
@@ -102,7 +105,7 @@ struct BigKidLockedView: View {
                 .font(.system(size: 12, weight: .bold))
                 .tracking(2.4)
                 .foregroundStyle(EvlinKidColors.green500)
-            Text("Hey \(firstName).")
+            Text("Hey \(displayChildName).")
                 .font(.system(size: 38, weight: .heavy))
                 .tracking(-1)
                 .foregroundStyle(EvlinKidColors.ink)

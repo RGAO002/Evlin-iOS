@@ -27,6 +27,10 @@ struct DeviceItem: Identifiable, Hashable {
     let deviceUUID: UUID?
     /// Device-watchdog proof for today's exact activated v2 route.
     let meteringReady: Bool
+    /// Tri-state metering badge (see DeviceRow.statusText). Old servers omit
+    /// `metering_state`; the boolean maps armed→active so the badge looks
+    /// exactly as it did before the field existed.
+    let meteringState: String
 
     /// Build a Profile "Enrolled Devices" row from a backend
     /// `EnrolledDeviceDTO` (`GET /family` / `GET /me/profile`). The display
@@ -42,6 +46,8 @@ struct DeviceItem: Identifiable, Hashable {
         self.locked = false
         self.deviceUUID = UUID(uuidString: dto.device_id)
         self.meteringReady = dto.metering_ready == true
+        self.meteringState = dto.metering_state
+            ?? (dto.metering_ready == true ? "active_delivering" : "syncing")
     }
 
     /// Direct memberwise-style initializer for the mock fixtures below.
@@ -50,7 +56,8 @@ struct DeviceItem: Identifiable, Hashable {
         name: String,
         detail: String,
         locked: Bool,
-        meteringReady: Bool = false
+        meteringReady: Bool = false,
+        meteringState: String? = nil
     ) {
         self.iconSystemName = iconSystemName
         self.name = name
@@ -58,6 +65,8 @@ struct DeviceItem: Identifiable, Hashable {
         self.locked = locked
         self.deviceUUID = nil
         self.meteringReady = meteringReady
+        self.meteringState = meteringState
+            ?? (meteringReady ? "active_delivering" : "syncing")
     }
 
     private static func friendlyDisplay(dto: EnrolledDeviceDTO, friendlyModel: String?) -> String {
@@ -66,8 +75,7 @@ struct DeviceItem: Identifiable, Hashable {
         }
         let platform = (dto.platform ?? "").lowercased()
         if platform == "ios" {
-            let major = dto.os_version?.split(separator: ".", maxSplits: 1).first.map(String.init)
-            let os = ["iOS", major].compactMap { $0 }.joined(separator: " ")
+            let os = ["iOS", dto.os_version].compactMap { $0 }.joined(separator: " ")
             return [model, os.isEmpty ? nil : os].compactMap { $0 }.joined(separator: " · ")
         }
         if let raw = dto.device_model, let display = dto.display, raw != model {

@@ -1227,43 +1227,21 @@ final class ActionExecutor: @unchecked Sendable {
                 )
             }
         }
-        // Fail-closed fallback: no matched token → shield the whole selected
-        // set for the same lifetime, keyed to this block so unblock lifts it.
-        if appToken == nil {
-            let selection = DefaultLockGroupStore.load()
-            if !selection.applicationTokens.isEmpty
-                || !selection.categoryTokens.isEmpty {
-                let fallback = ShieldRecord(
-                    recordKey: Self.blockFallbackRecordKey(bundleID: bundleID),
-                    tier: .savedList,
-                    targetKey: Self.blockFallbackTargetKey(bundleID: bundleID),
-                    displayName: "\(record.displayName) (whole set)",
-                    lastCommandID: cmd.id,
-                    appTokens: selection.applicationTokens,
-                    categoryTokens: selection.categoryTokens,
-                    webDomainTokens: selection.webDomainTokens,
-                    appliesToAll: false,
-                    issuedAt: cmd.issuedAt,
-                    expiresAt: expiresAt,
-                    originalRequest: cmd.target.originalRequest,
-                    targetChildID: record.targetChildID
-                )
-                _ = await ActiveLockStore.shared.addShield(fallback, force: true)
-                afterMutationCheckpoint(.blockPersisted)
-                guard identity.isCurrent else {
-                    _ = await ActiveLockStore.shared.removeShield(
-                        recordKey: fallback.recordKey
-                    )
-                    await rollbackAddedBlock(blockMutation.receipt)
-                    return Self.staleIdentityResult
-                }
-            }
-        }
+        // No whole-set fallback. Block is block: it writes the bundle id and
+        // nothing else (Fred, 2026-08-12: "block 就是 block 没有什么花样" —
+        // ruled after a 15-minute block of YouTube shielded all four apps of
+        // the Locked set). The old fail-closed fallback existed because iOS
+        // sometimes accepts a bare bundle-id block without enforcing it, but
+        // over-locking three innocent apps is worse than an honest maybe:
+        // the receipt now says exactly that when no token backs the block.
+        // Unblock still lifts LEGACY fallback shields older builds installed
+        // (see blockFallbackRecordKey below) — removal here must not strand
+        // records already in the field.
         let eff = effectiveStateFrom(state.stillCovered, isBlocked: true, possibleSavedList: state.possibleSavedListCoverage)
         switch result {
         case .added:
             let display = appToken == nil
-                ? "\(record.displayName) (locked whole set — app not matched)"
+                ? "\(record.displayName) (by app id — unverified on this device)"
                 : record.displayName
             return .confirmedExact(verb: .block, displayName: display, effectiveState: eff)
         case .alreadyBlocked:

@@ -62,6 +62,23 @@ struct Evlin_iOSApp: App {
 
     var body: some Scene {
         WindowGroup {
+            // TEMP UI HARNESS (DEBUG only): boot straight into ChatView with
+            // seeded messages so the chat surface can be driven in a bare
+            // simulator without auth. Activated via env var, never in release.
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["EVLIN_UI_HARNESS"] == "chat" {
+                ChatHarnessRoot()
+                    .preferredColorScheme(.light)
+            } else {
+                mainContent
+            }
+            #else
+            mainContent
+            #endif
+        }
+    }
+
+    private var mainContent: some View {
             ContentView()
                 // The Evlin design system ("Informed Sentinel") is a
                 // light-mode-only spec — surface containers, card
@@ -167,7 +184,6 @@ struct Evlin_iOSApp: App {
                     // already in K mode — restart polling with the fresh UUID.
                     startPollerIfPaired()
                 }
-        }
     }
 
     private func refreshParentPushRegistrationIfNeeded(appMode explicitMode: String? = nil) {
@@ -743,3 +759,37 @@ extension Notification.Name {
     static let evlinOpenNotificationEvent = Notification.Name("evlin.openNotificationEvent")
     static let evlinNotificationFeedInvalidated = Notification.Name("evlin.notificationFeedInvalidated")
 }
+
+#if DEBUG
+/// TEMP UI HARNESS: bare ChatView with seeded messages for simulator-driven
+/// hit-testing. No auth, no network expectations (sends will fail politely).
+private struct ChatHarnessRoot: View {
+    @StateObject private var api = APIClient()
+    @StateObject private var vm = ChatViewModel()
+    @State private var reflection = ParentReflectionFixtureStore()
+    @State private var family: FamilyStore
+
+    init() {
+        let client = APIClient()
+        _api = StateObject(wrappedValue: client)
+        _family = State(initialValue: FamilyStore(api: client))
+    }
+
+    var body: some View {
+        ChatView(viewModel: vm)
+            .environmentObject(api)
+            .environment(reflection)
+            .environment(family)
+            .onAppear {
+                guard vm.messages.isEmpty else { return }
+                for i in 0..<60 {
+                    vm.messages.append(ChatMessage(
+                        role: i % 2 == 0 ? .parent : .agent,
+                        content: "Harness message #\(i) — enough text to take a couple of lines and make the list scroll properly.",
+                        timestamp: Date().addingTimeInterval(Double(i - 60) * 60)
+                    ))
+                }
+            }
+    }
+}
+#endif

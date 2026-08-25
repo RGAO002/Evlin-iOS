@@ -79,13 +79,28 @@ struct ChatHistorySheet: View {
 private struct ConversationRow: View {
     let summary: ConversationSummary
 
+    /// Coarse relative age, computed once per render. `style: .relative`
+    /// ticked every SECOND ("42 sec ago" → "43 sec ago") — pointless
+    /// precision for a history list, and a standing per-second text update
+    /// in every visible row (Fred, 2026-08-13: "没必要每秒计时").
+    private var age: String {
+        let seconds = max(0, Date().timeIntervalSince(summary.updatedAt))
+        let minutes = Int(seconds / 60)
+        if minutes < 1 { return "just now" }
+        if minutes < 60 { return "\(minutes) min ago" }
+        let hours = minutes / 60
+        if hours < 24 { return hours == 1 ? "1 hour ago" : "\(hours) hours ago" }
+        let days = hours / 24
+        return days == 1 ? "1 day ago" : "\(days) days ago"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(summary.title ?? "Evlin")
                 .font(.body)
                 .foregroundStyle(.primary)
                 .lineLimit(1)
-            Text(summary.updatedAt, style: .relative)
+            Text(age)
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if let preview = summary.preview, !preview.isEmpty {

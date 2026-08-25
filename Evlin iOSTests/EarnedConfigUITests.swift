@@ -79,6 +79,17 @@ func exerciseDeviceCapSaveGate(
 
 final class EarnedConfigUITests: XCTestCase {
 
+    func testDeviceDailyTotalRemainsVisibleWithoutMatchedApps() {
+        let state = DeviceAppsDisplayState(
+            hasMatchedApps: false,
+            deviceCapMinutes: 120,
+            poolMinutes: 180
+        )
+
+        XCTAssertTrue(state.showsDeviceCap)
+        XCTAssertFalse(state.showsPerAppLimits)
+    }
+
     func testDailyScreenTimeEditRequiresEffectiveDateChoiceWhenRaised() {
         XCTAssertTrue(
             PoolEditConfirmationPolicy.requiresEffectiveDateChoice(

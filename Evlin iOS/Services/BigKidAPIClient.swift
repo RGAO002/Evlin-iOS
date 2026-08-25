@@ -23,7 +23,10 @@ final class BigKidAPIClient: ObservableObject {
     }
 
     func reportHeartbeat(globalEffectiveState: [String: Any]? = nil) async throws {
-        var body: [String: Any] = ["device_id": childId.uuidString]
+        var body: [String: Any] = [
+            "device_id": childId.uuidString,
+            "os_version": DeviceInfoProvider.current().os_version,
+        ]
         if let globalEffectiveState {
             body["global_effective_state"] = globalEffectiveState
         }

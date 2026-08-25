@@ -939,13 +939,39 @@ struct HomeSettingsSheet: View {
                 }
                 .padding(.vertical, 4)
 
-                settingsRow(
-                    title: "Email",
-                    subtitle: "Not exposed by current profile payload",
-                    systemImage: "at",
-                    value: "Not wired",
-                    accent: .evPrimary
-                )
+                // Emails are long — putting the address in the trailing value
+                // slot (like other rows) would shrink it to unreadable or clip
+                // the domain. It gets its own full-width line under the title,
+                // middle-truncated so BOTH the name and the domain stay legible,
+                // and selectable so the parent can copy it.
+                HStack(spacing: 12) {
+                    settingsIconChip("at", accent: .evPrimary)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Email")
+                            .font(.custom("Inter", size: 15).weight(.semibold))
+                            .foregroundStyle(Color.evOnSurface)
+                        if let email = familyStore.selfAccount?.email,
+                           !email.trimmingCharacters(in: .whitespaces).isEmpty {
+                            Text(email)
+                                .font(.custom("Inter", size: 13).weight(.medium))
+                                .foregroundStyle(Color.evOnSurfaceVariant)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .textSelection(.enabled)
+                        } else {
+                            // Apple can withhold the address, and the profile
+                            // may still be loading — say which, don't show a
+                            // fake value.
+                            Text(familyStore.selfAccount == nil
+                                 ? "Loading…" : "Not shared by your sign-in provider")
+                                .font(.custom("Inter", size: 12))
+                                .foregroundStyle(Color.evOnSurfaceVariant)
+                                .lineLimit(1)
+                        }
+                    }
+                    Spacer(minLength: 10)
+                }
+                .padding(.vertical, 4)
 
                 if let parentNameError {
                     Text(parentNameError)

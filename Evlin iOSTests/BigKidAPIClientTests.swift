@@ -2,6 +2,11 @@ import XCTest
 @testable import Evlin_iOS
 
 final class BigKidAPIClientTests: XCTestCase {
+    override func tearDown() {
+        BigKidAPIClientURLProtocol.capturedBody = nil
+        super.tearDown()
+    }
+
     func testDefaultBackendIsProductionRender() {
         XCTAssertEqual(APIClient.defaultURL, "https://evlin-backend.onrender.com/api/v1")
     }
@@ -51,5 +56,71 @@ final class BigKidAPIClientTests: XCTestCase {
         XCTAssertEqual(req.allHTTPHeaderFields?["X-Child-Id"],
                        "11111111-1111-1111-1111-111111111111")
         XCTAssertEqual(req.httpMethod, "GET")
+    }
+
+    func testHeartbeatIncludesCurrentOSVersion() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [BigKidAPIClientURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let client = BigKidAPIClient(
+            baseURL: URL(string: "http://localhost:8000/api/v1")!,
+            childId: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
+            session: session
+        )
+
+        try await client.reportHeartbeat()
+
+        let bodyData = try XCTUnwrap(BigKidAPIClientURLProtocol.capturedBody)
+        let body = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: bodyData) as? [String: Any]
+        )
+        XCTAssertEqual(
+            body["os_version"] as? String,
+            DeviceInfoProvider.current().os_version
+        )
+    }
+}
+
+private final class BigKidAPIClientURLProtocol: URLProtocol {
+    static var capturedBody: Data?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.capturedBody = request.httpBody ?? readBodyStream(request.httpBodyStream)
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data())
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    private func readBodyStream(_ stream: InputStream?) -> Data? {
+        guard let stream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        let bufferSize = 1024
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+        defer { buffer.deallocate() }
+        while stream.hasBytesAvailable {
+            let count = stream.read(buffer, maxLength: bufferSize)
+            if count > 0 {
+                data.append(buffer, count: count)
+            } else {
+                break
+            }
+        }
+        return data
     }
 }

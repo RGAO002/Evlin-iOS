@@ -373,8 +373,18 @@ struct ChatView: View {
                             if message.role == .agent,
                                let receipts = message.receipts, !receipts.isEmpty {
                                 VStack(spacing: 8) {
-                                    ForEach(receipts, id: \.summary) { r in
-                                        ReceiptBubble(receipt: r, onUndo: { token in
+                                    // Identity by OFFSET, not by summary text: an
+                                    // AI-path plan can emit two identical steps
+                                    // ("block YouTube for 15 min" ×2), and duplicate
+                                    // ForEach IDs inside the chat LazyVStack corrupt
+                                    // item identity — the mass phase update when the
+                                    // parent switches tabs away from chat then churns
+                                    // AttributeGraph on the main thread (0x8BADF00D,
+                                    // 2026-08-13 build 7, "froze switching bottom
+                                    // icons"). The array is immutable per message, so
+                                    // offsets are stable identities here.
+                                    ForEach(Array(receipts.enumerated()), id: \.offset) { pair in
+                                        ReceiptBubble(receipt: pair.element, onUndo: { token in
                                             await viewModel.undoReceipt(token: token)
                                         })
                                     }
@@ -833,24 +843,36 @@ struct ChatView: View {
                     .padding(1)
             }
             .contentShape(Circle())
-            .simultaneousGesture(
+            // ONE gesture does touch-down suppression AND the tap action.
+            // The old shape — simultaneous DragGesture(minimumDistance: 0)
+            // for suppression plus .onTapGesture for the action — dies on
+            // iOS 26: the zero-distance drag claims the touch outright and
+            // the tap never fires, so the button LOOKED tappable and did
+            // nothing (iPhone 11 + iPad on iOS 26; the same build's XS Max
+            // on iOS 18 was fine — 2026-08-13). A drag's onEnded always
+            // fires for the gesture that owns the touch, on both OSes.
+            .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { _ in
                         KeyboardDismissGate.suppressNextRootTapDismissal()
                     }
+                    .onEnded { value in
+                        // A tap, not a swipe-across: ignore big movements so
+                        // scroll flicks that start on the button still scroll.
+                        let t = value.translation
+                        guard abs(t.width) < 12, abs(t.height) < 12 else { return }
+                        KeyboardDismissGate.suppressNextRootTapDismissal()
+                        let shouldRestoreFocus = Self.shouldRestoreComposerFocusAfterScrollToBottom(
+                            wasComposerFocused: isComposerFocused,
+                            keyboardOverlap: keyboardOverlapHeight
+                        )
+                        scrollController.scrollToBottom(animated: true)
+                        guard shouldRestoreFocus else { return }
+                        DispatchQueue.main.async {
+                            isComposerFocused = true
+                        }
+                    }
             )
-            .onTapGesture {
-                KeyboardDismissGate.suppressNextRootTapDismissal()
-                let shouldRestoreFocus = Self.shouldRestoreComposerFocusAfterScrollToBottom(
-                    wasComposerFocused: isComposerFocused,
-                    keyboardOverlap: keyboardOverlapHeight
-                )
-                scrollController.scrollToBottom(animated: true)
-                guard shouldRestoreFocus else { return }
-                DispatchQueue.main.async {
-                    isComposerFocused = true
-                }
-            }
             .shadow(color: EvlinKidColors.green700.opacity(0.22), radius: 16, y: 7)
             .shadow(color: Color.white.opacity(0.35), radius: 2, y: -1)
             .padding(.bottom, Self.composerBottomInset(keyboardOverlap: keyboardOverlapHeight) + 132)

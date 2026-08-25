@@ -1746,6 +1746,7 @@ struct ProfileView: View {
                                 timeLeft: deviceTimeLeft,
                                 timePct: deviceRemainingFraction(for: d.deviceUUID),
                                 meteringReady: d.meteringReady,
+                                meteringState: d.meteringState,
                                 isLast: idx == devices.count - 1,
                                 onPress: { onOpenDevice(d) }
                             )
@@ -2298,7 +2299,7 @@ private struct ProfileAddMenu: View {
             .init(id: .rule, icon: "shield", label: "Add Rule",
                   sub: "New screen-time or routine rule"),
             .init(id: .device, icon: "iphone", label: "Add/Recover Device",
-                  sub: "Pair/Repair another phone or tablet"),
+                  sub: "Pair/Re-pair another phone or tablet"),
         ]
     }
 

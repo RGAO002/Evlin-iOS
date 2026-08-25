@@ -13,6 +13,11 @@ struct DeviceRow: View {
     var timeLeft: String? = nil
     var timePct: Double? = nil
     var meteringReady: Bool = false
+    /// "syncing" | "armed_awaiting_traffic" | "active_delivering" |
+    /// "action_required". Falls back to the boolean when the server predates
+    /// the field. Unknown future values render as SYNCING — never crash a
+    /// badge over an enum.
+    var meteringState: String? = nil
     var isLast: Bool = false
     var onPress: () -> Void = {}
 
@@ -48,19 +53,52 @@ struct DeviceRow: View {
     /// - LOCKED   (red)   — a shield is covering this device
     /// - TRACKING (green) — armed, and the device's watchdog attested it
     /// - SYNCING  (grey)  — no attestation yet (fresh arm, app closed, …)
+    /// Deliberately short labels: this pill sits on a crowded row, so each
+    /// state gets one word. READY = armed, nothing counted yet (a device
+    /// nobody used today is healthy, not stuck). ATTENTION = a red the
+    /// PARENT must fix (revoked Screen Time authorization) — the one state
+    /// the old boolean hid inside SYNCING with no call to action.
+    private var resolvedState: String {
+        meteringState ?? (meteringReady ? "active_delivering" : "syncing")
+    }
+
     private var statusText: String {
         if locked { return "LOCKED" }
-        return meteringReady ? "ACTIVE" : "SYNCING"
+        switch resolvedState {
+        case "active_delivering": return "ACTIVE"
+        case "armed_awaiting_traffic": return "READY"
+        case "action_required": return "ATTENTION"
+        default: return "SYNCING"
+        }
     }
 
     private var statusColor: Color {
         if locked { return Color.evError }
-        return meteringReady ? Color.evSecondary : Color.evOnSurfaceVariant
+        switch resolvedState {
+        case "active_delivering": return Color.evSecondary
+        case "armed_awaiting_traffic": return Color.evTertiary
+        case "action_required": return Color.evError
+        default: return Color.evOnSurfaceVariant
+        }
+    }
+
+    private var accessibilityStatusLabel: String {
+        switch resolvedState {
+        case "active_delivering": return "Screen Time tracking active"
+        case "armed_awaiting_traffic": return "Screen Time tracking ready, no usage yet today"
+        case "action_required": return "Screen Time needs your attention on this device"
+        default: return "Screen Time tracking not yet confirmed"
+        }
     }
 
     private var statusBackground: Color {
         if locked { return Color.evErrorContainer }
-        return meteringReady ? Color.evSecondaryContainer : Color.evSurfaceContainerHigh
+        switch resolvedState {
+        case "active_delivering": return Color.evSecondaryContainer
+        case "armed_awaiting_traffic": return Color.evTertiaryContainer
+        case "action_required": return Color.evErrorContainer
+        default: return Color.evSurfaceContainerHigh
+        }
     }
 
     private var topRow: some View {
@@ -104,9 +142,7 @@ struct DeviceRow: View {
             .accessibilityLabel(
                 locked
                     ? "Device locked"
-                    : (meteringReady
-                        ? "Screen Time tracking confirmed"
-                        : "Screen Time tracking not yet confirmed")
+                    : accessibilityStatusLabel
             )
 
             Image(systemName: "chevron.right")

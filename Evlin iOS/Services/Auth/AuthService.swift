@@ -196,6 +196,9 @@ final class AuthService {
             id: uid,
             familyID: stored.familyID.flatMap(UUID.init(uuidString:)),
             displayName: stored.displayName,
+            // Not persisted in the Keychain blob — the address is only needed
+            // by Settings, which reads the live /me/profile account instead.
+            email: nil,
             needsFamily: stored.needsFamily
         )
     }

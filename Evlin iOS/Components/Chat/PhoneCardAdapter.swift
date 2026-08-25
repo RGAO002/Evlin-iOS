@@ -24,7 +24,10 @@ enum PhoneCardAdapter {
                 ?? payload.title
             return CardRenderModel(
                 cardID: .D1,
-                context: makeContext(target: target, childName: childName)
+                context: makeContext(
+                    target: target, childName: childName,
+                    verbPast: stringFromDetail(payload, "verb_past")
+                )
             )
 
         case "phone.below_min_duration":
@@ -37,7 +40,8 @@ enum PhoneCardAdapter {
                 cardID: .D1,
                 context: makeContext(
                     target: target, childName: childName,
-                    durationMinutes: requested
+                    durationMinutes: requested,
+                    verbPast: stringFromDetail(payload, "verb_past")
                 )
             )
 
@@ -161,7 +165,8 @@ enum PhoneCardAdapter {
         existingMode: String? = nil,
         u1Token: String? = nil,
         u1ShieldList: [U1ShieldEntry] = [],
-        u1Verb: String? = nil
+        u1Verb: String? = nil,
+        verbPast: String? = nil
     ) -> CardContext {
         return CardContext(
             targetDisplay: target,
@@ -178,7 +183,8 @@ enum PhoneCardAdapter {
             existingMode: existingMode,
             u1Token: u1Token,
             u1ShieldList: u1ShieldList,
-            u1Verb: u1Verb
+            u1Verb: u1Verb,
+            verbPast: verbPast
         )
     }
 

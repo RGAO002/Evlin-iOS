@@ -350,7 +350,7 @@ final class FamilyStoreTests: XCTestCase {
         let item = DeviceItem(dto: dto)
 
         XCTAssertEqual(item.name, "iPhone 11")
-        XCTAssertEqual(item.detail, "iPhone 11 · iOS 18")
+        XCTAssertEqual(item.detail, "iPhone 11 · iOS 18.5")
     }
 
     func testDeviceItemMapsIPadModelIdentifierForEnrolledDeviceRows() {
@@ -370,7 +370,7 @@ final class FamilyStoreTests: XCTestCase {
         let item = DeviceItem(dto: dto)
 
         XCTAssertEqual(item.name, "iPad Air (4th gen)")
-        XCTAssertEqual(item.detail, "iPad Air (4th gen) · iOS 18")
+        XCTAssertEqual(item.detail, "iPad Air (4th gen) · iOS 18.5")
     }
 
     func testDeviceItemMapsLatestIPhoneModelIdentifierForEnrolledDeviceRows() {
@@ -380,7 +380,7 @@ final class FamilyStoreTests: XCTestCase {
             label: nil,
             device_model: "iPhone18,3",
             platform: "ios",
-            os_version: "26.1",
+            os_version: "26.6.1",
             display: "iPhone18,3 · iOS 26",
             last_seen_at: nil,
             online: false,
@@ -390,7 +390,7 @@ final class FamilyStoreTests: XCTestCase {
         let item = DeviceItem(dto: dto)
 
         XCTAssertEqual(item.name, "iPhone 17")
-        XCTAssertEqual(item.detail, "iPhone 17 · iOS 26")
+        XCTAssertEqual(item.detail, "iPhone 17 · iOS 26.6.1")
     }
 
     func testDeviceItemMapsServerConfirmedMeteringReadiness() {

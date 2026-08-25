@@ -182,7 +182,7 @@ enum CardPayloadBuilder {
         CardPayload(
             id: .D1,
             icon: "timer",
-            title: "How long should \(ctx.targetDisplay) be shielded?",
+            title: "How long should \(ctx.targetDisplay) be \(ctx.verbPast ?? "locked")?",
             body: "",
             buttons: [
                 CardButton(label: "15 minutes", style: .secondary, action: { h.onDurationPicked?(15) }),
