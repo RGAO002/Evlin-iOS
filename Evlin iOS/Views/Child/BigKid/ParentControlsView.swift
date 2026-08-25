@@ -99,6 +99,8 @@ struct ParentControlsView: View {
                     LabeledContent("Paired", value: "Yes")
                     LabeledContent("Device ID", value: String(childDeviceID.uuidString.prefix(8)) + "…")
                         .textSelection(.enabled)
+                    LabeledContent("Version", value: appVersionDisplay)
+                        .textSelection(.enabled)
                 }
 
                 Section {
@@ -159,6 +161,16 @@ struct ParentControlsView: View {
                 Text("It resets this phone back to setup. Your family link isn't removed — a parent can remove this child from the parent app if needed.")
             }
         }
+    }
+
+    /// Same source and formatting as the parent app's Settings → Version row,
+    /// so a build number read off a kid device is directly comparable with one
+    /// read off a parent device.
+    private var appVersionDisplay: String {
+        ParentSettingsPresentation.versionDisplay(
+            shortVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+            build: Bundle.main.infoDictionary?["CFBundleVersion"] as? String
+        )
     }
 
     private func rowLabel(icon: String, title: String, subtitle: String? = nil, trailingChevron: Bool = false, badgeColor: Color? = nil) -> some View {
