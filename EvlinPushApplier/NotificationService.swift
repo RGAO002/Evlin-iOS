@@ -405,6 +405,14 @@ final class NotificationService: UNNotificationServiceExtension {
             NSEConfig.log(
                 "metering rearm cmd=\(commandID) verdict=\(report.verdict)"
             )
+        } catch is DeadlineExceeded {
+            // Deadline ≠ failure: the daemon may still be mid-recovery, and a
+            // "failed" ack would consume the command. Leaving it PENDING keeps
+            // the ack-driven escalation / app poller able to re-drive the
+            // exact same recovery on the next wake.
+            NSEConfig.log(
+                "metering rearm deadline cmd=\(commandID) — left pending for re-drive"
+            )
         } catch {
             try? await NSENetwork.ack(
                 baseURL: baseURL,
@@ -414,7 +422,7 @@ final class NotificationService: UNNotificationServiceExtension {
                 detail: [
                     "verb": "metering_rearm",
                     "application_state": "rearm_failed",
-                    "reason": "deadline_or_recovery_error",
+                    "reason": "recovery_error",
                     "source": "push_applier",
                 ]
             )
@@ -422,24 +430,58 @@ final class NotificationService: UNNotificationServiceExtension {
         }
     }
 
-    /// Bounded await: races `work` against a deadline and cancels the loser.
-    /// The recovery's durable work queue makes mid-flight cancellation safe —
-    /// unfinished legs are re-driven by the app's next pass.
+    /// Thrown when `withDeadline` expires. Distinct from a genuine work error
+    /// on purpose: a deadline means "the daemon may still be chewing on it",
+    /// so callers leave the command PENDING for the ack-driven escalation /
+    /// app poller to re-drive, instead of acking a terminal failure.
+    struct DeadlineExceeded: Error {}
+
+    /// Single-resume guard for `withDeadline`'s continuation race.
+    private final class DeadlineOnce: @unchecked Sendable {
+        private let lock = NSLock()
+        private var claimed = false
+        func claim() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            if claimed { return false }
+            claimed = true
+            return true
+        }
+    }
+
+    /// Bounded await that actually returns at the deadline.
+    ///
+    /// NOT a task group: a group's scope exit awaits every child, and a child
+    /// wedged inside synchronous daemon XPC (`mach_msg`) has no cancellation
+    /// point (see `MeteringDeviceActivityGateway.maxInFlight`) — a group-based
+    /// "deadline" blocks right alongside the wedged call until the system
+    /// kills the NSE. Here the timer resumes the continuation and RETURNS;
+    /// the orphaned work task keeps running for whatever remains of the
+    /// process lifetime, which is safe because the recovery's durable work
+    /// queue re-drives unfinished legs on the app's next pass.
     private static func withDeadline<T: Sendable>(
         seconds: TimeInterval,
         _ work: @escaping @Sendable () async throws -> T
     ) async throws -> T {
-        try await withThrowingTaskGroup(of: T.self) { group in
-            group.addTask { try await work() }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                throw CancellationError()
+        let once = DeadlineOnce()
+        return try await withCheckedThrowingContinuation { continuation in
+            let worker = Task.detached {
+                do {
+                    let value = try await work()
+                    if once.claim() { continuation.resume(returning: value) }
+                } catch {
+                    if once.claim() { continuation.resume(throwing: error) }
+                }
             }
-            guard let first = try await group.next() else {
-                throw CancellationError()
+            Task.detached {
+                try? await Task.sleep(
+                    nanoseconds: UInt64(seconds * 1_000_000_000)
+                )
+                if once.claim() {
+                    worker.cancel() // best effort; inert on a wedged XPC
+                    continuation.resume(throwing: DeadlineExceeded())
+                }
             }
-            group.cancelAll()
-            return first
         }
     }
 }

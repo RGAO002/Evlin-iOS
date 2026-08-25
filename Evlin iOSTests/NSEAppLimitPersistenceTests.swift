@@ -312,6 +312,35 @@ final class NSEAppLimitPersistenceTests: XCTestCase {
         }
     }
 
+    func testNSEDeadlineDoesNotUseATaskGroup() throws {
+        // P1 (2026-08-22 review): a task group's scope exit awaits every
+        // child, and a child wedged inside synchronous daemon XPC (mach_msg)
+        // has no cancellation point — a group-based "deadline" blocks right
+        // alongside the wedged call until the system kills the NSE. The
+        // deadline must be a continuation race that RETURNS at timeout and
+        // orphans the wedged work.
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent(
+                "EvlinPushApplier/NotificationService.swift"
+            )
+        )
+        XCTAssertFalse(
+            source.contains("withThrowingTaskGroup"),
+            "NSE deadline regressed to a task group — it will block on a wedged XPC child"
+        )
+        XCTAssertTrue(
+            source.contains("withCheckedThrowingContinuation"),
+            "NSE deadline lost its continuation race"
+        )
+        // Timeout must leave the command pending, never ack it as failed.
+        XCTAssertTrue(
+            source.contains("catch is DeadlineExceeded"),
+            "deadline errors must be distinguished so the command stays pending"
+        )
+    }
+
     private func makeHarness() -> Harness {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("nse-limit-\(UUID().uuidString)", isDirectory: true)
