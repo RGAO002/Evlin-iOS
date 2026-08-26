@@ -162,3 +162,44 @@ nonisolated enum ParentUnlockOverrideNSEApplication {
         )
     }
 }
+
+nonisolated enum ParentMasterControlCommandApplication {
+    struct PreparedMutation: Equatable {
+        let disposition: ParentUnlockOverrideDisposition
+        let desiredLocked: Bool?
+    }
+
+    static func prepare(
+        command: LockCommand,
+        expectedOwner: UUID,
+        now: Date,
+        store: ParentUnlockOverrideStore = .shared
+    ) throws -> PreparedMutation {
+        guard let envelope = command.parentUnlockOverride,
+              command.target.targetChildID == nil
+                || command.target.targetChildID == expectedOwner,
+              envelope.cancelled,
+              command.action == .parentMasterLock
+                || command.action == .parentMasterUnlock
+        else {
+            throw ParentUnlockOverrideCommandApplicationError.malformedCommand
+        }
+
+        let disposition = try store.ingest(
+            envelope,
+            expectedOwner: expectedOwner,
+            now: now
+        )
+        let desiredLocked: Bool?
+        switch disposition {
+        case .applied, .replayed:
+            desiredLocked = command.action == .parentMasterLock
+        case .superseded, .rejectedIdentity:
+            desiredLocked = nil
+        }
+        return PreparedMutation(
+            disposition: disposition,
+            desiredLocked: desiredLocked
+        )
+    }
+}

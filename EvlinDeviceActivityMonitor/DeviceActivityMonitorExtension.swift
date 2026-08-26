@@ -76,6 +76,17 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         ScreenTimeEventLog.emit(e)
     }
 
+    private func expireParentUnlockOverrideIfNeeded(now: Date) {
+        guard let owner = ExtensionConfig.childId,
+              case .expired? = try? ParentUnlockOverrideExpiry.expireElapsedMirrorIfNeeded(
+                now: now,
+                expectedOwner: owner
+              ),
+              let shields = loadShields()
+        else { return }
+        recomputeAndApplyShields(shields)
+    }
+
     override func intervalDidStart(for activity: DeviceActivityName) {
         let memoryTrace = DAMMemoryTrace.shared
         let traceContext = memoryTrace.begin(
@@ -85,6 +96,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         )
         defer { memoryTrace.mark(traceContext, stage: .exit) }
         super.intervalDidStart(for: activity)
+        expireParentUnlockOverrideIfNeeded(now: Date())
 
         let raw = activity.rawValue
 
@@ -233,6 +245,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         )
         defer { memoryTrace.mark(traceContext, stage: .exit) }
         super.intervalDidEnd(for: activity)
+        expireParentUnlockOverrideIfNeeded(now: Date())
 
         let raw = activity.rawValue
         // Diagnostic marker — every intervalDidEnd entry writes its name + ts
@@ -329,6 +342,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         )
         defer { memoryTrace.mark(traceContext, stage: .exit) }
         super.eventDidReachThreshold(event, activity: activity)
+        expireParentUnlockOverrideIfNeeded(now: Date())
 #if DEBUG
         let thresholdEntryCount =
             (defaults?.integer(forKey: "evlin.metering.thresholdEntryCount") ?? 0) + 1

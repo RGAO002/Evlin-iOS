@@ -841,6 +841,32 @@ actor ActiveLockStore {
         }
     }
 
+    @discardableResult
+    func setDefaultGroupManualLock(
+        _ locked: Bool,
+        selection: FamilyActivitySelection,
+        childID: UUID,
+        commandID: UUID
+    ) -> Bool {
+        ActiveLockPersistenceLock.shared.withLock {
+            guard reloadDurableState() else { return false }
+            shieldRecords = DefaultGroupLockApplier.reconcilingManualLock(
+                in: shieldRecords,
+                selection: selection,
+                childID: childID,
+                commandID: commandID,
+                locked: locked
+            )
+            guard persistAndVerify() else {
+                _ = reloadDurableState()
+                recomputeAndApply()
+                return false
+            }
+            recomputeAndApply()
+            return true
+        } ?? false
+    }
+
     // MARK: - Private: coverage query
 
     private func shieldCovers(_ record: ShieldRecord, query: AppQuery) -> Bool {

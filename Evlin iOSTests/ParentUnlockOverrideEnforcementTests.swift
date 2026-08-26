@@ -287,6 +287,100 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
     }
 
     @MainActor
+    func testMasterLockPersistsRevisionBeforeApplyingManualLock() async throws {
+        let harness = try makeOverrideHarness()
+        var observedLocked: Bool?
+        var observedRevision: Int64?
+
+        let prepared = try ParentMasterControlCommandApplication.prepare(
+            command: masterCommand(action: .parentMasterLock, revision: 2),
+            expectedOwner: ownerID,
+            now: now,
+            store: harness.store
+        )
+        if let locked = prepared.desiredLocked {
+            observedLocked = locked
+            observedRevision = try harness.store.read(expectedOwner: self.ownerID)?.revision
+        }
+
+        XCTAssertEqual(prepared.disposition, .applied)
+        XCTAssertEqual(observedLocked, true)
+        XCTAssertEqual(observedRevision, 2)
+    }
+
+    @MainActor
+    func testMasterUnlockPersistsRevisionBeforeRemovingOnlyManualSource() async throws {
+        let harness = try makeOverrideHarness()
+        var observedLocked: Bool?
+
+        let prepared = try ParentMasterControlCommandApplication.prepare(
+            command: masterCommand(action: .parentMasterUnlock, revision: 3),
+            expectedOwner: ownerID,
+            now: now,
+            store: harness.store
+        )
+        if let locked = prepared.desiredLocked {
+            observedLocked = locked
+        }
+
+        XCTAssertEqual(prepared.disposition, .applied)
+        XCTAssertEqual(observedLocked, false)
+        XCTAssertEqual(try harness.store.read(expectedOwner: ownerID)?.revision, 3)
+    }
+
+    @MainActor
+    func testStaleMasterCommandCannotMutateLocalEnforcement() async throws {
+        let harness = try makeOverrideHarness()
+        _ = try harness.store.ingest(
+            masterEnvelope(revision: 5),
+            expectedOwner: ownerID,
+            now: now
+        )
+        var mutationCount = 0
+
+        let prepared = try ParentMasterControlCommandApplication.prepare(
+            command: masterCommand(action: .parentMasterLock, revision: 4),
+            expectedOwner: ownerID,
+            now: now,
+            store: harness.store
+        )
+        if prepared.desiredLocked != nil {
+            mutationCount += 1
+        }
+
+        XCTAssertEqual(prepared.disposition, .superseded(currentRevision: 5))
+        XCTAssertEqual(mutationCount, 0)
+    }
+
+    @MainActor
+    func testActionExecutorConnectsMasterCommandToLocalEnforcement() async throws {
+        let harness = try makeOverrideHarness()
+        var mutations: [Bool] = []
+        let executor = ActionExecutor(
+            activityScheduler: LockSchedulerSpy(),
+            authorizationStatusProvider: { .approved },
+            parentUnlockOverrideStore: harness.store,
+            parentUnlockOverrideNow: { self.now },
+            parentMasterLockMutation: {
+                mutations.append(true)
+                return true
+            }
+        )
+
+        let result = await executor.execute(
+            masterCommand(action: .parentMasterLock, revision: 2),
+            expectedChildID: ownerID,
+            identityIsCurrent: { $0 == self.ownerID }
+        )
+
+        guard case .confirmedExact(let verb, _, _) = result else {
+            return XCTFail("master lock must confirm after local enforcement")
+        }
+        XCTAssertEqual(verb.rawValue, "shield")
+        XCTAssertEqual(mutations, [true])
+    }
+
+    @MainActor
     func testCancelledOrExpiredOverrideReconcilesLatestRecords() async throws {
         let harness = try makeOverrideHarness()
         let selected = makeShield(
@@ -368,6 +462,35 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
             durationMinutes: nil,
             issuedAt: now,
             parentUnlockOverride: envelope(cancelled: action == .parentUnlockOverrideCancel)
+        )
+    }
+
+    private func masterCommand(action: CommandAction, revision: Int64) -> LockCommand {
+        LockCommand(
+            id: UUID(),
+            action: action,
+            tier: nil,
+            target: CommandTarget(
+                originalRequest: "parent master control",
+                targetDisplay: "Screen Time",
+                targetChildID: ownerID
+            ),
+            durationMinutes: nil,
+            issuedAt: now,
+            parentUnlockOverride: masterEnvelope(revision: revision)
+        )
+    }
+
+    private func masterEnvelope(revision: Int64) -> ParentUnlockOverrideEnvelope {
+        ParentUnlockOverrideEnvelope(
+            revision: revision,
+            childDeviceID: ownerID,
+            usageDate: "2026-04-26",
+            startedAt: now,
+            expiresAt: now,
+            operationID: UUID(),
+            scopes: [.manual, .earnedTime, .taskPause, .deviceLimit, .perAppLimit],
+            cancelled: true
         )
     }
 

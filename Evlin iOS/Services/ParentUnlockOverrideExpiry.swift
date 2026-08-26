@@ -206,6 +206,25 @@ nonisolated enum ParentUnlockOverrideExpiry {
         return .expired(revision: identity.revision)
     }
 
+    /// Cheap callback-entry recovery: every DAM callback can close an elapsed
+    /// override even if iOS delays or drops the dedicated one-shot intervalEnd.
+    /// This performs only the small App Group mirror transaction; it never
+    /// consults DeviceActivityCenter or the network.
+    static func expireElapsedMirrorIfNeeded(
+        now: Date,
+        expectedOwner: UUID,
+        store: ParentUnlockOverrideStore = .shared
+    ) throws -> Result {
+        guard let snapshot = try store.read(expectedOwner: expectedOwner),
+              snapshot.status == .active,
+              now >= snapshot.expiresAt,
+              try store.expireIfNeeded(expectedOwner: expectedOwner, now: now)
+        else {
+            return .unchanged
+        }
+        return .expired(revision: snapshot.revision)
+    }
+
     static func clearForIdentityTeardown(
         store: ParentUnlockOverrideStore = .shared,
         scheduler: any DeviceActivityScheduling
@@ -273,7 +292,7 @@ nonisolated enum ParentUnlockOverrideExpiry {
             do {
                 try scheduler.startMonitoring(
                     DeviceActivityName(plan.activityName),
-                    during: schedule(start: now, end: plan.deadline, calendar: calendar)
+                    during: scheduleForTesting(start: now, end: plan.deadline, calendar: calendar)
                 )
                 return true
             } catch {
@@ -284,14 +303,17 @@ nonisolated enum ParentUnlockOverrideExpiry {
         guard didStart else { throw ExpiryError.daemonRejectedSchedule }
     }
 
-    private static func schedule(
+    static func scheduleForTesting(
         start: Date,
         end: Date,
         calendar: Calendar
     ) -> DeviceActivitySchedule {
-        DeviceActivitySchedule(
-            intervalStart: calendar.dateComponents([.hour, .minute, .second], from: start),
-            intervalEnd: calendar.dateComponents([.hour, .minute, .second], from: end),
+        let components: Set<Calendar.Component> = [
+            .calendar, .timeZone, .year, .month, .day, .hour, .minute, .second,
+        ]
+        return DeviceActivitySchedule(
+            intervalStart: calendar.dateComponents(components, from: start),
+            intervalEnd: calendar.dateComponents(components, from: end),
             repeats: false
         )
     }

@@ -951,6 +951,58 @@ final class AppLimitPlannerTests: XCTestCase {
         )
     }
 
+    func testV2PlannerCountsLegacyWindowAsOccupiedDuringCoexistence() {
+        let scheduler = PlannerSchedulerSpy()
+        let reference = Date(timeIntervalSince1970: 1_721_174_400)
+        let owner = UUID(uuidString: "AAAAAAAA-0000-0000-0000-000000000001")!
+        let rules = (0..<19).map { index in
+            rule(budget: 30, bundleID: "com.example.v2.coexist.\(index)")
+        }
+        scheduler.seed("evlin.limit.window.legacy-still-live")
+        scheduler.seed(ParentUnlockOverrideExpiry.activityName(ownerID: owner, revision: 7))
+
+        let planner = AppLimitPlanner(
+            scheduler: scheduler,
+            now: { reference },
+            ownerProvider: { owner }
+        )
+
+        XCTAssertEqual(
+            planner.arm(rules: rules),
+            .quotaExceeded(windows: 19, slotsNeeded: 21, cap: 20)
+        )
+    }
+
+    func testLegacyPlannerCountsV2ActivityAsOccupiedDuringFallback() {
+        let scheduler = PlannerSchedulerSpy()
+        let reference = Date(timeIntervalSince1970: 1_721_174_400)
+        let rules = (0..<19).map { index in
+            rule(
+                budget: 30,
+                window: AppLimitWindow(
+                    startMinute: index * 60,
+                    endMinute: index * 60 + 30,
+                    repeats: true,
+                    timezone: nil
+                ),
+                bundleID: "com.example.legacy.coexist.\(index)"
+            )
+        }
+        scheduler.seed("evlin.limit.v2.00000000-0000-0000-0000-000000000001")
+        scheduler.seed("evlin.parent-unlock-expiry.external")
+
+        let planner = AppLimitPlanner(
+            scheduler: scheduler,
+            now: { reference },
+            ownerProvider: { nil }
+        )
+
+        XCTAssertEqual(
+            planner.arm(rules: rules),
+            .quotaExceeded(windows: 19, slotsNeeded: 21, cap: 20)
+        )
+    }
+
     // MARK: - Daily window collapses to ONE activity with N events
 
     func testDailyWindowCollapsesToOneActivityWithNEvents() throws {

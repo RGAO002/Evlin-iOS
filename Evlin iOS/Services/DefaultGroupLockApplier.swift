@@ -15,6 +15,7 @@ enum DefaultGroupLockApplier {
     static func makeRecord(
         appTokens: Set<ApplicationToken>,
         categoryTokens: Set<ActivityCategoryToken>,
+        webDomainTokens: Set<WebDomainToken> = [],
         childID: UUID
     ) -> ShieldRecord {
         ShieldRecord(
@@ -25,13 +26,51 @@ enum DefaultGroupLockApplier {
             lastCommandID: UUID(),
             appTokens: appTokens,
             categoryTokens: categoryTokens,
-            webDomainTokens: [],
+            webDomainTokens: webDomainTokens,
             appliesToAll: false,
             issuedAt: Date(),
             expiresAt: nil,
             originalRequest: "default lock group",
             targetChildID: childID
         )
+    }
+
+    /// Reconcile only the parent's manual stake in the default selected-set
+    /// record. Automatic sources remain intact, so a master unlock cannot
+    /// accidentally bypass task, pool, device-limit, or per-app enforcement.
+    static func reconcilingManualLock(
+        in records: [String: ShieldRecord],
+        selection: FamilyActivitySelection,
+        childID: UUID,
+        commandID: UUID,
+        locked: Bool
+    ) -> [String: ShieldRecord] {
+        let key = DefaultLockGroup.shared.recordKey
+        guard locked else {
+            return ShieldSourceLogic.removingSource(.manual, fromRecordKey: key, in: records)
+        }
+
+        var result = records
+        if var existing = result[key] {
+            existing.appTokens = selection.applicationTokens
+            existing.categoryTokens = selection.categoryTokens
+            existing.webDomainTokens = selection.webDomainTokens
+            existing.sources.insert(.manual)
+            existing.lastCommandID = commandID
+            existing.displayName = DefaultLockGroup.shared.name
+            existing.targetChildID = childID
+            result[key] = existing
+        } else {
+            var created = makeRecord(
+                appTokens: selection.applicationTokens,
+                categoryTokens: selection.categoryTokens,
+                webDomainTokens: selection.webDomainTokens,
+                childID: childID
+            )
+            created.lastCommandID = commandID
+            result[key] = created
+        }
+        return result
     }
 
     /// Apply the default lock group. `force: true` overwrites any existing
@@ -43,6 +82,20 @@ enum DefaultGroupLockApplier {
     ) async {
         let record = makeRecord(appTokens: appTokens, categoryTokens: categoryTokens, childID: childID)
         await ActiveLockStore.shared.addShield(record, force: true)
+    }
+
+    static func setManualLock(
+        _ locked: Bool,
+        selection: FamilyActivitySelection = DefaultLockGroupStore.load(),
+        childID: UUID,
+        commandID: UUID
+    ) async -> Bool {
+        await ActiveLockStore.shared.setDefaultGroupManualLock(
+            locked,
+            selection: selection,
+            childID: childID,
+            commandID: commandID
+        )
     }
 
     /// Remove the default lock group's saved-list shield.

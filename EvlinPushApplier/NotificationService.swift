@@ -501,6 +501,37 @@ enum NSELockApplier {
         _ cmd: LockCommand,
         fetchedDeviceID: UUID? = nil
     ) async -> Outcome? {
+        if cmd.action == .parentMasterLock || cmd.action == .parentMasterUnlock {
+            guard let fetchedDeviceID else { return nil }
+            do {
+                let prepared = try ParentMasterControlCommandApplication.prepare(
+                    command: cmd,
+                    expectedOwner: fetchedDeviceID,
+                    now: Date()
+                )
+                if let locked = prepared.desiredLocked {
+                    guard await DefaultGroupLockApplier.setManualLock(
+                        locked,
+                        childID: fetchedDeviceID,
+                        commandID: cmd.id
+                    ) else {
+                        throw ParentUnlockOverrideCommandApplicationError.malformedCommand
+                    }
+                }
+                guard prepared.disposition == .applied || prepared.disposition == .replayed else {
+                    return nil
+                }
+                _ = try await ParentUnlockOverrideExpiry.reconcile(
+                    now: Date(),
+                    expectedOwner: fetchedDeviceID,
+                    scheduler: DeviceActivityCenterScheduler()
+                )
+                return Outcome(verb: cmd.action.rawValue, displayName: "Screen Time")
+            } catch {
+                return nil
+            }
+        }
+
         if cmd.action == .parentUnlockOverride || cmd.action == .parentUnlockOverrideCancel {
             guard let fetchedDeviceID else { return nil }
             do {

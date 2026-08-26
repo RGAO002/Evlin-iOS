@@ -132,6 +132,7 @@
 				Services/AppLimitRuleStore.swift,
 				Services/DatedRouteInstaller.swift,
 				Services/DefaultLockGroup.swift,
+				Services/DefaultGroupLockApplier.swift,
 				Services/DefaultLockGroupStore.swift,
 				Services/DeviceActivitySchedulingPort.swift,
 				Services/DeviceEpochStore.swift,

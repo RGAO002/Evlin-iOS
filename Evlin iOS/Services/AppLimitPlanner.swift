@@ -261,7 +261,10 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
         let windowCount = buckets.count
         let externallyOccupiedSlots = scheduler.monitoredActivities()
             .map(\.rawValue)
-            .filter { !Self.isPlannerActivity($0) }
+            // This legacy pass replaces only legacy window activities. A live
+            // v2 activity is a real additional tenant during fallback and must
+            // still count against Apple's global 20-activity ceiling.
+            .filter { !$0.hasPrefix(Self.windowActivityPrefix) }
             .count
         let slotsNeeded = windowCount + externallyOccupiedSlots
         if slotsNeeded > Self.maxActivities {
@@ -491,7 +494,9 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
         }
         let externallyOccupiedSlots = scheduler.monitoredActivities()
             .map(\.rawValue)
-            .filter { !Self.isPlannerActivity($0) }
+            // This v2 pass replaces only v2 activities. Legacy windows can
+            // coexist during migration and consume physical daemon slots.
+            .filter { !$0.hasPrefix(Self.v2ActivityPrefix) }
             .count
         let slotsNeeded = active.count + externallyOccupiedSlots
         guard slotsNeeded <= Self.maxActivities else {

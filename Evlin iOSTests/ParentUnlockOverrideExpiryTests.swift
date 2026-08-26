@@ -4,6 +4,29 @@ import XCTest
 @testable import Evlin_iOS
 
 final class ParentUnlockOverrideExpiryTests: XCTestCase {
+    func testOneShotScheduleCarriesAbsoluteCalendarDateAcrossMidnight() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        let start = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026, month: 8, day: 25, hour: 23, minute: 55
+        )))
+        let end = try XCTUnwrap(calendar.date(byAdding: .minute, value: 10, to: start))
+
+        let schedule = ParentUnlockOverrideExpiry.scheduleForTesting(
+            start: start,
+            end: end,
+            calendar: calendar
+        )
+
+        XCTAssertEqual(schedule.intervalStart.year, 2026)
+        XCTAssertEqual(schedule.intervalStart.month, 8)
+        XCTAssertEqual(schedule.intervalStart.day, 25)
+        XCTAssertEqual(schedule.intervalEnd.year, 2026)
+        XCTAssertEqual(schedule.intervalEnd.month, 8)
+        XCTAssertEqual(schedule.intervalEnd.day, 26)
+        XCTAssertEqual(schedule.intervalStart.timeZone, calendar.timeZone)
+        XCTAssertEqual(schedule.intervalEnd.timeZone, calendar.timeZone)
+    }
     private let ownerID = UUID(uuidString: "AAAAAAAA-0000-0000-0000-000000000001")!
     private let otherOwnerID = UUID(uuidString: "BBBBBBBB-0000-0000-0000-000000000002")!
     private let operationID = UUID(uuidString: "CCCCCCCC-0000-0000-0000-000000000003")!
@@ -119,7 +142,10 @@ final class ParentUnlockOverrideExpiryTests: XCTestCase {
             ParentUnlockOverrideExpiry.activityName(ownerID: ownerID, revision: 7)
         )
         XCTAssertEqual(
-            calendar.dateComponents([.hour, .minute, .second], from: expiresAt),
+            calendar.dateComponents(
+                [.calendar, .timeZone, .year, .month, .day, .hour, .minute, .second],
+                from: expiresAt
+            ),
             started.schedule.intervalEnd
         )
     }
@@ -146,7 +172,10 @@ final class ParentUnlockOverrideExpiryTests: XCTestCase {
         XCTAssertEqual(result, .armed(revision: 7, deadline: expiresAt))
         let started = try XCTUnwrap(scheduler.startedWithoutEvents.first)
         XCTAssertEqual(
-            calendar.dateComponents([.hour, .minute, .second], from: expiresAt),
+            calendar.dateComponents(
+                [.calendar, .timeZone, .year, .month, .day, .hour, .minute, .second],
+                from: expiresAt
+            ),
             started.schedule.intervalEnd
         )
         XCTAssertEqual(try restartedStore.read(expectedOwner: ownerID)?.status, .active)
@@ -306,6 +335,30 @@ final class ParentUnlockOverrideExpiryTests: XCTestCase {
         )
 
         XCTAssertEqual(result, .expired(revision: 7))
+        XCTAssertEqual(try harness.store.read(expectedOwner: ownerID)?.status, .expired)
+    }
+
+    func testAnyDAMCallbackCanExpireElapsedMirrorWithoutScheduler() throws {
+        let harness = try makeHarness()
+        _ = try harness.store.ingest(
+            envelope(revision: 7),
+            expectedOwner: ownerID,
+            now: startedAt
+        )
+
+        let first = try ParentUnlockOverrideExpiry.expireElapsedMirrorIfNeeded(
+            now: expiresAt,
+            expectedOwner: ownerID,
+            store: harness.store
+        )
+        let second = try ParentUnlockOverrideExpiry.expireElapsedMirrorIfNeeded(
+            now: expiresAt.addingTimeInterval(60),
+            expectedOwner: ownerID,
+            store: harness.store
+        )
+
+        XCTAssertEqual(first, .expired(revision: 7))
+        XCTAssertEqual(second, .unchanged)
         XCTAssertEqual(try harness.store.read(expectedOwner: ownerID)?.status, .expired)
     }
 

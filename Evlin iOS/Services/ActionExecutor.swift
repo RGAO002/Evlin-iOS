@@ -177,6 +177,8 @@ final class ActionExecutor: @unchecked Sendable {
     private let parentUnlockOverrideStore: ParentUnlockOverrideStore
     private let parentUnlockOverrideNow: () -> Date
     private let parentUnlockOverrideProjection: () async throws -> Void
+    private let parentMasterLockMutationOverride: (() async -> Bool)?
+    private let parentMasterUnlockMutationOverride: (() async -> Bool)?
 
     /// Per-app limit dependencies (P6). The planner is built per-arm via
     /// `makeLimitPlanner` rather than stored, for two reasons: (1) the planner is
@@ -215,6 +217,8 @@ final class ActionExecutor: @unchecked Sendable {
         parentUnlockOverrideProjection: @escaping () async throws -> Void = {
             await ActiveLockStore.shared.reapplyCurrentRestrictions()
         },
+        parentMasterLockMutation: (() async -> Bool)? = nil,
+        parentMasterUnlockMutation: (() async -> Bool)? = nil,
         beforeUnshieldSourceMutation: @escaping () -> Void = {},
         beforeMutation: @escaping () async -> Void = {},
         afterMutationCheckpoint: @escaping (MutationCheckpoint) -> Void = { _ in }
@@ -232,6 +236,8 @@ final class ActionExecutor: @unchecked Sendable {
         self.parentUnlockOverrideStore = parentUnlockOverrideStore
         self.parentUnlockOverrideNow = parentUnlockOverrideNow
         self.parentUnlockOverrideProjection = parentUnlockOverrideProjection
+        self.parentMasterLockMutationOverride = parentMasterLockMutation
+        self.parentMasterUnlockMutationOverride = parentMasterUnlockMutation
         self.beforeUnshieldSourceMutation = beforeUnshieldSourceMutation
         self.beforeMutation = beforeMutation
         self.afterMutationCheckpoint = afterMutationCheckpoint
@@ -363,9 +369,58 @@ final class ActionExecutor: @unchecked Sendable {
             } catch {
                 return .failed(.execution("override_store_unavailable"))
             }
-        case .parentMasterLock,
-             .parentMasterUnlock:
-            return .failed(.execution("parent control enforcement is not connected"))
+        case .parentMasterLock, .parentMasterUnlock:
+            guard let expectedChildID = identity.expectedChildID,
+                  identity.isCurrent
+            else { return Self.staleIdentityResult }
+            do {
+                let prepared = try ParentMasterControlCommandApplication.prepare(
+                    command: cmd,
+                    expectedOwner: expectedChildID,
+                    now: parentUnlockOverrideNow(),
+                    store: parentUnlockOverrideStore
+                )
+                if let locked = prepared.desiredLocked {
+                    let persisted: Bool
+                    if locked, let override = self.parentMasterLockMutationOverride {
+                        persisted = await override()
+                    } else if !locked, let override = self.parentMasterUnlockMutationOverride {
+                        persisted = await override()
+                    } else {
+                        persisted = await DefaultGroupLockApplier.setManualLock(
+                            locked,
+                            childID: expectedChildID,
+                            commandID: cmd.id
+                        )
+                    }
+                    guard persisted else {
+                        throw ExecuteError.persistenceFailed
+                    }
+                }
+                guard identity.isCurrent else { return Self.staleIdentityResult }
+                switch prepared.disposition {
+                case .applied, .replayed:
+                    _ = try await ParentUnlockOverrideExpiry.reconcile(
+                        now: parentUnlockOverrideNow(),
+                        expectedOwner: expectedChildID,
+                        store: parentUnlockOverrideStore,
+                        scheduler: activityScheduler
+                    )
+                    return .confirmedExact(
+                        verb: cmd.action == .parentMasterLock ? .shield : .unshield,
+                        displayName: "Screen Time",
+                        effectiveState: nil
+                    )
+                case .superseded(let currentRevision):
+                    return .failed(.execution("override_superseded:\(currentRevision)"))
+                case .rejectedIdentity:
+                    return Self.staleIdentityResult
+                }
+            } catch ParentUnlockOverrideCommandApplicationError.malformedCommand {
+                return .failed(.malformed)
+            } catch {
+                return .failed(.execution("parent_control_store_unavailable"))
+            }
         case .unknown:
             return .failed(.malformed)
         }
@@ -1817,6 +1872,7 @@ enum ExecuteError: Error {
     case listNotFound(String)
     case categoryNotConfigured(String)
     case applicationNotConfigured(String)
+    case persistenceFailed
     case notImplemented(String)
 
     var ackFailure: AckFailure {
@@ -1826,6 +1882,7 @@ enum ExecuteError: Error {
         case .listNotFound(let n): return .listNotFound(n)
         case .categoryNotConfigured(let n): return .categoryNotConfigured(n)
         case .applicationNotConfigured(let n): return .applicationNotConfigured(n)
+        case .persistenceFailed: return .execution("persistence_failed")
         case .notImplemented(let reason): return .execution("Not implemented in MVP: \(reason)")
         }
     }
