@@ -375,9 +375,57 @@ final class ProfileSnapshotTests: XCTestCase {
             localStatus: localStatus,
             manualLockState: manualLockState,
             automaticCoveringSources: automaticCoveringSources,
+            masterLockPresentation: snapshotMasterLockPresentation(
+                child: child,
+                devices: devices,
+                manualLockState: manualLockState,
+                automaticCoveringSources: automaticCoveringSources
+            ),
             earnedSummary: earnedSummary,
             profileTab: profileTab
         )
+    }
+
+    private func snapshotMasterLockPresentation(
+        child: ChildProfile,
+        devices: [DeviceItem],
+        manualLockState: ManualLockAggregateState,
+        automaticCoveringSources: [String]
+    ) -> MasterLockPresentation {
+        if automaticCoveringSources.contains("reflection") {
+            return .hiddenForReflection
+        }
+        guard let childID = UUID(uuidString: child.id) else { return .updating }
+        let projectedDevices = devices.compactMap { device -> MasterLockDeviceProjection? in
+            guard let deviceID = device.deviceUUID else { return nil }
+            let position = devices.firstIndex(where: { $0.id == device.id }) ?? 0
+            let manualLocked: Bool = switch manualLockState {
+            case .locked: true
+            case .mixed: position == 0
+            case .unlocked, .pending: false
+            }
+            return MasterLockDeviceProjection(
+                childDeviceID: deviceID,
+                deviceName: device.name,
+                identityVerified: true,
+                manualAllApps: manualLocked,
+                earnedExhausted: automaticCoveringSources.contains("earned_time"),
+                taskIncomplete: automaticCoveringSources.contains("task_pause"),
+                deviceLimitActive: false,
+                limitedAppIDs: [],
+                limitedLegacyScopeIDs: [],
+                reflectionActive: false,
+                deliveryState: .confirmed
+            )
+        }
+        let projection = MasterLockProjection(
+            childProfileID: childID,
+            snapshotDigest: "profile-snapshot",
+            overrideRevision: 7,
+            overrideExpiresAt: nil,
+            devices: projectedDevices
+        )
+        return MasterLockPresentation.reduce(projection: projection)
     }
 
     private func fixture(

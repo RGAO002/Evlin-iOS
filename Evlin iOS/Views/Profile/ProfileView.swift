@@ -193,6 +193,8 @@ struct ProfileView: View {
     @State private var pendingMasterLockOperation: MasterLockOperation? = nil
     @State private var pendingTaskOverrideProjection: MasterLockProjection? = nil
     @State private var masterLockError: String? = nil
+    @State private var presentedMasterUnlockSheet: MasterUnlockSheetModel? = nil
+    @State private var presentedMasterMixedSheet: MasterLockMixedModel? = nil
     // B6 carry: once the backend list_id is first learned, remember it so
     // we only call saveLockedSetID + reKeyShieldRecord once per session.
     @State private var knownBackendListID: String? = nil
@@ -309,6 +311,12 @@ struct ProfileView: View {
             remainingMinutes: earnedSummary?.remaining_minutes,
             dailyPoolMinutes: earnedSummary?.daily_pool_minutes
         )
+    }
+
+    private var usedTodayMinutes: Int {
+        guard let pool = earnedSummary?.daily_pool_minutes,
+              let remaining = earnedSummary?.remaining_minutes else { return 0 }
+        return max(0, pool - remaining)
     }
 
     /// Per-device estimate for a given device id.
@@ -641,6 +649,65 @@ struct ProfileView: View {
             Button("OK", role: .cancel) { addError = nil }
         } message: {
             Text(addError ?? "")
+        }
+        .sheet(isPresented: Binding(
+            get: { presentedMasterUnlockSheet != nil },
+            set: { if !$0 { presentedMasterUnlockSheet = nil } }
+        )) {
+            if let model = presentedMasterUnlockSheet {
+                EvlinV2MasterUnlockSheet(
+                    childName: displayChild.name,
+                    model: model,
+                    usageTodayMinutes: usedTodayMinutes,
+                    onConfirm: { duration in
+                        presentedMasterUnlockSheet = nil
+                        Task { await confirmMasterLockAction(.unlockOverride(duration)) }
+                    },
+                    onCancel: { presentedMasterUnlockSheet = nil }
+                )
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { presentedMasterMixedSheet != nil },
+            set: { if !$0 { presentedMasterMixedSheet = nil } }
+        )) {
+            if let model = presentedMasterMixedSheet {
+                EvlinV2MixedLockSheet(
+                    childName: displayChild.name,
+                    model: model,
+                    onLockAll: {
+                        presentedMasterMixedSheet = nil
+                        Task { await confirmMasterLockAction(.lockApps) }
+                    },
+                    onUnlockAll: {
+                        presentedMasterMixedSheet = nil
+                        if let unlockSheet = model.unlockSheet {
+                            presentedMasterUnlockSheet = unlockSheet
+                        } else {
+                            Task { await confirmMasterLockAction(.unlockDirect) }
+                        }
+                    },
+                    onCancel: { presentedMasterMixedSheet = nil }
+                )
+            }
+        }
+        .confirmationDialog(
+            "Keep apps unlocked?",
+            isPresented: Binding(
+                get: { pendingTaskOverrideProjection != nil },
+                set: { if !$0 { pendingTaskOverrideProjection = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Lock now") {
+                Task { await resolveTaskOverrideChoice(.lockNow) }
+            }
+            Button("Keep unlocked until the current time") {
+                Task { await resolveTaskOverrideChoice(.keepUnlocked) }
+            }
+            Button("Cancel", role: .cancel) { pendingTaskOverrideProjection = nil }
+        } message: {
+            Text("A new task was added while the parent unlock is active. The task stays incomplete either way.")
         }
         .fullScreenCover(isPresented: $showEditProfile) {
             ProfileEditSheet(
@@ -2220,93 +2287,21 @@ struct ProfileView: View {
                 }
             }
 
-            // Child-wide manual selected-set CTA. Automatic sources can keep the
-            // child status locked while this button remains a green Lock action.
-            VStack(spacing: 6) {
-                Button { Task { await toggleDeviceLock() } } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: manualLockPresentation.systemImage)
-                            .font(.system(size: 18, weight: .semibold))
-                        Text(manualLockPresentation.title)
-                            .font(.custom("Manrope", size: 14).weight(.heavy))
-                            .tracking(0.2)
-                    }
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(manualLockButtonBackground)
-                    )
+            EvlinV2MasterLockControl(
+                presentation: masterLockPresentation,
+                errorMessage: masterLockError,
+                onLock: { Task { await confirmMasterLockAction(.lockApps) } },
+                onUnlockDirect: { Task { await confirmMasterLockAction(.unlockDirect) } },
+                onUnlockWithDuration: { presentedMasterUnlockSheet = $0 },
+                onShowMixed: { presentedMasterMixedSheet = $0 },
+                onLockNow: { Task { await confirmMasterLockAction(.cancelOverrideAndLock) } },
+                onRetry: {
+                    guard let operation = pendingMasterLockOperation else { return }
+                    Task { await confirmMasterLockOperation(operation) }
                 }
-                .buttonStyle(.plain)
-                .disabled(lockBusy || displayedChildDeviceIDs.isEmpty || !manualLockPresentation.allowsTap)
-                .opacity(displayedChildDeviceIDs.isEmpty
-                         ? 0.45
-                         : (lockBusy || !manualLockPresentation.allowsTap ? 0.7 : 1))
-                .tourTarget("profile.lockApps")
-                .id("profile.lockApps")
-
-                if let notice = automaticLockNotice {
-                    HStack(alignment: .center, spacing: 8) {
-                        Image(systemName: notice.systemImage)
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(Color.evOnSurfaceVariant)
-
-                        Text(notice.message)
-                            .font(.custom("Inter", size: 11).weight(.medium))
-                            .foregroundStyle(Color.evOnSurfaceVariant)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .fixedSize(horizontal: false, vertical: true)
-
-                        if let title = notice.actionTitle,
-                           let action = notice.action {
-                            Button {
-                                Task { await performAutomaticLockAction(action) }
-                            } label: {
-                                if automaticActionBusy {
-                                    ProgressView().controlSize(.small)
-                                } else {
-                                    Text(title)
-                                        .font(.custom("Inter", size: 11).weight(.semibold))
-                                }
-                            }
-                            .buttonStyle(.borderless)
-                            .disabled(automaticActionBusy)
-                        }
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-
-                if let automaticActionError {
-                    Text(automaticActionError)
-                        .font(.custom("Inter", size: 11).weight(.medium))
-                        .foregroundStyle(Color.evError)
-                        .frame(maxWidth: .infinity)
-                }
-
-                // Caption only when something needs saying: a failure (red), a
-                // neutral "queued" receipt, or why the button is disabled.
-                if let lockError {
-                    Text(lockError)
-                        .font(.custom("Inter", size: 11).weight(.medium))
-                        .foregroundStyle(Color.evError)
-                        .frame(maxWidth: .infinity)
-                }
-                if let lockNote {
-                    Text(lockNote)
-                        .font(.custom("Inter", size: 11).weight(.medium))
-                        .foregroundStyle(Color.evOnSurfaceVariant)
-                        .frame(maxWidth: .infinity)
-                        .multilineTextAlignment(.center)
-                }
-                if lockError == nil, lockNote == nil, displayedChildDeviceIDs.isEmpty {
-                    Text("Pair \(displayChild.name)'s device to lock")
-                        .font(.custom("Inter", size: 11).weight(.medium))
-                        .foregroundStyle(Color.evOnSurfaceVariant)
-                        .frame(maxWidth: .infinity)
-                }
-            }
+            )
+            .tourTarget("profile.lockApps")
+            .id("profile.lockApps")
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2391,6 +2386,7 @@ extension ProfileView {
         let localStatus: ChildProfile.Status
         let manualLockState: ManualLockAggregateState
         let automaticCoveringSources: [String]
+        let masterLockPresentation: MasterLockPresentation
         let earnedSummary: APIClient.EarnedSummaryDTO?
         let profileTab: ProfileSubTab
     }
@@ -2405,6 +2401,7 @@ extension ProfileView {
         _localStatus = State(initialValue: fixture.localStatus)
         _manualLockState = State(initialValue: fixture.manualLockState)
         _automaticCoveringSources = State(initialValue: fixture.automaticCoveringSources)
+        _masterLockPresentation = State(initialValue: fixture.masterLockPresentation)
         _earnedSummary = State(initialValue: fixture.earnedSummary)
         _profileTab = State(initialValue: fixture.profileTab)
     }
