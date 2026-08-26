@@ -7,7 +7,11 @@ import Foundation
 // previously persist a limit but never hand it to Apple, so the limit silently
 // did not exist until someone opened the app (2026-08-07).
 
-protocol DeviceActivityScheduling {
+// These are synchronous XPC calls. The production scheduler reaches them only
+// through MeteringDeviceActivityGateway, which explicitly detaches from the
+// main actor before invoking a method. Keeping this protocol nonisolated makes
+// that contract explicit rather than silently inheriting the target default.
+nonisolated protocol DeviceActivityScheduling {
     func startMonitoring(_ name: DeviceActivityName, during schedule: DeviceActivitySchedule) throws
     /// Arm an activity that also measures usage events (the per-app-limit path,
     /// P5). The `events:` dict maps `DeviceActivityEvent.Name` → threshold so
