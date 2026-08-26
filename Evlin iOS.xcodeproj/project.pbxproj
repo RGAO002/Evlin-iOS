@@ -115,6 +115,7 @@
 				Models/CommandModels.swift,
 				Models/EarnedScreenTimeHelpers.swift,
 				Models/NSECommandWireModels.swift,
+				Models/ParentUnlockOverride.swift,
 				Models/ScreenTimeEvent.swift,
 				Models/ShieldRecord.swift,
 				Models/ShieldTier.swift,
@@ -155,6 +156,7 @@
 				Services/MeteringProductionComposition.swift,
 				Services/MeteringRuntimeInfrastructure.swift,
 				Services/MeteringTodayRouteRekick.swift,
+				Services/ParentUnlockOverrideStore.swift,
 				Services/ScreenTimeEventLog.swift,
 				Services/ShieldSourceLogic.swift,
 			);
@@ -181,6 +183,7 @@
 				Models/BigKid/BigKidModels.swift,
 				Models/BlockRecord.swift,
 				Models/CommandModels.swift,
+				Models/ParentUnlockOverride.swift,
 				Models/ScreenTimeEvent.swift,
 				Models/ShieldRecord.swift,
 				Models/ShieldTier.swift,
@@ -218,6 +221,7 @@
 				Services/MeteringProcessEntries.swift,
 				Services/MeteringProductionComposition.swift,
 				Services/MeteringRuntimeInfrastructure.swift,
+				Services/ParentUnlockOverrideStore.swift,
 				Services/ScreenTimeEventLog.swift,
 				Services/ShieldSourceLogic.swift,
 			);

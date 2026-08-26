@@ -320,6 +320,13 @@ final class ActionExecutor: @unchecked Sendable {
             return .failed(.execution("earned_time_config must not reach ActionExecutor"))
         case .meteringRearm:
             return .failed(.execution("metering_rearm must not reach ActionExecutor"))
+        case .parentMasterLock,
+             .parentMasterUnlock,
+             .parentUnlockOverride,
+             .parentUnlockOverrideCancel:
+            return .failed(.execution("parent control enforcement is not connected"))
+        case .unknown:
+            return .failed(.malformed)
         }
     }
 

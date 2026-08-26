@@ -853,7 +853,7 @@ final class CommandPoller {
             unlockSources: resolvedUnlockSources,
             earnedOverrideUsageDate: poll.target.earned_override_usage_date
         )
-        let action: CommandAction = CommandAction(rawValue: poll.action) ?? .shield
+        let action: CommandAction = CommandAction(rawValue: poll.action) ?? .unknown
 
         let issued = CommandTimestampDecoding.issuedAt(from: poll.issued_at)
         return LockCommand(
@@ -865,7 +865,8 @@ final class CommandPoller {
             issuedAt: issued,
             limit: limitRule(from: poll.limit),
             clear: clearLimit(from: poll.clear),
-            earnedTimeConfig: poll.earned_time_config
+            earnedTimeConfig: poll.earned_time_config,
+            parentUnlockOverride: poll.override
         )
     }
 

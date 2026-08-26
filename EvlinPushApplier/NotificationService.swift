@@ -572,6 +572,12 @@ enum NSELockApplier {
             return nil
         case .meteringRearm:
             return nil
+        case .parentMasterLock,
+             .parentMasterUnlock,
+             .parentUnlockOverride,
+             .parentUnlockOverrideCancel,
+             .unknown:
+            return nil
         }
     }
 

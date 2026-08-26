@@ -16,6 +16,11 @@ enum CommandAction: String, Codable, Sendable {
     /// CommandPoller; never reaches ActionExecutor.
     case earnedTimeConfig = "earned_time_config"
     case meteringRearm = "metering_rearm"
+    case parentMasterLock = "parent_master_lock"
+    case parentMasterUnlock = "parent_master_unlock"
+    case parentUnlockOverride = "parent_unlock_override"
+    case parentUnlockOverrideCancel = "parent_unlock_override_cancel"
+    case unknown = "unknown"
 }
 
 enum OrderingTokenDecoding {
@@ -290,6 +295,7 @@ struct LockCommand: Codable, Sendable, Identifiable {
     var limit: LimitRule? = nil
     var clear: ClearLimit? = nil
     var earnedTimeConfig: EarnedTimeConfigCommand? = nil
+    var parentUnlockOverride: ParentUnlockOverrideEnvelope? = nil
     // B2: provenance carried from CommandTarget for convenience access.
     var lockSource: String? { target.lockSource }
     var unlockSources: [String]? { target.unlockSources }

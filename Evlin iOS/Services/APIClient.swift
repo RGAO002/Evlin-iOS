@@ -549,6 +549,8 @@ struct PollCommandDTO: Decodable {
     let unlock_sources: [String]?
     /// A4: present when action == "earned_time_config". Nil for all other actions.
     let earned_time_config: PollEarnedTimeConfigDTO?
+    /// Shared parent-control authority decoded identically by poll and NSE.
+    let override: ParentUnlockOverrideEnvelope?
 }
 
 /// `set_limit.limit` wire payload (P3 decode only). Literal snake_case stored
@@ -632,6 +634,127 @@ typealias PollEarnedTimeConfigDTO = EarnedTimeConfigCommand
 
 /// A4: `earned_time_config.selected_set` nested payload.
 typealias PollEarnedConfigSelectedSetDTO = EarnedTimeConfigSelectedSet
+
+enum ParentUnlockOverrideDuration: String, Codable, Sendable {
+    case minutes
+    case untilTomorrow = "until_tomorrow"
+}
+
+struct ParentUnlockOverrideRequestDTO: Encodable, Equatable, Sendable {
+    let duration: ParentUnlockOverrideDuration
+    let durationMinutes: Int?
+    let expectedRevision: Int64
+    let expectedSnapshotDigest: String
+    let operationID: UUID
+
+    private enum CodingKeys: String, CodingKey {
+        case duration
+        case durationMinutes = "duration_minutes"
+        case expectedRevision = "expected_revision"
+        case expectedSnapshotDigest = "expected_snapshot_digest"
+        case operationID = "operation_id"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(duration, forKey: .duration)
+        try container.encodeIfPresent(durationMinutes, forKey: .durationMinutes)
+        try container.encode(expectedRevision, forKey: .expectedRevision)
+        try container.encode(expectedSnapshotDigest, forKey: .expectedSnapshotDigest)
+        try container.encode(operationID, forKey: .operationID)
+    }
+}
+
+struct ParentMasterControlRequestDTO: Codable, Equatable, Sendable {
+    let expectedRevision: Int64
+    let expectedSnapshotDigest: String
+    let operationID: UUID
+
+    private enum CodingKeys: String, CodingKey {
+        case expectedRevision = "expected_revision"
+        case expectedSnapshotDigest = "expected_snapshot_digest"
+        case operationID = "operation_id"
+    }
+}
+
+enum ParentControlDeliveryState: String, Codable, Equatable, Sendable {
+    case confirmed
+    case waiting
+    case failed
+    case unreachable
+}
+
+struct ParentDeviceLockProjectionDTO: Codable, Equatable, Sendable {
+    let childDeviceID: UUID
+    let identityVerified: Bool
+    let manualAllApps: Bool
+    let earnedExhausted: Bool
+    let taskIncomplete: Bool
+    let deviceLimitActive: Bool
+    let limitedAppIDs: [UUID]
+    let limitedLegacyScopeIDs: [String]
+    let reflectionActive: Bool
+    let deliveryState: ParentControlDeliveryState
+
+    private enum CodingKeys: String, CodingKey {
+        case childDeviceID = "child_device_id"
+        case identityVerified = "identity_verified"
+        case manualAllApps = "manual_all_apps"
+        case earnedExhausted = "earned_exhausted"
+        case taskIncomplete = "task_incomplete"
+        case deviceLimitActive = "device_limit_active"
+        case limitedAppIDs = "limited_app_ids"
+        case limitedLegacyScopeIDs = "limited_legacy_scope_ids"
+        case reflectionActive = "reflection_active"
+        case deliveryState = "delivery_state"
+    }
+}
+
+struct ParentChildLockProjectionDTO: Codable, Equatable, Sendable {
+    let childProfileID: UUID
+    let snapshotDigest: String
+    let overrideRevision: Int64
+    let overrideExpiresAt: String?
+    let devices: [ParentDeviceLockProjectionDTO]
+
+    private enum CodingKeys: String, CodingKey {
+        case childProfileID = "child_profile_id"
+        case snapshotDigest = "snapshot_digest"
+        case overrideRevision = "override_revision"
+        case overrideExpiresAt = "override_expires_at"
+        case devices
+    }
+}
+
+struct ParentDeviceTransitionReceiptDTO: Codable, Equatable, Sendable {
+    let childDeviceID: UUID
+    let deliveryState: ParentControlDeliveryState
+
+    private enum CodingKeys: String, CodingKey {
+        case childDeviceID = "child_device_id"
+        case deliveryState = "delivery_state"
+    }
+}
+
+struct ParentChildControlResponseDTO: Codable, Equatable, Sendable {
+    let childProfileID: UUID
+    let usageDate: String
+    let revision: Int64
+    let operationID: UUID
+    let expiresAt: String?
+    let receipts: [ParentDeviceTransitionReceiptDTO]
+    let snapshot: ParentChildLockProjectionDTO
+
+    private enum CodingKeys: String, CodingKey {
+        case childProfileID = "child_profile_id"
+        case usageDate = "usage_date"
+        case revision
+        case operationID = "operation_id"
+        case expiresAt = "expires_at"
+        case receipts
+        case snapshot
+    }
+}
 
 // MARK: - v2 ack-status decode
 
