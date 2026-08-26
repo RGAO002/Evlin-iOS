@@ -190,7 +190,15 @@ nonisolated struct MasterLockDeliveryModel: Equatable, Sendable {
             } else {
                 state = receiptByID[deviceID]?.deliveryState ?? .waiting
             }
-            switch state {
+            let effectiveState: ParentControlDeliveryState
+            if state == .confirmed,
+               let device,
+               !operation.desiredStateIsVisible(on: device, projection: projection) {
+                effectiveState = .waiting
+            } else {
+                effectiveState = state
+            }
+            switch effectiveState {
             case .confirmed:
                 confirmed.append(name)
             case .waiting:

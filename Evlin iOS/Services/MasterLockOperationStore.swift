@@ -94,6 +94,20 @@ nonisolated struct MasterLockOperation: Codable, Equatable, Sendable {
         var seen = Set<UUID>()
         return deviceIDs.filter { seen.insert($0).inserted }
     }
+
+    func desiredStateIsVisible(
+        on device: MasterLockDeviceProjection,
+        projection: MasterLockProjection
+    ) -> Bool {
+        switch requestedAction {
+        case .lockApps, .cancelOverrideAndLock:
+            return projection.overrideExpiresAt == nil && device.manualAllApps
+        case .unlockDirect:
+            return projection.overrideExpiresAt == nil && !device.manualAllApps
+        case .unlockOverride:
+            return projection.overrideExpiresAt != nil && !device.manualAllApps
+        }
+    }
 }
 
 nonisolated enum MasterLockOperationError: Error, Equatable {
@@ -193,6 +207,11 @@ nonisolated struct MasterLockOperationReconciliation: Equatable, Sendable {
             && operation.expectedDeviceIDs.allSatisfy {
                 projectionByID[$0]?.deliveryState == .confirmed
             }
+            && desiredStateIsVisible(
+                for: operation,
+                projection: projection,
+                projectionByID: projectionByID
+            )
         if complete {
             return MasterLockOperationReconciliation(
                 presentation: MasterLockPresentation.reduce(projection: projection),
@@ -206,6 +225,23 @@ nonisolated struct MasterLockOperationReconciliation: Equatable, Sendable {
             ),
             shouldClearPersistence: false
         )
+    }
+
+    private static func desiredStateIsVisible(
+        for operation: MasterLockOperation,
+        projection: MasterLockProjection,
+        projectionByID: [UUID: MasterLockDeviceProjection]
+    ) -> Bool {
+        guard operation.expectedDeviceIDs.allSatisfy({ projectionByID[$0] != nil }) else {
+            return false
+        }
+        switch operation.requestedAction {
+        case .lockApps, .cancelOverrideAndLock, .unlockDirect, .unlockOverride:
+            return operation.expectedDeviceIDs.allSatisfy { deviceID in
+                guard let device = projectionByID[deviceID] else { return false }
+                return operation.desiredStateIsVisible(on: device, projection: projection)
+            }
+        }
     }
 }
 

@@ -232,6 +232,79 @@ final class MasterLockOperationTests: XCTestCase {
         XCTAssertEqual(complete.presentation, .unlockDirect)
     }
 
+    func testReconciliationDoesNotClearConfirmedLockUntilDesiredStateIsVisible() {
+        let operation = makeOperation(
+            revision: 6,
+            requestedAction: .lockApps,
+            receipts: [
+                MasterLockOperationReceipt(deviceID: phoneID, deliveryState: .confirmed),
+                MasterLockOperationReceipt(deviceID: tabletID, deliveryState: .confirmed),
+            ],
+            submitted: true
+        )
+        let staleProjection = makeProjection(
+            digest: "digest-6-stale",
+            revision: 6,
+            devices: [
+                makeDevice(id: phoneID, name: "Phone", manualAllApps: true),
+                makeDevice(id: tabletID, name: "Tablet", manualAllApps: false),
+            ]
+        )
+
+        let result = MasterLockOperationReconciliation.evaluate(
+            operation: operation,
+            projection: staleProjection
+        )
+
+        XCTAssertFalse(result.shouldClearPersistence)
+        guard case .delivery(let delivery) = result.presentation else {
+            return XCTFail("Confirmed delivery without the desired state must remain pending")
+        }
+        XCTAssertEqual(delivery.confirmedDeviceNames, ["Phone"])
+        XCTAssertEqual(delivery.waitingDeviceNames, ["Tablet"])
+    }
+
+    func testReconciliationRequiresActiveOverrideBeforeClearingOverrideOperation() {
+        let operation = makeOperation(
+            revision: 6,
+            requestedAction: .unlockOverride(.minutes(30)),
+            receipts: [
+                MasterLockOperationReceipt(deviceID: phoneID, deliveryState: .confirmed),
+                MasterLockOperationReceipt(deviceID: tabletID, deliveryState: .confirmed),
+            ],
+            submitted: true
+        )
+        let noOverrideYet = makeProjection(
+            digest: "digest-6-no-override",
+            revision: 6,
+            devices: [
+                makeDevice(id: phoneID, name: "Phone"),
+                makeDevice(id: tabletID, name: "Tablet"),
+            ]
+        )
+
+        let pending = MasterLockOperationReconciliation.evaluate(
+            operation: operation,
+            projection: noOverrideYet
+        )
+        XCTAssertFalse(pending.shouldClearPersistence)
+
+        let activeOverride = makeProjection(
+            digest: "digest-6-active-override",
+            revision: 6,
+            overrideExpiresAt: expiresAt,
+            devices: [
+                makeDevice(id: phoneID, name: "Phone"),
+                makeDevice(id: tabletID, name: "Tablet"),
+            ]
+        )
+        let complete = MasterLockOperationReconciliation.evaluate(
+            operation: operation,
+            projection: activeOverride
+        )
+        XCTAssertTrue(complete.shouldClearPersistence)
+    }
+
     func testNewTaskDuringOverrideOffersLockNowOrKeepUnlocked() async throws {
         let defaults = try makeDefaults()
         let activeOverride = makeProjection(
