@@ -1444,7 +1444,7 @@ struct ProfileView: View {
         ) {
             automaticCoveringSources = completeSources
         }
-        let lockedByDevice = snapshotByDevice.mapValues(\.locked)
+        let lockedByDevice = snapshotByDevice.mapValues(\.deviceLocked)
         let automaticState = AutomaticLockAggregateState.reduce(
             expectedDeviceIDs: deviceIDs,
             lockedByDevice: lockedByDevice

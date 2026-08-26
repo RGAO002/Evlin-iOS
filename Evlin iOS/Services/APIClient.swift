@@ -2724,6 +2724,14 @@ extension APIClient {
         // Always present
         let locked: Bool
 
+        /// Whole-device shield truth (Reflection / explicit lock-all). This is
+        /// separate from `locked`, which represents only the manual Locked set.
+        let all_apps_locked: Bool?
+
+        var deviceLocked: Bool {
+            locked || all_apps_locked == true
+        }
+
         // Optional — new fields added in B8; absent on old backends.
         let child_profile_id: UUID?
         let child_device_id: UUID?
@@ -2747,6 +2755,7 @@ extension APIClient {
         // use their natural snake_case names (no conversion).
         enum CodingKeys: String, CodingKey {
             case locked
+            case all_apps_locked
             case child_profile_id
             case child_device_id
             case list_id

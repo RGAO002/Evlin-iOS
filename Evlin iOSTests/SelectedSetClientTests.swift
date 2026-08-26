@@ -605,6 +605,7 @@ final class SelectedSetClientTests: XCTestCase {
         let json = """
         {
           "locked": true,
+          "all_apps_locked": false,
           "child_profile_id": "00000000-0000-0000-0000-000000000001",
           "child_device_id": "00000000-0000-0000-0000-000000000002",
           "list_id": "list-backend-42",
@@ -621,6 +622,8 @@ final class SelectedSetClientTests: XCTestCase {
 
         let resp = try JSONDecoder().decode(APIClient.DeviceLockStateResponse.self, from: json)
         XCTAssertTrue(resp.locked)
+        XCTAssertEqual(resp.all_apps_locked, false)
+        XCTAssertTrue(resp.deviceLocked)
         XCTAssertEqual(resp.list_id, "list-backend-42")
         // camelCase keys must decode to camelCase properties
         XCTAssertEqual(resp.recordKey, "savedList:list-backend-42")
@@ -645,6 +648,22 @@ final class SelectedSetClientTests: XCTestCase {
         XCTAssertNil(resp.targetKey)
         XCTAssertNil(resp.covering_sources)
         XCTAssertNil(resp.exhausted)
+    }
+
+    func test_reflectionAllAppsLock_marksDeviceLockedWithoutLockingSelectedSet() throws {
+        let json = #"{"locked":false,"all_apps_locked":true,"covering_sources":[]}"#.data(using: .utf8)!
+        let resp = try JSONDecoder().decode(APIClient.DeviceLockStateResponse.self, from: json)
+
+        XCTAssertFalse(resp.locked)
+        XCTAssertEqual(resp.all_apps_locked, true)
+        XCTAssertTrue(resp.deviceLocked)
+    }
+
+    func test_exactAppShield_doesNotMarkWholeDeviceLocked() throws {
+        let json = #"{"locked":false,"all_apps_locked":false,"covering_sources":[]}"#.data(using: .utf8)!
+        let resp = try JSONDecoder().decode(APIClient.DeviceLockStateResponse.self, from: json)
+
+        XCTAssertFalse(resp.deviceLocked)
     }
 
     func test_lockStateResponse_camelCase_keys_not_snakeCase() throws {
