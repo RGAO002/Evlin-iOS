@@ -186,6 +186,13 @@ struct ProfileView: View {
     @State private var pendingManualLockOperation: ManualLockOperation? = nil
     @State private var manualLockRequestInFlight = false
     @State private var automaticallyResumedManualOperationIDs = Set<UUID>()
+    /// Task 8 read/operation state. Task 9 renders these immutable models; this
+    /// task only keeps them refreshed and durable behind the existing UI.
+    @State private var masterLockProjection: MasterLockProjection? = nil
+    @State private var masterLockPresentation: MasterLockPresentation = .updating
+    @State private var pendingMasterLockOperation: MasterLockOperation? = nil
+    @State private var pendingTaskOverrideProjection: MasterLockProjection? = nil
+    @State private var masterLockError: String? = nil
     // B6 carry: once the backend list_id is first learned, remember it so
     // we only call saveLockedSetID + reKeyShieldRecord once per session.
     @State private var knownBackendListID: String? = nil
@@ -213,6 +220,15 @@ struct ProfileView: View {
     private var displayedChildDeviceIDs: [UUID] {
         var seen = Set<UUID>()
         return devices.compactMap(\.deviceUUID).filter { seen.insert($0).inserted }
+    }
+
+    private var masterLockDeviceNamesByID: [UUID: String] {
+        var names: [UUID: String] = [:]
+        for device in devices {
+            guard let deviceID = device.deviceUUID else { continue }
+            names[deviceID] = device.name
+        }
+        return names
     }
 
     private var manualLockPresentation: ManualLockButtonPresentation {
@@ -670,8 +686,12 @@ struct ProfileView: View {
                 pendingManualLockOperation = ManualLockOperationStore.load(
                     childProfileID: childProfileID
                 )
+                pendingMasterLockOperation = MasterLockOperationStore.load(
+                    childProfileID: childProfileID
+                )
             }
             Task { await refreshLockState() }
+            Task { await refreshMasterLockState() }
             if localName.isEmpty { localName = child.name }
             if localAge == 0    { localAge = child.age }
             if localSubtitle.isEmpty { localSubtitle = child.subtitle }
@@ -793,11 +813,15 @@ struct ProfileView: View {
                 pendingManualLockOperation = ManualLockOperationStore.load(
                     childProfileID: childProfileID
                 )
+                pendingMasterLockOperation = MasterLockOperationStore.load(
+                    childProfileID: childProfileID
+                )
             }
             if let cachedSummary = familyStore.earnedSummary(forChildID: child.id) {
                 earnedSummary = cachedSummary
             }
             await refreshLockState()
+            await refreshMasterLockState()
             await refreshEarnedSummary()
         }
     }
@@ -846,6 +870,7 @@ struct ProfileView: View {
         }
         if scope.refreshLockState {
             await refreshLockState()
+            await refreshMasterLockState()
         }
         if scope.refreshEarnedSummary {
             await refreshEarnedSummary()
@@ -1015,6 +1040,12 @@ struct ProfileView: View {
                     category: category, due: newTask.dueLabel
                 )
                 await refreshFromBackend()
+                await refreshMasterLockState()
+                if let projection = masterLockProjection,
+                   projection.overrideExpiresAt != nil,
+                   projection.devices.contains(where: \.taskIncomplete) {
+                    pendingTaskOverrideProjection = projection
+                }
             } catch {
                 await MainActor.run {
                     backendError = "create failed: \(error.localizedDescription)"
@@ -1022,6 +1053,199 @@ struct ProfileView: View {
                     tasks.append(newTask)
                 }
             }
+        }
+    }
+
+    @MainActor
+    private func refreshMasterLockState() async {
+        guard let childProfileID = UUID(uuidString: child.id) else {
+            masterLockProjection = nil
+            masterLockPresentation = .updating
+            return
+        }
+
+        do {
+            let dto = try await apiClient.fetchParentLockProjection(
+                childProfileID: childProfileID
+            )
+            let projection = try MasterLockProjection(
+                dto: dto,
+                deviceNamesByID: masterLockDeviceNamesByID
+            )
+            masterLockProjection = projection
+            masterLockError = nil
+
+            let operation = pendingMasterLockOperation
+                ?? MasterLockOperationStore.load(childProfileID: childProfileID)
+            pendingMasterLockOperation = operation
+            guard let operation else {
+                masterLockPresentation = MasterLockPresentation.reduce(
+                    projection: projection
+                )
+                return
+            }
+
+            switch MasterLockOperationCoordinator.resumeAction(for: operation) {
+            case .submit:
+                await confirmMasterLockOperation(operation)
+            case .reconcile:
+                applyMasterLockReconciliation(
+                    MasterLockOperationReconciliation.evaluate(
+                        operation: operation,
+                        projection: projection
+                    ),
+                    operation: operation
+                )
+            }
+        } catch {
+            masterLockPresentation = .updating
+            masterLockError = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func confirmMasterLockAction(_ action: MasterLockRequestedAction) async {
+        guard let projection = masterLockProjection else {
+            await refreshMasterLockState()
+            return
+        }
+        let operation = MasterLockOperation.prepared(
+            projection: projection,
+            operationID: UUID(),
+            requestedAction: action
+        )
+        await confirmMasterLockOperation(operation)
+    }
+
+    @MainActor
+    private func resolveTaskOverrideChoice(_ choice: MasterLockTaskOverrideChoice) async {
+        guard let projection = pendingTaskOverrideProjection else { return }
+        let decision = MasterLockTaskOverrideDecision.resolve(
+            choice: choice,
+            projection: projection,
+            operationID: UUID()
+        )
+        pendingTaskOverrideProjection = nil
+        switch decision {
+        case .keepUnlocked(let unchanged):
+            masterLockProjection = unchanged
+            masterLockPresentation = MasterLockPresentation.reduce(
+                projection: unchanged
+            )
+        case .submit(let operation):
+            await confirmMasterLockOperation(operation)
+        }
+    }
+
+    @MainActor
+    private func confirmMasterLockOperation(_ operation: MasterLockOperation) async {
+        do {
+            let namesByID = masterLockDeviceNamesByID
+            let result = try await MasterLockOperationCoordinator.confirm(
+                operation: operation,
+                refresh: {
+                    let dto = try await apiClient.fetchParentLockProjection(
+                        childProfileID: operation.childProfileID
+                    )
+                    return try MasterLockProjection(
+                        dto: dto,
+                        deviceNamesByID: namesByID
+                    )
+                },
+                submit: { submitted in
+                    try await submitMasterLockOperation(
+                        submitted,
+                        deviceNamesByID: namesByID
+                    )
+                }
+            )
+            masterLockError = nil
+            switch result {
+            case .projectionChanged(let projection, let presentation):
+                masterLockProjection = projection
+                masterLockPresentation = presentation
+            case .submitted(let submitted, let projection):
+                pendingMasterLockOperation = submitted
+                masterLockProjection = projection
+                applyMasterLockReconciliation(
+                    MasterLockOperationReconciliation.evaluate(
+                        operation: submitted,
+                        projection: projection
+                    ),
+                    operation: submitted
+                )
+            }
+        } catch {
+            pendingMasterLockOperation = MasterLockOperationStore.load(
+                childProfileID: operation.childProfileID
+            )
+            masterLockPresentation = .updating
+            masterLockError = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func submitMasterLockOperation(
+        _ operation: MasterLockOperation,
+        deviceNamesByID: [UUID: String]
+    ) async throws -> MasterLockControlResponse {
+        let dto: ParentChildControlResponseDTO
+        let controlRequest = ParentMasterControlRequestDTO(
+            expectedRevision: operation.revision,
+            expectedSnapshotDigest: operation.snapshotDigest,
+            operationID: operation.operationID
+        )
+        switch operation.requestedAction {
+        case .lockApps, .cancelOverrideAndLock:
+            dto = try await apiClient.submitMasterLock(
+                childProfileID: operation.childProfileID,
+                request: controlRequest
+            )
+        case .unlockDirect:
+            dto = try await apiClient.submitMasterUnlock(
+                childProfileID: operation.childProfileID,
+                request: controlRequest
+            )
+        case .unlockOverride(let duration):
+            let wireDuration: ParentUnlockOverrideDuration
+            let durationMinutes: Int?
+            switch duration {
+            case .minutes(let minutes):
+                wireDuration = .minutes
+                durationMinutes = minutes
+            case .untilTomorrow:
+                wireDuration = .untilTomorrow
+                durationMinutes = nil
+            }
+            dto = try await apiClient.submitUnlockOverride(
+                childProfileID: operation.childProfileID,
+                request: ParentUnlockOverrideRequestDTO(
+                    duration: wireDuration,
+                    durationMinutes: durationMinutes,
+                    expectedRevision: operation.revision,
+                    expectedSnapshotDigest: operation.snapshotDigest,
+                    operationID: operation.operationID
+                )
+            )
+        }
+        return try MasterLockControlResponse(
+            dto: dto,
+            deviceNamesByID: deviceNamesByID
+        )
+    }
+
+    @MainActor
+    private func applyMasterLockReconciliation(
+        _ reconciliation: MasterLockOperationReconciliation,
+        operation: MasterLockOperation
+    ) {
+        masterLockPresentation = reconciliation.presentation
+        if reconciliation.shouldClearPersistence {
+            MasterLockOperationStore.clear(childProfileID: operation.childProfileID)
+            pendingMasterLockOperation = nil
+        } else {
+            MasterLockOperationStore.save(operation)
+            pendingMasterLockOperation = operation
         }
     }
 

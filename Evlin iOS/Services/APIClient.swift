@@ -2349,6 +2349,70 @@ extension APIClient {
         return try JSONDecoder().decode(T.self, from: data)
     }
 
+    func fetchParentLockProjection(
+        childProfileID: UUID
+    ) async throws -> ParentChildLockProjectionDTO {
+        try await authedJSON(
+            path: "/parent/children/\(childProfileID.uuidString)/lock-projection"
+        )
+    }
+
+    func submitMasterLock(
+        childProfileID: UUID,
+        request: ParentMasterControlRequestDTO
+    ) async throws -> ParentChildControlResponseDTO {
+        try await submitParentMasterControl(
+            childProfileID: childProfileID,
+            pathSuffix: "master-lock",
+            request: request
+        )
+    }
+
+    func submitMasterUnlock(
+        childProfileID: UUID,
+        request: ParentMasterControlRequestDTO
+    ) async throws -> ParentChildControlResponseDTO {
+        try await submitParentMasterControl(
+            childProfileID: childProfileID,
+            pathSuffix: "master-unlock",
+            request: request
+        )
+    }
+
+    func submitUnlockOverride(
+        childProfileID: UUID,
+        request: ParentUnlockOverrideRequestDTO
+    ) async throws -> ParentChildControlResponseDTO {
+        try await authedJSON(
+            path: "/parent/children/\(childProfileID.uuidString)/unlock-override",
+            method: "POST",
+            jsonBody: try JSONEncoder().encode(request)
+        )
+    }
+
+    func submitUnlockOverrideCancellation(
+        childProfileID: UUID,
+        request: ParentMasterControlRequestDTO
+    ) async throws -> ParentChildControlResponseDTO {
+        try await authedJSON(
+            path: "/parent/children/\(childProfileID.uuidString)/unlock-override/cancel",
+            method: "POST",
+            jsonBody: try JSONEncoder().encode(request)
+        )
+    }
+
+    private func submitParentMasterControl(
+        childProfileID: UUID,
+        pathSuffix: String,
+        request: ParentMasterControlRequestDTO
+    ) async throws -> ParentChildControlResponseDTO {
+        try await authedJSON(
+            path: "/parent/children/\(childProfileID.uuidString)/\(pathSuffix)",
+            method: "POST",
+            jsonBody: try JSONEncoder().encode(request)
+        )
+    }
+
     /// GET /me/profile — the authed-account aggregate (account + parent profile
     /// + family + children + parent devices). This is the primary read the
     /// FamilyStore loads. 🔑 get_current_account.

@@ -475,3 +475,60 @@ nonisolated struct ManualLockButtonPresentation: Equatable {
         )
     }
 }
+
+nonisolated enum MasterLockPresentation: Equatable, Sendable {
+    case hiddenForReflection
+    case updating
+    case lockApps
+    case unlockDirect
+    case unlockWithDuration(MasterUnlockSheetModel)
+    case mixed(MasterLockMixedModel)
+    case overrideActive(expiresAt: Date)
+    case delivery(MasterLockDeliveryModel)
+
+    static func reduce(
+        projection: MasterLockProjection,
+        operation: MasterLockOperation? = nil
+    ) -> MasterLockPresentation {
+        if projection.devices.contains(where: \.reflectionActive) {
+            return .hiddenForReflection
+        }
+        guard !projection.devices.isEmpty,
+              projection.devices.allSatisfy(\.identityVerified)
+        else {
+            return .updating
+        }
+
+        if let operation,
+           operation.childProfileID == projection.childProfileID {
+            let delivery = MasterLockDeliveryModel(
+                projection: projection,
+                operation: operation
+            )
+            if delivery.canRetry {
+                return .delivery(delivery)
+            }
+        } else if projection.devices.contains(where: {
+            $0.deliveryState != .confirmed
+        }) {
+            return .updating
+        }
+
+        if let expiresAt = projection.overrideExpiresAt {
+            return .overrideActive(expiresAt: expiresAt)
+        }
+
+        let restrictedCount = projection.devices.filter(\.hasManagedRestrictions).count
+        if restrictedCount == 0 {
+            return .lockApps
+        }
+        if restrictedCount != projection.devices.count {
+            return .mixed(MasterLockMixedModel(projection: projection))
+        }
+        let sheet = MasterUnlockSheetModel(projection: projection)
+        if sheet.hasAutomaticRestrictions {
+            return .unlockWithDuration(sheet)
+        }
+        return .unlockDirect
+    }
+}
