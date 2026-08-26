@@ -69,12 +69,65 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
         XCTAssertTrue(projected.blocks.isEmpty)
     }
 
-    func testOverrideOnlyFiltersSourcesNamedByItsScopes() {
+    func testNoSnapshotLeavesProjectionUnchanged() {
+        let shield = makeShield(
+            key: "mixed",
+            tier: .savedList,
+            sources: [.manual, .earnedTime, .taskPause, .limit]
+        )
+        let block = makeBlock(bundleID: "com.example.blocked")
+        let originalShields = [shield.recordKey: shield]
+        let originalBlocks = [block.bundleID: block]
+
+        let projected = ParentUnlockOverridePolicy.project(
+            shields: originalShields,
+            blocks: originalBlocks,
+            snapshot: nil,
+            reflectionActive: false
+        )
+
+        XCTAssertEqual(projected.shields, originalShields)
+        XCTAssertEqual(projected.blocks, originalBlocks)
+    }
+
+    func testOverrideFiltersEachScopeIndependently() {
         let key = "mixed"
         let record = makeShield(
             key: key,
             tier: .savedList,
             sources: [.manual, .earnedTime, .taskPause, .limit]
+        )
+
+        let cases: [(name: String, scope: ParentUnlockOverrideScope, expectedSources: Set<ShieldSource>)] = [
+            ("manual", .manual, [.earnedTime, .taskPause, .limit]),
+            ("earned_time", .earnedTime, [.manual, .taskPause, .limit]),
+            ("task_pause", .taskPause, [.manual, .earnedTime, .limit]),
+            ("device_limit", .deviceLimit, [.manual, .earnedTime, .taskPause]),
+            ("per_app_limit", .perAppLimit, [.manual, .earnedTime, .taskPause]),
+        ]
+
+        for testCase in cases {
+            let projected = ParentUnlockOverridePolicy.project(
+                shields: [key: record],
+                blocks: [:],
+                snapshot: activeSnapshot(scopes: [testCase.scope]),
+                reflectionActive: false
+            )
+
+            XCTAssertEqual(
+                projected.shields[key]?.sources,
+                testCase.expectedSources,
+                testCase.name
+            )
+        }
+    }
+
+    func testEarnedTimeSuppressionDoesNotRequireManualSource() {
+        let key = "earned-and-task"
+        let record = makeShield(
+            key: key,
+            tier: .savedList,
+            sources: [.earnedTime, .taskPause]
         )
 
         let projected = ParentUnlockOverridePolicy.project(
@@ -84,7 +137,7 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
             reflectionActive: false
         )
 
-        XCTAssertEqual(projected.shields[key]?.sources, [.manual, .taskPause, .limit])
+        XCTAssertEqual(projected.shields[key]?.sources, [.taskPause])
     }
 
     func testCancelledAndExpiredSnapshotsLeaveProjectionUnchanged() {
