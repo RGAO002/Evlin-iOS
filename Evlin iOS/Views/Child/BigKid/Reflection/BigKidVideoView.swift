@@ -28,6 +28,23 @@ enum ReflectionVideoWebAccess {
     }
 }
 
+struct ReflectionVideoPlaybackState: Equatable {
+    private(set) var percent: Double = 0
+    private(set) var ended = false
+
+    var watched: Bool { ended || percent >= 99 }
+
+    mutating func updateProgress(_ value: Double) {
+        guard !ended else { return }
+        percent = min(100, max(0, value))
+    }
+
+    mutating func finish() {
+        percent = 100
+        ended = true
+    }
+}
+
 /// Reflection step 1 — kid watches the assigned YouTube video.
 ///
 /// **YouTube embed strategy.** YouTube's IFrame API hosted via
@@ -49,8 +66,7 @@ struct BigKidVideoView: View {
     let videoTitle: String
     var onComplete: () async -> Void
 
-    @State private var playbackPercent: Double = 0
-    @State private var ended: Bool = false
+    @State private var playback = ReflectionVideoPlaybackState()
     @State private var completing: Bool = false
     @StateObject private var bridge = VideoBridge()
 
@@ -61,10 +77,10 @@ struct BigKidVideoView: View {
                 VideoEmbedView(
                     videoId: videoId,
                     bridge: bridge,
-                    onProgress: { playbackPercent = min(100, $0) },
-                    onEnded: { ended = true }
+                    onProgress: { playback.updateProgress($0) },
+                    onEnded: { playback.finish() }
                 )
-                if ended {
+                if playback.ended {
                     // Cover YouTube's "more videos" endscreen with a flat
                     // black tile after playback finishes. CSS injection
                     // hides most of it, but YouTube periodically changes
@@ -99,12 +115,13 @@ struct BigKidVideoView: View {
     private var demoSkipSection: some View {
         VStack(spacing: 6) {
             Button {
-                bridge.skipToNearEnd(secondsRemaining: 5)
+                bridge.pausePlayback()
+                playback.finish()
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "forward.end.fill")
                         .font(.system(size: 11, weight: .semibold))
-                    Text("Skip to last 5 seconds")
+                    Text("Skip video")
                         .font(.system(size: 12, weight: .semibold))
                 }
                 .foregroundStyle(.orange)
@@ -122,8 +139,6 @@ struct BigKidVideoView: View {
         }
     }
 
-    private var watched: Bool { ended || playbackPercent >= 99 }
-
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("STEP 1 OF 3 — REFLECTION TIME")
@@ -139,7 +154,7 @@ struct BigKidVideoView: View {
     }
 
     private var progressBar: some View {
-        EvKidProgressBar(value: playbackPercent, max: 100, tone: .primary, height: 6)
+        EvKidProgressBar(value: playback.percent, max: 100, tone: .primary, height: 6)
     }
 
     private var lockHint: some View {
@@ -156,7 +171,7 @@ struct BigKidVideoView: View {
 
     @ViewBuilder
     private var primaryButton: some View {
-        if watched {
+        if playback.watched {
             EvKidBigButton(isDisabled: completing, action: complete) {
                 Text(completing ? "Saving…" : "Continue")
             }
@@ -174,19 +189,18 @@ struct BigKidVideoView: View {
 }
 
 /// Holds a weak reference to the embedded WKWebView so the SwiftUI
-/// host can poke at the player from the outside (e.g. a DEBUG "skip
-/// to last 5s" button). Initialized inside `VideoEmbedView.makeUIView`.
+/// host can pause the player when the demo bypass is used. Initialized inside
+/// `VideoEmbedView.makeUIView`.
 final class VideoBridge: ObservableObject {
     fileprivate weak var webView: WKWebView?
 
-    /// Seek the underlying HTML5 `<video>` to (duration − secondsRemaining).
-    /// No-op while the duration is still 0 (e.g. video metadata not loaded yet).
-    func skipToNearEnd(secondsRemaining: Double) {
+    /// Stop audio/video when the demo bypass marks playback complete natively.
+    func pausePlayback() {
         let js = """
         (function() {
           var v = document.querySelector('video');
-          if (!v || !isFinite(v.duration) || v.duration <= 0) return;
-          v.currentTime = Math.max(0, v.duration - \(secondsRemaining));
+          if (!v) return;
+          try { v.pause(); } catch (e) {}
         })();
         """
         webView?.evaluateJavaScript(js, completionHandler: nil)

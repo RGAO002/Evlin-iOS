@@ -2,6 +2,28 @@ import XCTest
 @testable import Evlin_iOS
 
 final class ReflectionVideoWebAccessTests: XCTestCase {
+    func test_skipFinishesPlaybackWithoutWaitingForWebEndedEvent() {
+        var state = ReflectionVideoPlaybackState()
+        state.updateProgress(42)
+
+        state.finish()
+
+        XCTAssertEqual(state.percent, 100)
+        XCTAssertTrue(state.ended)
+        XCTAssertTrue(state.watched)
+    }
+
+    func test_naturalEndAndSkipConvergeToSamePlaybackState() {
+        var naturalEnd = ReflectionVideoPlaybackState()
+        naturalEnd.updateProgress(99.5)
+        naturalEnd.finish()
+
+        var skipped = ReflectionVideoPlaybackState()
+        skipped.finish()
+
+        XCTAssertEqual(naturalEnd, skipped)
+    }
+
     /// C-3 architecture guard: the reflection video view must never write
     /// ManagedSettings shield fields directly. Web access for reflection
     /// playback is a record-level attribute (`ShieldRecord.webOpen`) honored
