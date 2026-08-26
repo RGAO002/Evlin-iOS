@@ -1704,7 +1704,9 @@ extension APIClient {
     func pollCommands(deviceID: UUID) async throws -> [PollCommandDTO] {
         var comps = URLComponents(string: "\(baseURL)/child/commands")!
         comps.queryItems = [URLQueryItem(name: "device_id", value: deviceID.uuidString)]
-        let (data, response) = try await URLSession.shared.data(from: comps.url!)
+        var request = URLRequest(url: comps.url!)
+        request.setValue(deviceID.uuidString, forHTTPHeaderField: "X-Child-Id")
+        let (data, response) = try await URLSession.shared.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         if status == 410 { throw APIError.serverError(410) }
         guard status == 200 else { return [] }
@@ -1752,13 +1754,20 @@ extension APIClient {
     }
 
     /// Child posts an ack for a command.
-    func ack(commandID: UUID, status: String, detail: [String: Any]? = nil) async throws {
+    func ack(
+        commandID: UUID,
+        deviceID: UUID,
+        status: String,
+        detail: [String: Any]? = nil
+    ) async throws {
         let url = URL(string: "\(baseURL)/child/ack")!
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(deviceID.uuidString, forHTTPHeaderField: "X-Child-Id")
         var body: [String: Any] = [
             "command_id": commandID.uuidString,
+            "device_id": deviceID.uuidString,
             "status": status,
         ]
         if let detail = detail { body["detail"] = detail }

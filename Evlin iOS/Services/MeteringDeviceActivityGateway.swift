@@ -28,6 +28,7 @@ nonisolated enum MeteringDeviceActivityGateway {
     /// accumulate. This bounds how many can pile up before the thread pool is
     /// the next thing to fail; it is damage limitation, not recovery.
     static let maxInFlight = 4
+    private static let maxCriticalInFlight = 1
 
     /// App Group key recording refusals, so a stuck daemon leaves evidence
     /// instead of looking like "nothing happened".
@@ -35,6 +36,7 @@ nonisolated enum MeteringDeviceActivityGateway {
 
     private static let lock = NSLock()
     private static var inFlight = 0
+    private static var criticalInFlight = 0
 
     /// Runs `body` off the main thread, holding no lock.
     ///
@@ -53,6 +55,22 @@ nonisolated enum MeteringDeviceActivityGateway {
         }
         defer { releaseSlot() }
         return await Task.detached(priority: .utility) { body() }.value
+    }
+
+    /// A separately bounded lane for an already-applied temporary unlock's
+    /// expiry. Metering congestion must not turn a timed unlock into a
+    /// permanent one, and the separate cap prevents retries from accumulating
+    /// an unbounded number of blocked threads.
+    static func performCritical<T: Sendable>(
+        _ api: StaticString,
+        _ body: @escaping @Sendable () -> T
+    ) async -> T? {
+        guard reserveCriticalSlot() else {
+            recordRefusal(api, lane: "critical")
+            return nil
+        }
+        defer { releaseCriticalSlot() }
+        return await Task.detached(priority: .userInitiated) { body() }.value
     }
 
     /// In-flight count, for diagnostics screens.
@@ -86,11 +104,25 @@ nonisolated enum MeteringDeviceActivityGateway {
         inFlight = max(0, inFlight - 1)
     }
 
-    private static func recordRefusal(_ api: StaticString) {
+    private static func reserveCriticalSlot() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard criticalInFlight < maxCriticalInFlight else { return false }
+        criticalInFlight += 1
+        return true
+    }
+
+    private static func releaseCriticalSlot() {
+        lock.lock()
+        defer { lock.unlock() }
+        criticalInFlight = max(0, criticalInFlight - 1)
+    }
+
+    private static func recordRefusal(_ api: StaticString, lane: String = "metering") {
         guard let defaults else { return }
         var entries = defaults.stringArray(forKey: refusalKey) ?? []
         let stamp = ISO8601DateFormatter().string(from: Date())
-        entries.append("\(stamp) \(api) inFlight=\(inFlightCount())")
+        entries.append("\(stamp) \(api) lane=\(lane) inFlight=\(inFlightCount())")
         if entries.count > 20 { entries.removeFirst(entries.count - 20) }
         defaults.set(entries, forKey: refusalKey)
     }

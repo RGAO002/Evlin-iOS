@@ -127,8 +127,18 @@ final class NotificationService: UNNotificationServiceExtension {
             NSEConfig.log("not applied (no inline token / not a lock) cmd=\(commandID) action=\(command.action.rawValue)")
             return
         }
-        await NSENetwork.ack(baseURL: baseURL, deviceID: deviceID, commandID: commandID, outcome: outcome)
-        NSEConfig.log("applied+acked cmd=\(commandID) verb=\(outcome.verb) name=\(outcome.displayName)")
+        do {
+            try await NSENetwork.ack(
+                baseURL: baseURL,
+                deviceID: deviceID,
+                commandID: commandID,
+                outcome: outcome
+            )
+            NSEConfig.log("applied+acked cmd=\(commandID) verb=\(outcome.verb) name=\(outcome.displayName)")
+        } catch {
+            NSEConfig.log("applied but ack failed cmd=\(commandID) error=\(error)")
+            return
+        }
         // Lifting the all-apps shield reopened the counting gate above. Run one
         // bounded recovery pass NOW so the paused pool actually resumes in this
         // same wake: on a force-quit device this extension is the only code
@@ -526,7 +536,10 @@ enum NSELockApplier {
                     expectedOwner: fetchedDeviceID,
                     scheduler: DeviceActivityCenterScheduler()
                 )
-                return Outcome(verb: cmd.action.rawValue, displayName: "Screen Time")
+                return Outcome(
+                    verb: ParentUnlockOverrideAck.verb(for: cmd.action),
+                    displayName: "Screen Time"
+                )
             } catch {
                 return nil
             }
@@ -538,6 +551,7 @@ enum NSELockApplier {
                 let disposition = try await ParentUnlockOverrideNSEApplication.apply(
                     command: cmd,
                     expectedOwner: fetchedDeviceID,
+                    expiryScheduler: DeviceActivityCenterScheduler(),
                     project: {
                         await ActiveLockStore.shared.reapplyCurrentRestrictions()
                     }
@@ -545,13 +559,8 @@ enum NSELockApplier {
                 guard disposition == .applied || disposition == .replayed else {
                     return nil
                 }
-                _ = try await ParentUnlockOverrideExpiry.reconcile(
-                    now: Date(),
-                    expectedOwner: fetchedDeviceID,
-                    scheduler: DeviceActivityCenterScheduler()
-                )
                 return Outcome(
-                    verb: cmd.action.rawValue,
+                    verb: ParentUnlockOverrideAck.verb(for: cmd.action),
                     displayName: cmd.action == .parentUnlockOverrideCancel
                         ? "Parent override cancelled"
                         : "Parent override"
@@ -823,16 +832,18 @@ private enum NSENetwork {
         guard let endpoint = childEndpoint(baseURL, "/child/commands/\(commandID.uuidString)"),
               var comps = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else { return nil }
         comps.queryItems = [URLQueryItem(name: "device_id", value: deviceID.uuidString)]
-        guard let url = comps.url,
-              let (data, resp) = try? await URLSession.shared.data(from: url),
+        guard let url = comps.url else { return nil }
+        var request = URLRequest(url: url)
+        request.setValue(deviceID.uuidString, forHTTPHeaderField: "X-Child-Id")
+        guard let (data, resp) = try? await URLSession.shared.data(for: request),
               (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         return try? NSECommandWireDecoder.decode(data)
     }
 
     /// POST /child/ack — v2 generic "confirmed" with verb/display_name so the
     /// parent receipt renders and the ack-driven escalation stops.
-    static func ack(baseURL: URL, deviceID: UUID, commandID: UUID, outcome: NSELockApplier.Outcome) async {
-        try? await ack(
+    static func ack(baseURL: URL, deviceID: UUID, commandID: UUID, outcome: NSELockApplier.Outcome) async throws {
+        try await ack(
             baseURL: baseURL,
             deviceID: deviceID,
             commandID: commandID,
@@ -858,6 +869,7 @@ private enum NSENetwork {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(deviceID.uuidString, forHTTPHeaderField: "X-Child-Id")
         let body: [String: Any] = [
             "command_id": commandID.uuidString,
             "device_id": deviceID.uuidString,

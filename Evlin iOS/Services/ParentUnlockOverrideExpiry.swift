@@ -156,10 +156,18 @@ nonisolated enum ParentUnlockOverrideExpiry {
             }
             return .unchanged
         case .disarm(let activityNames):
-            scheduler.stopMonitoring(activityNames.map { DeviceActivityName($0) })
+            try await stop(activityNames, scheduler: scheduler)
             return .unchanged
-        case .arm, .unchanged:
-            return try await arm(snapshot: snapshot, now: now, scheduler: scheduler, calendar: calendar)
+        case .arm(let plan, let replacing):
+            if !replacing.isEmpty {
+                try await stop(replacing, scheduler: scheduler)
+            }
+            if !monitoredNames.contains(plan.activityName) {
+                try await start(plan, now: now, scheduler: scheduler, calendar: calendar)
+            }
+            return .armed(revision: plan.revision, deadline: plan.deadline)
+        case .unchanged:
+            return .unchanged
         }
     }
 
@@ -249,7 +257,7 @@ nonisolated enum ParentUnlockOverrideExpiry {
     private static func liveActivityNames(
         _ scheduler: any DeviceActivityScheduling
     ) async throws -> Set<String> {
-        guard let names = await MeteringDeviceActivityGateway.perform("parentUnlockExpiry.activities", {
+        guard let names = await MeteringDeviceActivityGateway.performCritical("parentUnlockExpiry.activities", {
             Set(scheduler.monitoredActivities().map(\.rawValue))
         }) else {
             throw ExpiryError.gatewayUnavailable
@@ -274,7 +282,7 @@ nonisolated enum ParentUnlockOverrideExpiry {
         scheduler: any DeviceActivityScheduling
     ) async throws {
         guard !activityNames.isEmpty else { return }
-        guard await MeteringDeviceActivityGateway.perform("parentUnlockExpiry.stop", {
+        guard await MeteringDeviceActivityGateway.performCritical("parentUnlockExpiry.stop", {
             scheduler.stopMonitoring(activityNames.map { DeviceActivityName($0) })
             return true
         }) != nil else {
@@ -288,7 +296,7 @@ nonisolated enum ParentUnlockOverrideExpiry {
         scheduler: any DeviceActivityScheduling,
         calendar: Calendar
     ) async throws {
-        let didStart = await MeteringDeviceActivityGateway.perform("parentUnlockExpiry.start", {
+        let didStart = await MeteringDeviceActivityGateway.performCritical("parentUnlockExpiry.start", {
             do {
                 try scheduler.startMonitoring(
                     DeviceActivityName(plan.activityName),

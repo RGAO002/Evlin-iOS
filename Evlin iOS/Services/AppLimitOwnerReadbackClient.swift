@@ -3,14 +3,17 @@ import Foundation
 @MainActor
 final class HTTPAppLimitOwnerReadbackClient: AppLimitOwnerReadbackPort, @unchecked Sendable {
     private let api: APIClient
+    private let ownerChildDeviceID: UUID
 
-    init(baseURL: URL) {
+    init(baseURL: URL, ownerChildDeviceID: UUID) {
         api = APIClient(baseURL: baseURL.absoluteString)
+        self.ownerChildDeviceID = ownerChildDeviceID
     }
 
     func confirm(commandID: UUID, receipt: AppLimitApplyReceipt) async throws {
         try await api.ack(
             commandID: commandID,
+            deviceID: ownerChildDeviceID,
             status: "confirmed",
             detail: Self.detail(for: receipt)
         )

@@ -247,6 +247,34 @@ final class ParentUnlockOverrideExpiryTests: XCTestCase {
         XCTAssertEqual(try harness.store.read(expectedOwner: ownerID)?.status, .active)
     }
 
+    @MainActor
+    func testCancelledOverrideStopsExpiryActivityOffMainThread() async throws {
+        let harness = try makeHarness()
+        _ = try harness.store.ingest(
+            envelope(revision: 7),
+            expectedOwner: ownerID,
+            now: startedAt
+        )
+        _ = try harness.store.ingest(
+            envelope(revision: 8, cancelled: true),
+            expectedOwner: ownerID,
+            now: startedAt.addingTimeInterval(60)
+        )
+        let scheduler = ParentUnlockExpirySchedulerSpy()
+        scheduler.seed(ParentUnlockOverrideExpiry.activityName(ownerID: ownerID, revision: 7))
+
+        let result = try await ParentUnlockOverrideExpiry.reconcile(
+            now: startedAt.addingTimeInterval(120),
+            expectedOwner: ownerID,
+            store: harness.store,
+            scheduler: scheduler,
+            calendar: utcCalendar()
+        )
+
+        XCTAssertEqual(result, .unchanged)
+        XCTAssertEqual(scheduler.stopWasOnMainThread, false)
+    }
+
     func testExpiryReconcilerIsIdempotentAcrossDAMAndForeground() async throws {
         let harness = try makeHarness()
         _ = try harness.store.ingest(
@@ -453,6 +481,7 @@ private final class ParentUnlockExpirySchedulerSpy: DeviceActivityScheduling {
     )] = []
     private(set) var startedWithEventsCount = 0
     private(set) var stoppedNames: [[String]] = []
+    private(set) var stopWasOnMainThread: Bool?
     private var active: Set<DeviceActivityName> = []
 
     func seed(_ activityName: String) {
@@ -477,6 +506,7 @@ private final class ParentUnlockExpirySchedulerSpy: DeviceActivityScheduling {
     }
 
     func stopMonitoring(_ activities: [DeviceActivityName]) {
+        stopWasOnMainThread = Thread.isMainThread
         stoppedNames.append(activities.map(\.rawValue).sorted())
         active.subtract(activities)
     }

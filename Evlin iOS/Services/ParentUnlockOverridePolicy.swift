@@ -98,6 +98,23 @@ nonisolated enum ParentUnlockOverrideCommandApplicationError: Error, Equatable {
     case malformedCommand
 }
 
+nonisolated enum ParentUnlockOverrideAck {
+    static func verb(for action: CommandAction) -> String {
+        switch action {
+        case .parentMasterLock:
+            return "shield"
+        case .parentMasterUnlock:
+            return "unshield"
+        case .parentUnlockOverride:
+            return "unshield_all"
+        case .parentUnlockOverrideCancel:
+            return "reconcile"
+        default:
+            return action.rawValue
+        }
+    }
+}
+
 nonisolated enum ParentUnlockOverrideCommandApplication {
     static func apply(
         envelope: ParentUnlockOverrideEnvelope,
@@ -151,6 +168,7 @@ nonisolated enum ParentUnlockOverrideNSEApplication {
         expectedOwner: UUID,
         now: Date = Date(),
         store: ParentUnlockOverrideStore = .shared,
+        expiryScheduler: (any DeviceActivityScheduling)? = nil,
         project: () async throws -> Void
     ) async throws -> ParentUnlockOverrideDisposition {
         try await ParentUnlockOverrideCommandApplication.apply(
@@ -158,7 +176,17 @@ nonisolated enum ParentUnlockOverrideNSEApplication {
             expectedOwner: expectedOwner,
             now: now,
             store: store,
-            project: project
+            project: {
+                if let expiryScheduler {
+                    _ = try await ParentUnlockOverrideExpiry.reconcile(
+                        now: now,
+                        expectedOwner: expectedOwner,
+                        store: store,
+                        scheduler: expiryScheduler
+                    )
+                }
+                try await project()
+            }
         )
     }
 }

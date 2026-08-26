@@ -125,6 +125,38 @@ final class DeviceActivityAdapterBoundaryTests: XCTestCase {
         )
     }
 
+    func testCriticalExpiryLaneStillRunsWhenMeteringLaneIsSaturated() async {
+        let gate = DispatchSemaphore(value: 0)
+        var holders: [Task<Void, Never>] = []
+        for _ in 0..<MeteringDeviceActivityGateway.maxInFlight {
+            holders.append(Task {
+                _ = await MeteringDeviceActivityGateway.perform("test.hold") {
+                    _ = gate.wait(timeout: .now() + 10)
+                    return true
+                }
+            })
+        }
+        var spins = 0
+        while MeteringDeviceActivityGateway.inFlightCount()
+            < MeteringDeviceActivityGateway.maxInFlight, spins < 10_000 {
+            await Task.yield()
+            spins += 1
+        }
+
+        let criticalRan = await MeteringDeviceActivityGateway.performCritical(
+            "test.parentUnlockExpiry"
+        ) { true }
+
+        for _ in holders { gate.signal() }
+        for holder in holders { await holder.value }
+
+        XCTAssertEqual(
+            criticalRan,
+            true,
+            "metering XPC congestion must not prevent a parent override from installing its expiry"
+        )
+    }
+
     /// Marking a type `nonisolated` does NOT move its synchronous calls off the
     /// caller's thread — that mistake shipped once already, as a commit whose
     /// stated goal it did not achieve. The hop has to be inside the scheduler so

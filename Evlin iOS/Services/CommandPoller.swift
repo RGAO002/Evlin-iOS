@@ -194,7 +194,10 @@ private final class AppLimitOwnerRecoveryEntry {
             effectPort: AppLimitOwnerActionEffectPort(
                 ownerChildDeviceID: configuration.owner
             ),
-            readbackPort: HTTPAppLimitOwnerReadbackClient(baseURL: configuration.baseURL)
+            readbackPort: HTTPAppLimitOwnerReadbackClient(
+                baseURL: configuration.baseURL,
+                ownerChildDeviceID: configuration.owner
+            )
         )
         await driver.recover(ownerChildDeviceID: configuration.owner)
     }
@@ -761,6 +764,7 @@ final class CommandPoller {
             } else {
                 try await api.ack(
                     commandID: command.command_id,
+                    deviceID: expectedDeviceID,
                     status: "superseded",
                     detail: detail
                 )
@@ -1044,7 +1048,7 @@ final class CommandPoller {
                         commandID: cmd.id,
                         status: "confirmed",
                         detail: [
-                            "verb": cmd.action.rawValue,
+                            "verb": ParentUnlockOverrideAck.verb(for: cmd.action),
                             "display_name": cmd.action == .parentUnlockOverrideCancel
                                 ? "Parent override cancelled"
                                 : "Parent override",
@@ -1221,7 +1225,12 @@ final class CommandPoller {
 
         do {
             guard isExpectedDeviceCurrent(expectedDeviceID) else { return }
-            try await api.ack(commandID: cmd.id, status: status, detail: ackDetail)
+            try await api.ack(
+                commandID: cmd.id,
+                deviceID: expectedDeviceID,
+                status: status,
+                detail: ackDetail
+            )
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyCommandAck,
                 "ok command=\(cmd.id.uuidString) status=\(status)"
@@ -1347,7 +1356,12 @@ final class CommandPoller {
             if let override = ackCommandOverride {
                 try await override(commandID, status, detail)
             } else {
-                try await api.ack(commandID: commandID, status: status, detail: detail)
+                try await api.ack(
+                    commandID: commandID,
+                    deviceID: expectedDeviceID,
+                    status: status,
+                    detail: detail
+                )
             }
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyCommandAck,
@@ -1654,6 +1668,7 @@ final class CommandPoller {
             }
             try await api.ack(
                 commandID: poll.command_id,
+                deviceID: expectedDeviceID,
                 status: report.isHealthy ? "confirmed" : "failed",
                 detail: [
                     "verb": "metering_rearm",
@@ -1666,6 +1681,7 @@ final class CommandPoller {
         } catch {
             try? await api.ack(
                 commandID: poll.command_id,
+                deviceID: expectedDeviceID,
                 status: "failed",
                 detail: [
                     "verb": "metering_rearm",
@@ -1690,7 +1706,12 @@ final class CommandPoller {
         if let override = ackCommandOverride {
             try await override(commandID, status, detail)
         } else {
-            try await api.ack(commandID: commandID, status: status, detail: detail)
+            try await api.ack(
+                commandID: commandID,
+                deviceID: expectedDeviceID,
+                status: status,
+                detail: detail
+            )
         }
     }
 
@@ -1707,7 +1728,12 @@ final class CommandPoller {
             return
         }
         do {
-            try await api.ack(commandID: commandID, status: status, detail: detail)
+            try await api.ack(
+                commandID: commandID,
+                deviceID: expectedDeviceID,
+                status: status,
+                detail: detail
+            )
             CommandDeliveryDiagnostics.record(
                 CommandDeliveryDiagnostics.keyCommandAck,
                 "ok command=\(commandID.uuidString) status=\(status)"

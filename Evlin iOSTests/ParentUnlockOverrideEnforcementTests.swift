@@ -1,5 +1,6 @@
 import Foundation
 import FamilyControls
+import DeviceActivity
 import XCTest
 @testable import Evlin_iOS
 
@@ -266,6 +267,25 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
     }
 
     @MainActor
+    func testNSEEntryPointArmsExpiryBeforeRemovingRestrictions() async throws {
+        let harness = try makeOverrideHarness()
+        let scheduler = OrderedOverrideExpiryScheduler()
+
+        let disposition = try await ParentUnlockOverrideNSEApplication.apply(
+            command: overrideCommand(action: .parentUnlockOverride),
+            expectedOwner: ownerID,
+            now: now,
+            store: harness.store,
+            expiryScheduler: scheduler
+        ) {
+            scheduler.recordProjection()
+        }
+
+        XCTAssertEqual(disposition, .applied)
+        XCTAssertEqual(scheduler.events, ["activities", "start", "project"])
+    }
+
+    @MainActor
     func testCommandPollerEntryPointAppliesDurableOverrideBeforeProjection() async throws {
         let harness = try makeOverrideHarness()
         var projectedRevision: Int64?
@@ -378,6 +398,33 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
         }
         XCTAssertEqual(verb.rawValue, "shield")
         XCTAssertEqual(mutations, [true])
+    }
+
+    func testOverrideAckVerbsFitBackendContract() {
+        XCTAssertEqual(
+            ParentUnlockOverrideAck.verb(for: .parentMasterLock),
+            "shield"
+        )
+        XCTAssertEqual(
+            ParentUnlockOverrideAck.verb(for: .parentMasterUnlock),
+            "unshield"
+        )
+        XCTAssertEqual(
+            ParentUnlockOverrideAck.verb(for: .parentUnlockOverride),
+            "unshield_all"
+        )
+        XCTAssertEqual(
+            ParentUnlockOverrideAck.verb(for: .parentUnlockOverrideCancel),
+            "reconcile"
+        )
+        for action in [
+            CommandAction.parentMasterLock,
+            .parentMasterUnlock,
+            .parentUnlockOverride,
+            .parentUnlockOverrideCancel,
+        ] {
+            XCTAssertLessThanOrEqual(ParentUnlockOverrideAck.verb(for: action).count, 16)
+        }
     }
 
     @MainActor
@@ -543,5 +590,43 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
             originalRequest: bundleID,
             targetChildID: ownerID
         )
+    }
+}
+
+private final class OrderedOverrideExpiryScheduler: DeviceActivityScheduling, @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var events: [String] = []
+
+    func recordProjection() {
+        lock.lock()
+        events.append("project")
+        lock.unlock()
+    }
+
+    func startMonitoring(
+        _ name: DeviceActivityName,
+        during schedule: DeviceActivitySchedule
+    ) throws {
+        lock.lock()
+        events.append("start")
+        lock.unlock()
+    }
+
+    func startMonitoring(
+        _ activity: DeviceActivityName,
+        during schedule: DeviceActivitySchedule,
+        events: [DeviceActivityEvent.Name: DeviceActivityEvent]
+    ) throws {
+        try startMonitoring(activity, during: schedule)
+    }
+
+    func stopMonitoring(_ activities: [DeviceActivityName]) {}
+    func stopMonitoring() {}
+
+    func monitoredActivities() -> [DeviceActivityName] {
+        lock.lock()
+        events.append("activities")
+        lock.unlock()
+        return []
     }
 }

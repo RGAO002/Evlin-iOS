@@ -71,6 +71,43 @@ final class EarnedConfigCommandTests: XCTestCase {
         XCTAssertTrue(poller.contains("handleMeteringRearm("))
     }
 
+    func testChildCommandTransportsBindRequestsToTheCurrentDeviceIdentity() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let nse = try String(
+            contentsOf: root.appendingPathComponent("EvlinPushApplier/NotificationService.swift"),
+            encoding: .utf8
+        )
+        let apiClient = try String(
+            contentsOf: root.appendingPathComponent("Evlin iOS/Services/APIClient.swift"),
+            encoding: .utf8
+        )
+
+        for source in [nse, apiClient] {
+            XCTAssertGreaterThanOrEqual(
+                source.components(separatedBy: "forHTTPHeaderField: \"X-Child-Id\"").count - 1,
+                2,
+                "command fetch and ack must both bind to the verified child-device identity"
+            )
+        }
+    }
+
+    func testNSEGenericAckFailureCannotBeReportedAsConfirmed() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent("EvlinPushApplier/NotificationService.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("outcome: NSELockApplier.Outcome) async throws"))
+        XCTAssertFalse(source.contains("try? await ack(\n            baseURL: baseURL,\n            deviceID: deviceID,\n            commandID: commandID,\n            status: \"confirmed\""))
+        XCTAssertTrue(source.contains("applied but ack failed cmd="))
+        XCTAssertTrue(source.contains("try await NSENetwork.ack("))
+    }
+
     func testMeteringRearmRequiresExactDaemonReadbackForConfirmedAck() {
         XCTAssertTrue(MeteringTodayRouteRekick.Report(
             verdict: "rearmed", message: "ok", routeID: nil
