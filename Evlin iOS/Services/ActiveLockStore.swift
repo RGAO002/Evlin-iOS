@@ -156,17 +156,28 @@ actor ActiveLockStore {
     private let store = ManagedSettingsStore()
     private let defaults: UserDefaults?
     private let shieldPersistence: any ActiveLockShieldPersistence
+    private let parentUnlockOverrideStore: ParentUnlockOverrideStore
+    private let parentUnlockOverrideOwnerProvider: () -> UUID?
+    private let effectiveProjectionObserver: ((ParentUnlockOverridePolicy.Projection) -> Void)?
     private let shieldsKey = "evlin.shieldRecords"
     private let blocksKey = "evlin.blockRecords"
 
     init(
         defaults: UserDefaults? = UserDefaults(suiteName: "group.com.evlin.ios"),
-        shieldPersistence: (any ActiveLockShieldPersistence)? = nil
+        shieldPersistence: (any ActiveLockShieldPersistence)? = nil,
+        parentUnlockOverrideStore: ParentUnlockOverrideStore = .shared,
+        parentUnlockOverrideOwnerProvider: @escaping () -> UUID? = {
+            MeteringOwnerMirror.current()
+        },
+        effectiveProjectionObserver: ((ParentUnlockOverridePolicy.Projection) -> Void)? = nil
     ) {
         self.defaults = defaults
         self.shieldPersistence = shieldPersistence ?? UserDefaultsActiveLockShieldPersistence(
             defaults: defaults
         )
+        self.parentUnlockOverrideStore = parentUnlockOverrideStore
+        self.parentUnlockOverrideOwnerProvider = parentUnlockOverrideOwnerProvider
+        self.effectiveProjectionObserver = effectiveProjectionObserver
         _ = ActiveLockPersistenceLock.shared.withLock {
             restore()
         }
@@ -881,10 +892,18 @@ actor ActiveLockStore {
             persist()
         }
 
+        let effective = ParentUnlockOverrideProjectionApplication.project(
+            shields: shieldRecords,
+            blocks: blockRecords,
+            expectedOwner: parentUnlockOverrideOwnerProvider(),
+            store: parentUnlockOverrideStore
+        )
+        effectiveProjectionObserver?(effective)
+
         // Blocks. A token-backed Application when the record carries one —
         // the form enforcement verifiably honors — with the bundle-id form as
         // the unchanged fallback for records that predate token capture.
-        let blockedApps = Set(blockRecords.values.map { record in
+        let blockedApps = Set(effective.blocks.values.map { record in
             record.appToken.map(ManagedSettings.Application.init(token:))
                 ?? ManagedSettings.Application(bundleIdentifier: record.bundleID)
         })
@@ -892,7 +911,7 @@ actor ActiveLockStore {
 
         // Shields: apply the pure full-union projection. This is the ONLY
         // main-app write of the ManagedSettings shield fields (C-3/R-2).
-        let projection = ActiveShieldProjection.make(records: Array(shieldRecords.values))
+        let projection = ActiveShieldProjection.make(records: Array(effective.shields.values))
 
         switch projection.applications {
         case .all:

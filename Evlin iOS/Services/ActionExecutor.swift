@@ -174,6 +174,9 @@ final class ActionExecutor: @unchecked Sendable {
     private let beforeUnshieldSourceMutation: () -> Void
     private let beforeMutation: () async -> Void
     private let afterMutationCheckpoint: (MutationCheckpoint) -> Void
+    private let parentUnlockOverrideStore: ParentUnlockOverrideStore
+    private let parentUnlockOverrideNow: () -> Date
+    private let parentUnlockOverrideProjection: () async throws -> Void
 
     /// Per-app limit dependencies (P6). The planner is built per-arm via
     /// `makeLimitPlanner` rather than stored, for two reasons: (1) the planner is
@@ -207,6 +210,11 @@ final class ActionExecutor: @unchecked Sendable {
         appLimitOwnerProvider: @escaping @Sendable () -> UUID? = MeteringOwnerMirror.current,
         makeLimitPlanner: (@Sendable () -> AppLimitPlanner)? = nil,
         appLimitLockStore: ActiveLockStore = .shared,
+        parentUnlockOverrideStore: ParentUnlockOverrideStore = .shared,
+        parentUnlockOverrideNow: @escaping () -> Date = Date.init,
+        parentUnlockOverrideProjection: @escaping () async throws -> Void = {
+            await ActiveLockStore.shared.reapplyCurrentRestrictions()
+        },
         beforeUnshieldSourceMutation: @escaping () -> Void = {},
         beforeMutation: @escaping () async -> Void = {},
         afterMutationCheckpoint: @escaping (MutationCheckpoint) -> Void = { _ in }
@@ -221,6 +229,9 @@ final class ActionExecutor: @unchecked Sendable {
         self.appLimitEpochStore = appLimitEpochStore
         self.appLimitOwnerProvider = appLimitOwnerProvider
         self.appLimitLockStore = appLimitLockStore
+        self.parentUnlockOverrideStore = parentUnlockOverrideStore
+        self.parentUnlockOverrideNow = parentUnlockOverrideNow
+        self.parentUnlockOverrideProjection = parentUnlockOverrideProjection
         self.beforeUnshieldSourceMutation = beforeUnshieldSourceMutation
         self.beforeMutation = beforeMutation
         self.afterMutationCheckpoint = afterMutationCheckpoint
@@ -320,10 +331,40 @@ final class ActionExecutor: @unchecked Sendable {
             return .failed(.execution("earned_time_config must not reach ActionExecutor"))
         case .meteringRearm:
             return .failed(.execution("metering_rearm must not reach ActionExecutor"))
+        case .parentUnlockOverride, .parentUnlockOverrideCancel:
+            guard let expectedChildID = identity.expectedChildID,
+                  identity.isCurrent
+            else { return Self.staleIdentityResult }
+            do {
+                let disposition = try await ParentUnlockOverrideCommandApplication.apply(
+                    command: cmd,
+                    expectedOwner: expectedChildID,
+                    now: parentUnlockOverrideNow(),
+                    store: parentUnlockOverrideStore,
+                    project: parentUnlockOverrideProjection
+                )
+                guard identity.isCurrent else { return Self.staleIdentityResult }
+                switch disposition {
+                case .applied, .replayed:
+                    return .confirmedExact(
+                        verb: .unshieldAll,
+                        displayName: cmd.action == .parentUnlockOverrideCancel
+                            ? "Parent override cancelled"
+                            : "Parent override",
+                        effectiveState: nil
+                    )
+                case .superseded(let currentRevision):
+                    return .failed(.execution("override_superseded:\(currentRevision)"))
+                case .rejectedIdentity:
+                    return Self.staleIdentityResult
+                }
+            } catch ParentUnlockOverrideCommandApplicationError.malformedCommand {
+                return .failed(.malformed)
+            } catch {
+                return .failed(.execution("override_store_unavailable"))
+            }
         case .parentMasterLock,
-             .parentMasterUnlock,
-             .parentUnlockOverride,
-             .parentUnlockOverrideCancel:
+             .parentMasterUnlock:
             return .failed(.execution("parent control enforcement is not connected"))
         case .unknown:
             return .failed(.malformed)

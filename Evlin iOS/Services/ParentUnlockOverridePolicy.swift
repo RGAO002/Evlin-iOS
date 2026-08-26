@@ -66,3 +66,99 @@ nonisolated enum ParentUnlockOverridePolicy {
         record.recordKey.hasPrefix("all:reflection:")
     }
 }
+
+nonisolated enum ParentUnlockOverrideProjectionApplication {
+    static func project(
+        shields: [String: ShieldRecord],
+        blocks: [String: BlockRecord],
+        snapshot: ParentUnlockOverrideSnapshot?
+    ) -> ParentUnlockOverridePolicy.Projection {
+        ParentUnlockOverridePolicy.project(
+            shields: shields,
+            blocks: blocks,
+            snapshot: snapshot,
+            reflectionActive: shields.values.contains {
+                $0.recordKey.hasPrefix("all:reflection:")
+            }
+        )
+    }
+
+    static func project(
+        shields: [String: ShieldRecord],
+        blocks: [String: BlockRecord],
+        expectedOwner: UUID?,
+        store: ParentUnlockOverrideStore = .shared
+    ) -> ParentUnlockOverridePolicy.Projection {
+        let snapshot = expectedOwner.flatMap { try? store.read(expectedOwner: $0) }
+        return project(shields: shields, blocks: blocks, snapshot: snapshot)
+    }
+}
+
+nonisolated enum ParentUnlockOverrideCommandApplicationError: Error, Equatable {
+    case malformedCommand
+}
+
+nonisolated enum ParentUnlockOverrideCommandApplication {
+    static func apply(
+        envelope: ParentUnlockOverrideEnvelope,
+        expectedOwner: UUID,
+        now: Date,
+        store: ParentUnlockOverrideStore = .shared,
+        project: () async throws -> Void
+    ) async throws -> ParentUnlockOverrideDisposition {
+        let disposition = try store.ingest(
+            envelope,
+            expectedOwner: expectedOwner,
+            now: now
+        )
+        switch disposition {
+        case .applied, .replayed:
+            try await project()
+        case .superseded, .rejectedIdentity:
+            break
+        }
+        return disposition
+    }
+
+    static func apply(
+        command: LockCommand,
+        expectedOwner: UUID,
+        now: Date,
+        store: ParentUnlockOverrideStore = .shared,
+        project: () async throws -> Void
+    ) async throws -> ParentUnlockOverrideDisposition {
+        guard let envelope = command.parentUnlockOverride,
+              command.target.targetChildID == nil
+                || command.target.targetChildID == expectedOwner,
+              (command.action == .parentUnlockOverride && !envelope.cancelled)
+                || (command.action == .parentUnlockOverrideCancel && envelope.cancelled)
+        else {
+            throw ParentUnlockOverrideCommandApplicationError.malformedCommand
+        }
+        return try await apply(
+            envelope: envelope,
+            expectedOwner: expectedOwner,
+            now: now,
+            store: store,
+            project: project
+        )
+    }
+}
+
+nonisolated enum ParentUnlockOverrideNSEApplication {
+    static func apply(
+        command: LockCommand,
+        expectedOwner: UUID,
+        now: Date = Date(),
+        store: ParentUnlockOverrideStore = .shared,
+        project: () async throws -> Void
+    ) async throws -> ParentUnlockOverrideDisposition {
+        try await ParentUnlockOverrideCommandApplication.apply(
+            command: command,
+            expectedOwner: expectedOwner,
+            now: now,
+            store: store,
+            project: project
+        )
+    }
+}

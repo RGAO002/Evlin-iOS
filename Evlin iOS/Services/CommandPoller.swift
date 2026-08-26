@@ -941,6 +941,24 @@ final class CommandPoller {
         return hours * 60 + minutes
     }
 
+    static func applyParentUnlockOverride(
+        command: LockCommand,
+        expectedOwner: UUID,
+        now: Date = Date(),
+        store: ParentUnlockOverrideStore = .shared,
+        project: () async throws -> Void = {
+            await ActiveLockStore.shared.reapplyCurrentRestrictions()
+        }
+    ) async throws -> ParentUnlockOverrideDisposition {
+        try await ParentUnlockOverrideCommandApplication.apply(
+            command: command,
+            expectedOwner: expectedOwner,
+            now: now,
+            store: store,
+            project: project
+        )
+    }
+
     private func execute(poll: PollCommandDTO, expectedDeviceID: UUID, api: APIClient) async {
         guard isExpectedDeviceCurrent(expectedDeviceID) else {
             coalescePollForCurrentIdentity(expectedDeviceID: expectedDeviceID)
@@ -976,6 +994,68 @@ final class CommandPoller {
         }
 
         let cmd = Self.lockCommand(from: poll)
+
+        if cmd.action == .parentUnlockOverride || cmd.action == .parentUnlockOverrideCancel {
+            do {
+                let disposition = try await Self.applyParentUnlockOverride(
+                    command: cmd,
+                    expectedOwner: expectedDeviceID
+                )
+                guard isExpectedDeviceCurrent(expectedDeviceID) else {
+                    coalescePollForCurrentIdentity(expectedDeviceID: expectedDeviceID)
+                    return
+                }
+                switch disposition {
+                case .applied, .replayed:
+                    await postCommandAck(
+                        commandID: cmd.id,
+                        status: "confirmed",
+                        detail: [
+                            "verb": cmd.action.rawValue,
+                            "display_name": cmd.action == .parentUnlockOverrideCancel
+                                ? "Parent override cancelled"
+                                : "Parent override",
+                        ],
+                        expectedDeviceID: expectedDeviceID,
+                        api: api
+                    )
+                case .superseded(let currentRevision):
+                    await postCommandAck(
+                        commandID: cmd.id,
+                        status: "failed",
+                        detail: [
+                            "reason": "override_superseded",
+                            "current_revision": currentRevision,
+                        ],
+                        expectedDeviceID: expectedDeviceID,
+                        api: api
+                    )
+                case .rejectedIdentity:
+                    await postCommandAck(
+                        commandID: cmd.id,
+                        status: "failed",
+                        detail: ["reason": "stale_identity"],
+                        expectedDeviceID: expectedDeviceID,
+                        api: api
+                    )
+                }
+            } catch ParentUnlockOverrideCommandApplicationError.malformedCommand {
+                await ackMalformedPoll(
+                    commandID: cmd.id,
+                    expectedDeviceID: expectedDeviceID,
+                    api: api
+                )
+            } catch {
+                await postCommandAck(
+                    commandID: cmd.id,
+                    status: "failed",
+                    detail: ["reason": "override_store_unavailable"],
+                    expectedDeviceID: expectedDeviceID,
+                    api: api
+                )
+            }
+            return
+        }
 
         if cmd.action == .setLimit || cmd.action == .clearLimit {
             await handleAppLimitCommand(

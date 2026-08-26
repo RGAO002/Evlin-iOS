@@ -501,6 +501,30 @@ enum NSELockApplier {
         _ cmd: LockCommand,
         fetchedDeviceID: UUID? = nil
     ) async -> Outcome? {
+        if cmd.action == .parentUnlockOverride || cmd.action == .parentUnlockOverrideCancel {
+            guard let fetchedDeviceID else { return nil }
+            do {
+                let disposition = try await ParentUnlockOverrideNSEApplication.apply(
+                    command: cmd,
+                    expectedOwner: fetchedDeviceID,
+                    project: {
+                        await ActiveLockStore.shared.reapplyCurrentRestrictions()
+                    }
+                )
+                guard disposition == .applied || disposition == .replayed else {
+                    return nil
+                }
+                return Outcome(
+                    verb: cmd.action.rawValue,
+                    displayName: cmd.action == .parentUnlockOverrideCancel
+                        ? "Parent override cancelled"
+                        : "Parent override"
+                )
+            } catch {
+                return nil
+            }
+        }
+
         let earnedTimeStore = EarnedTimeStore.shared
         switch await NSELockMutationDispatcher.apply(
             cmd,

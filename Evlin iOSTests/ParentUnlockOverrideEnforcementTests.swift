@@ -1,4 +1,5 @@
 import Foundation
+import FamilyControls
 import XCTest
 @testable import Evlin_iOS
 
@@ -6,7 +7,8 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
     private let ownerID = UUID(uuidString: "AAAAAAAA-0000-0000-0000-000000000001")!
     private let now = Date(timeIntervalSince1970: 1_777_255_200)
 
-    func testReflectionRecordAndEffectiveShieldSurviveOverride() {
+    @MainActor
+    func testReflectionRecordAndEffectiveShieldSurviveOverride() async throws {
         let selectedKey = "savedList:BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"
         let reflectionKey = "all:reflection:CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC"
         let selected = makeShield(
@@ -34,6 +36,36 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
             ActiveShieldProjection.make(records: Array(projected.shields.values)).applications,
             .all
         )
+
+        let harness = try makeOverrideHarness()
+        _ = try harness.store.ingest(
+            envelope(),
+            expectedOwner: ownerID,
+            now: now
+        )
+        let suiteName = "parent-unlock-real-projection-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        var observed: ParentUnlockOverridePolicy.Projection?
+        let lockStore = ActiveLockStore(
+            defaults: defaults,
+            parentUnlockOverrideStore: harness.store,
+            parentUnlockOverrideOwnerProvider: { self.ownerID },
+            effectiveProjectionObserver: { observed = $0 }
+        )
+
+        _ = await lockStore.addShield(selected)
+        _ = await lockStore.addShield(reflection)
+        _ = await lockStore.addBlock(makeBlock(bundleID: "com.example.blocked"))
+
+        let effective = try XCTUnwrap(observed)
+        XCTAssertNil(effective.shields[selectedKey])
+        XCTAssertEqual(effective.shields[reflectionKey], reflection)
+        XCTAssertTrue(effective.blocks.isEmpty)
+        let durable = await lockStore.allCurrent()
+        XCTAssertEqual(Set(durable.shields.map(\.recordKey)), [selectedKey, reflectionKey])
+        XCTAssertEqual(durable.blocks.map(\.bundleID), ["com.example.blocked"])
     }
 
     func testOverrideRemovesManualEarnedTaskAndLimitEffects() {
@@ -166,6 +198,125 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testPersistHappensBeforeAnyManagedSettingsMutation() async throws {
+        let harness = try makeOverrideHarness()
+        var projectionObservedPersistedSnapshot = false
+
+        let disposition = try await ParentUnlockOverrideCommandApplication.apply(
+            envelope: envelope(),
+            expectedOwner: ownerID,
+            now: now,
+            store: harness.store
+        ) {
+            projectionObservedPersistedSnapshot = try harness.store.read(
+                expectedOwner: self.ownerID
+            )?.status == .active
+        }
+
+        XCTAssertEqual(disposition, .applied)
+        XCTAssertTrue(projectionObservedPersistedSnapshot)
+    }
+
+    @MainActor
+    func testMainAppEntryPointAppliesDurableOverrideBeforeProjection() async throws {
+        let harness = try makeOverrideHarness()
+        var projectedRevision: Int64?
+        let executor = ActionExecutor(
+            authorizationStatusProvider: { .approved },
+            parentUnlockOverrideStore: harness.store,
+            parentUnlockOverrideNow: { self.now },
+            parentUnlockOverrideProjection: {
+                projectedRevision = try harness.store.read(
+                    expectedOwner: self.ownerID
+                )?.revision
+            }
+        )
+
+        let result = await executor.execute(
+            overrideCommand(action: .parentUnlockOverride),
+            expectedChildID: ownerID,
+            identityIsCurrent: { $0 == self.ownerID }
+        )
+
+        guard case .confirmedExact = result else {
+            return XCTFail("parent override must confirm after projection")
+        }
+        XCTAssertEqual(projectedRevision, 1)
+    }
+
+    @MainActor
+    func testNSEEntryPointAppliesDurableOverrideBeforeProjection() async throws {
+        let harness = try makeOverrideHarness()
+        var projectedRevision: Int64?
+
+        let disposition = try await ParentUnlockOverrideNSEApplication.apply(
+            command: overrideCommand(action: .parentUnlockOverride),
+            expectedOwner: ownerID,
+            now: now,
+            store: harness.store
+        ) {
+            projectedRevision = try harness.store.read(
+                expectedOwner: self.ownerID
+            )?.revision
+        }
+
+        XCTAssertEqual(disposition, .applied)
+        XCTAssertEqual(projectedRevision, 1)
+    }
+
+    @MainActor
+    func testCommandPollerEntryPointAppliesDurableOverrideBeforeProjection() async throws {
+        let harness = try makeOverrideHarness()
+        var projectedRevision: Int64?
+
+        let disposition = try await CommandPoller.applyParentUnlockOverride(
+            command: overrideCommand(action: .parentUnlockOverride),
+            expectedOwner: ownerID,
+            now: now,
+            store: harness.store
+        ) {
+            projectedRevision = try harness.store.read(
+                expectedOwner: self.ownerID
+            )?.revision
+        }
+
+        XCTAssertEqual(disposition, .applied)
+        XCTAssertEqual(projectedRevision, 1)
+    }
+
+    @MainActor
+    func testCancelledOrExpiredOverrideReconcilesLatestRecords() async throws {
+        let harness = try makeOverrideHarness()
+        let selected = makeShield(
+            key: "savedList:latest",
+            tier: .savedList,
+            sources: [.manual, .earnedTime, .taskPause, .limit]
+        )
+        let block = makeBlock(bundleID: "com.example.latest")
+
+        for snapshot in [
+            ParentUnlockOverrideSnapshot(
+                envelope: envelope(cancelled: true),
+                status: .cancelled
+            ),
+            ParentUnlockOverrideSnapshot(
+                envelope: envelope(),
+                status: .expired
+            ),
+        ] {
+            let projected = try ParentUnlockOverrideProjectionApplication.project(
+                shields: [selected.recordKey: selected],
+                blocks: [block.bundleID: block],
+                snapshot: snapshot
+            )
+
+            XCTAssertEqual(projected.shields[selected.recordKey], selected)
+            XCTAssertEqual(projected.blocks[block.bundleID], block)
+        }
+        _ = harness
+    }
+
     private func activeSnapshot(
         scopes: Set<ParentUnlockOverrideScope> = [
             .manual,
@@ -201,6 +352,38 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
             scopes: scopes,
             cancelled: cancelled
         )
+    }
+
+    private func overrideCommand(action: CommandAction) -> LockCommand {
+        LockCommand(
+            id: UUID(uuidString: "12121212-1212-1212-1212-121212121212")!,
+            action: action,
+            tier: nil,
+            target: CommandTarget(
+                originalRequest: "parent unlock override",
+                targetDisplay: "Parent override",
+                targetChildID: ownerID
+            ),
+            durationMinutes: nil,
+            issuedAt: now,
+            parentUnlockOverride: envelope(cancelled: action == .parentUnlockOverrideCancel)
+        )
+    }
+
+    private func makeOverrideHarness() throws -> (
+        store: ParentUnlockOverrideStore,
+        fileURL: URL
+    ) {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "parent-unlock-enforcement-tests-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let fileURL = directory.appendingPathComponent(ParentUnlockOverrideStore.fileName)
+        return (ParentUnlockOverrideStore(fileURL: fileURL), fileURL)
     }
 
     private func makeShield(

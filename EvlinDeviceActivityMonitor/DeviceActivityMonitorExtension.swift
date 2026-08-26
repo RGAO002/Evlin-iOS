@@ -1119,18 +1119,24 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             return decoded
         }()
 
-        let blockedApps = Set(blocks.values.map { record in
+        let effective = ParentUnlockOverrideProjectionApplication.project(
+            shields: shields,
+            blocks: blocks,
+            expectedOwner: ExtensionConfig.childId
+        )
+
+        let blockedApps = Set(effective.blocks.values.map { record in
             record.appToken.map(ManagedSettings.Application.init(token:))
                 ?? ManagedSettings.Application(bundleIdentifier: record.bundleID)
         })
         store.application.blockedApplications = blockedApps.isEmpty ? nil : blockedApps
 
-        let broadRecords = shields.values.filter(\.appliesToAll)
+        let broadRecords = effective.shields.values.filter(\.appliesToAll)
         if !broadRecords.isEmpty {
-            let allWeb = Set(shields.values.flatMap(\.webDomainTokens))
+            let allWeb = Set(effective.shields.values.flatMap(\.webDomainTokens))
             store.shield.applicationCategories = .all()
             store.shield.applications = nil
-            switch ShieldWebProjectionDecision.resolve(records: shields.values) {
+            switch ShieldWebProjectionDecision.resolve(records: effective.shields.values) {
             case .all:
                 store.shield.webDomainCategories = .all()
                 store.shield.webDomains = nil
@@ -1142,13 +1148,13 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                 store.shield.webDomains = nil
             }
         } else {
-            let allApp = Set(shields.values.flatMap(\.appTokens))
-            let allCat = Set(shields.values.flatMap(\.categoryTokens))
-            let allWeb = Set(shields.values.flatMap(\.webDomainTokens))
+            let allApp = Set(effective.shields.values.flatMap(\.appTokens))
+            let allCat = Set(effective.shields.values.flatMap(\.categoryTokens))
+            let allWeb = Set(effective.shields.values.flatMap(\.webDomainTokens))
 
             store.shield.applications = allApp.isEmpty ? nil : allApp
             store.shield.applicationCategories = allCat.isEmpty ? nil : .specific(allCat)
-            switch ShieldWebProjectionDecision.resolve(records: shields.values) {
+            switch ShieldWebProjectionDecision.resolve(records: effective.shields.values) {
             case .specific:
                 store.shield.webDomains = allWeb
                 store.shield.webDomainCategories = nil
@@ -1162,15 +1168,15 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             }
         }
 
-        let broad = shields.values.contains(where: \.appliesToAll)
+        let broad = effective.shields.values.contains(where: \.appliesToAll)
         let shieldTokenCount = broad ? -1
-            : Set(shields.values.flatMap(\.appTokens)).count
-              + Set(shields.values.flatMap(\.categoryTokens)).count
-              + Set(shields.values.flatMap(\.webDomainTokens)).count
+            : Set(effective.shields.values.flatMap(\.appTokens)).count
+              + Set(effective.shields.values.flatMap(\.categoryTokens)).count
+              + Set(effective.shields.values.flatMap(\.webDomainTokens)).count
         emitEvent(kind: .decision, source: nil, app: "device-wide",
                   reason: broad ? "recompute_broad_lock" : "recompute_applied",
                   transition: .init(before: nil, after: "shield_tokens:\(shieldTokenCount)"))
-        return blocks.count
+        return effective.blocks.count
     }
 
     /// Symmetric to `removeShieldByHashAndRecompute` but for timed
