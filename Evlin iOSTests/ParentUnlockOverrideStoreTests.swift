@@ -43,6 +43,30 @@ final class ParentUnlockOverrideStoreTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: harness.fileURL), committedBytes)
     }
 
+    func testEqualRevisionDifferentPayloadReplaysWithoutMutation() throws {
+        let harness = try makeHarness()
+        _ = try harness.store.ingest(
+            envelope(revision: 4),
+            expectedOwner: ownerID,
+            now: startedAt
+        )
+        let committedBytes = try Data(contentsOf: harness.fileURL)
+        let committedSnapshot = try XCTUnwrap(harness.store.read(expectedOwner: ownerID))
+        let conflictingOperationID = UUID(
+            uuidString: "DDDDDDDD-0000-0000-0000-000000000005"
+        )!
+
+        let disposition = try harness.store.ingest(
+            envelope(revision: 4, operationID: conflictingOperationID),
+            expectedOwner: ownerID,
+            now: startedAt.addingTimeInterval(30)
+        )
+
+        XCTAssertEqual(disposition, .replayed)
+        XCTAssertEqual(try Data(contentsOf: harness.fileURL), committedBytes)
+        XCTAssertEqual(try harness.store.read(expectedOwner: ownerID), committedSnapshot)
+    }
+
     func testOlderRevisionIsSuperseded() throws {
         let harness = try makeHarness()
         _ = try harness.store.ingest(
@@ -96,6 +120,38 @@ final class ParentUnlockOverrideStoreTests: XCTestCase {
         XCTAssertFalse(snapshot.isActive(at: expiresAt.addingTimeInterval(1)))
     }
 
+    func testActivityUsesHalfOpenStartAndExpirationInterval() {
+        let snapshot = ParentUnlockOverrideSnapshot(
+            envelope: envelope(revision: 4),
+            status: .active
+        )
+
+        XCTAssertFalse(snapshot.isActive(at: startedAt.addingTimeInterval(-1)))
+        XCTAssertTrue(snapshot.isActive(at: startedAt))
+        XCTAssertTrue(snapshot.isActive(at: startedAt.addingTimeInterval(1)))
+        XCTAssertTrue(snapshot.isActive(at: expiresAt.addingTimeInterval(-1)))
+        XCTAssertFalse(snapshot.isActive(at: expiresAt))
+    }
+
+    func testFutureStartIngestPersistsWithoutReportingActiveBeforeStart() throws {
+        let harness = try makeHarness()
+        let value = envelope(revision: 4)
+        let beforeStart = startedAt.addingTimeInterval(-1)
+
+        let disposition = try harness.store.ingest(
+            value,
+            expectedOwner: ownerID,
+            now: beforeStart
+        )
+        let restarted = ParentUnlockOverrideStore(fileURL: harness.fileURL)
+        let committed = try XCTUnwrap(restarted.read(expectedOwner: ownerID))
+
+        XCTAssertEqual(disposition, .applied)
+        XCTAssertEqual(committed.envelope, value)
+        XCTAssertFalse(committed.isActive(at: beforeStart))
+        XCTAssertTrue(committed.isActive(at: startedAt))
+    }
+
     func testTornOrInvalidFileDoesNotReplaceLastGoodState() throws {
         let fileIO = OneShotCorruptingOverrideFileIO()
         let harness = try makeHarness(fileIO: fileIO)
@@ -146,7 +202,8 @@ final class ParentUnlockOverrideStoreTests: XCTestCase {
 
     private func envelope(
         revision: Int64,
-        childDeviceID: UUID? = nil
+        childDeviceID: UUID? = nil,
+        operationID: UUID? = nil
     ) -> ParentUnlockOverrideEnvelope {
         ParentUnlockOverrideEnvelope(
             revision: revision,
@@ -154,7 +211,7 @@ final class ParentUnlockOverrideStoreTests: XCTestCase {
             usageDate: "2026-04-26",
             startedAt: startedAt,
             expiresAt: expiresAt,
-            operationID: operationID,
+            operationID: operationID ?? self.operationID,
             scopes: [.manual, .earnedTime, .taskPause, .deviceLimit, .perAppLimit],
             cancelled: false
         )

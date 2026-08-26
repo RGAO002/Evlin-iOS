@@ -58,9 +58,6 @@ nonisolated final class ParentUnlockOverrideStore: @unchecked Sendable {
                     return .superseded(currentRevision: current.revision)
                 }
                 if envelope.revision == current.revision {
-                    guard envelope == current.envelope else {
-                        throw ParentUnlockOverrideStoreError.invalidState
-                    }
                     return .replayed
                 }
             }

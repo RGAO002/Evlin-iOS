@@ -131,7 +131,10 @@ nonisolated struct ParentUnlockOverrideSnapshot: Codable, Equatable, Sendable {
     var scopes: Set<ParentUnlockOverrideScope> { envelope.scopes }
 
     func isActive(at now: Date) -> Bool {
-        status == .active && !envelope.cancelled && now < envelope.expiresAt
+        status == .active
+            && !envelope.cancelled
+            && now >= envelope.startedAt
+            && now < envelope.expiresAt
     }
 }
 
