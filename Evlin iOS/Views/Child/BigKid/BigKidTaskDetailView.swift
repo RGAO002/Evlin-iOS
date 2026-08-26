@@ -24,6 +24,10 @@ struct BigKidTaskDetailView: View {
     /// pinch-zoom / pan / drag-to-dismiss feel identical on both sides.
     @State private var showFullscreenPhoto = false
     @State private var fullscreenStartIndex = 0
+    /// Decode-once previews keyed by photo bytes; filled off-main whenever
+    /// `photos` changes. See `EvidenceThumbnailCache` for why body helpers
+    /// must never decode photo bytes inline.
+    @State private var photoPreviews: [Data: UIImage] = [:]
 
     /// Hard cap matches the backend's `max 6 photos` guard so the kid
     /// can't queue an over-limit batch and only learn at submit time.
@@ -75,6 +79,20 @@ struct BigKidTaskDetailView: View {
         }
         .background(EvlinKidColors.surface.ignoresSafeArea())
         .onAppear { hydrateFromCache() }
+        // Decode previews off-main whenever the working set changes. `.task(id:)`
+        // cancels and restarts on change, so a rapid add/remove burst only pays
+        // for the final set; stale entries drop out because `fill` rebuilds the
+        // dictionary from the current photo list.
+        .task(id: photos) {
+            let current = photos
+            let existing = photoPreviews
+            let filled = await Task.detached(priority: .userInitiated) {
+                EvidenceThumbnailCache.fill(existing, from: current)
+            }.value
+            if !Task.isCancelled {
+                photoPreviews = filled
+            }
+        }
         .sheet(isPresented: $showCamera) {
             EvKidPhotoPicker { data in
                 showCamera = false
@@ -223,7 +241,7 @@ struct BigKidTaskDetailView: View {
             emptyCameraPlaceholder
         } else {
             VStack(spacing: 10) {
-                if let primary = photos.first, let img = UIImage(data: primary) {
+                if let primary = photos.first, let img = photoPreviews[primary] {
                     capturedPreview(uiImage: img)
                 }
                 photoStrip
@@ -294,7 +312,7 @@ struct BigKidTaskDetailView: View {
 
     private func thumbnail(data: Data, index: Int) -> some View {
         ZStack {
-            if let img = UIImage(data: data) {
+            if let img = photoPreviews[data] {
                 Image(uiImage: img)
                     .resizable()
                     .scaledToFill()
@@ -500,7 +518,7 @@ struct BigKidTaskDetailView: View {
                     showFullscreenPhoto = true
                 }
             )
-        } else if let first = photos.first, let img = UIImage(data: first) {
+        } else if let first = photos.first, let img = photoPreviews[first] {
             // Fallback for the brief window between submit and the next
             // state poll (or for backends with in-memory storage that
             // got wiped). Inline static — no carousel because there are
