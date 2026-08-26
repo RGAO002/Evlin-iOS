@@ -3643,10 +3643,13 @@ extension ChatViewModel {
         }
 
         // For reflection.content_generation_failed, wire Retry / SimplerTemplate
-        // via synthesised patches (spec §7.3). For all other card kinds, leave
-        // onPrimary/onSecondary nil — polished cards drive their own primary action;
-        // synthesising "intent_confirmed: true" would be rejected by CardPatchPayload
-        // (extra="forbid") and cause silent failures.
+        // via synthesised patches (spec §7.3). Template-driven kinds (A1, A3,
+        // B1, E1, F1) get their primary/secondary wired from the card's OWN
+        // backend-authored options below — leaving them nil rendered live-
+        // looking buttons that did nothing (2026-08-21). Remaining kinds keep
+        // nil: their templates run on dedicated handlers (durations, pickers),
+        // and synthesising an "intent_confirmed" patch would still be rejected
+        // by CardPatchPayload (extra="forbid").
         if card.kind == "reflection.content_generation_failed" {
             handlers.onPrimary = { [weak self] in
                 guard let self else { return }
@@ -3661,6 +3664,20 @@ extension ChatViewModel {
                     fromCard: card, patch: ["use_simpler_template": true]
                 )
                 self.handlePlanArchOption(opt)
+            }
+        } else if let wiring = PlanArchTemplateActionBridge.wiring(
+            for: card,
+            childName: childName
+        ) {
+            handlers.onPrimary = { [weak self] in
+                self?.handlePlanArchOption(wiring.primary)
+            }
+            if let secondary = wiring.secondary {
+                handlers.onSecondary = { [weak self] in
+                    self?.handlePlanArchOption(secondary)
+                }
+            } else {
+                handlers.onSecondary = nil
             }
         } else {
             handlers.onPrimary = nil
