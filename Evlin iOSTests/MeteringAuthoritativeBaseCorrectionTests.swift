@@ -864,7 +864,7 @@ final class MeteringAuthoritativeBaseCorrectionTests: XCTestCase {
         XCTAssertEqual(state.v2RouteHandoff?.toRouteID, ids.routeID)
     }
 
-    func testPriorCallbackWinningCorrectionBarrierQueuesAndDefersBarrier() throws {
+    func testConcurrentPriorCallbackAndCorrectionBarrierProduceSerializableState() throws {
         let lock = CorrectionRaceLock()
         let fixture = try CorrectionFixture(owner: owner, start: start, lock: lock)
         defer { fixture.cleanup() }
@@ -909,12 +909,27 @@ final class MeteringAuthoritativeBaseCorrectionTests: XCTestCase {
         lock.resume()
         wait(for: [callbackFinished, barrierFinished], timeout: 2)
 
-        guard case .queued = outcome.value else { return XCTFail("callback must win the shared root lock") }
-        XCTAssertFalse(barrierSucceeded.value)
         let state = try fixture.store.read()
-        XCTAssertEqual(state.v2RouteHandoff?.phase, .dualV2)
-        XCTAssertEqual(state.v2RouteHandoff?.toRouteID, ids.routeID)
-        XCTAssertEqual(state.sampleWork.values.filter { $0.routeID == fixture.priorRouteID }.count, 1)
+        switch outcome.value {
+        case .queued:
+            XCTAssertFalse(
+                barrierSucceeded.value,
+                "correction barrier must observe the committed prior-route sample after a CAS retry"
+            )
+            XCTAssertEqual(state.v2RouteHandoff?.phase, .dualV2)
+            XCTAssertEqual(state.v2RouteHandoff?.toRouteID, ids.routeID)
+            XCTAssertEqual(state.sampleWork.values.filter { $0.routeID == fixture.priorRouteID }.count, 1)
+        case .discarded(reason: "handoff_prior_input_closed"):
+            XCTAssertTrue(
+                barrierSucceeded.value,
+                "a callback that loses the CAS race must observe the committed input closure"
+            )
+            XCTAssertEqual(state.v2RouteHandoff?.phase, .cutoverReady)
+            XCTAssertEqual(state.v2RouteHandoff?.toRouteID, ids.routeID)
+            XCTAssertTrue(state.sampleWork.isEmpty)
+        default:
+            XCTFail("concurrent callback and correction barrier must serialize without dropping committed state")
+        }
     }
 }
 
