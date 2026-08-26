@@ -274,7 +274,8 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
             command: overrideCommand(action: .parentUnlockOverride),
             expectedOwner: ownerID,
             now: now,
-            store: harness.store
+            store: harness.store,
+            expiryScheduler: nil
         ) {
             projectedRevision = try harness.store.read(
                 expectedOwner: self.ownerID

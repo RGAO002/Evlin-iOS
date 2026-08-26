@@ -946,6 +946,7 @@ final class CommandPoller {
         expectedOwner: UUID,
         now: Date = Date(),
         store: ParentUnlockOverrideStore = .shared,
+        expiryScheduler: (any DeviceActivityScheduling)? = DeviceActivityCenterScheduler(),
         project: () async throws -> Void = {
             await ActiveLockStore.shared.reapplyCurrentRestrictions()
         }
@@ -955,7 +956,19 @@ final class CommandPoller {
             expectedOwner: expectedOwner,
             now: now,
             store: store,
-            project: project
+            project: {
+                // Persisted expiry must be armed before the projection removes
+                // any current source of enforcement.
+                if let expiryScheduler {
+                    _ = try await ParentUnlockOverrideExpiry.reconcile(
+                        now: now,
+                        expectedOwner: expectedOwner,
+                        store: store,
+                        scheduler: expiryScheduler
+                    )
+                }
+                try await project()
+            }
         )
     }
 
