@@ -259,8 +259,13 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
         // ---- VALIDATE (no scheduler side effects yet) -----------------------
 
         let windowCount = buckets.count
-        if windowCount > Self.maxActivities {
-            return .quotaExceeded(windows: windowCount, slotsNeeded: windowCount, cap: Self.maxActivities)
+        let externallyOccupiedSlots = scheduler.monitoredActivities()
+            .map(\.rawValue)
+            .filter { !Self.isPlannerActivity($0) }
+            .count
+        let slotsNeeded = windowCount + externallyOccupiedSlots
+        if slotsNeeded > Self.maxActivities {
+            return .quotaExceeded(windows: windowCount, slotsNeeded: slotsNeeded, cap: Self.maxActivities)
         }
         for (_, bucket) in buckets {
             if bucket.rules.count > Self.maxEventsPerActivity {
@@ -484,10 +489,15 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
         let active = rules.filter {
             isActive($0, at: reference) && !exhaustedRuleIDs.contains($0.id)
         }
-        guard active.count <= Self.maxActivities else {
+        let externallyOccupiedSlots = scheduler.monitoredActivities()
+            .map(\.rawValue)
+            .filter { !Self.isPlannerActivity($0) }
+            .count
+        let slotsNeeded = active.count + externallyOccupiedSlots
+        guard slotsNeeded <= Self.maxActivities else {
             return .quotaExceeded(
                 windows: active.count,
-                slotsNeeded: active.count,
+                slotsNeeded: slotsNeeded,
                 cap: Self.maxActivities
             )
         }
@@ -699,6 +709,11 @@ nonisolated final class AppLimitPlanner: @unchecked Sendable {
     /// heartbeat activities.
     static let windowActivityPrefix = "evlin.limit.window."
     static let v2ActivityPrefix = "evlin.limit.v2."
+
+    static func isPlannerActivity(_ activityName: String) -> Bool {
+        activityName.hasPrefix(windowActivityPrefix)
+            || activityName.hasPrefix(v2ActivityPrefix)
+    }
 
     static func v2ActivityName(armID: UUID) -> String {
         "\(v2ActivityPrefix)\(armID.uuidString.lowercased())"

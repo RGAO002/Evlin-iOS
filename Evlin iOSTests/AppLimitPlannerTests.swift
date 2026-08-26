@@ -87,6 +87,10 @@ final class AppLimitPlannerTests: XCTestCase {
         func simulateMonitorLoss() {
             activeActivities.removeAll()
         }
+
+        func seed(_ activityName: String) {
+            activeActivities.insert(DeviceActivityName(activityName))
+        }
     }
 
     // MARK: - Fixtures
@@ -911,6 +915,40 @@ final class AppLimitPlannerTests: XCTestCase {
         let hash = SHA256.hash(data: Data(key.utf8))
         let hex = Array(hash).prefix(16).map { String(format: "%02x", $0) }.joined()
         return "evlin.limit.window.\(hex)"
+    }
+
+    func testExpiryActivityCountsAgainstTwentySlotBudget() {
+        let scheduler = PlannerSchedulerSpy()
+        let reference = Date(timeIntervalSince1970: 1_721_174_400)
+        let rules = (0..<19).map { index in
+            rule(
+                budget: 30,
+                window: AppLimitWindow(
+                    startMinute: index * 60,
+                    endMinute: index * 60 + 30,
+                    repeats: true,
+                    timezone: nil
+                ),
+                bundleID: "com.example.slot.\(index)"
+            )
+        }
+        scheduler.seed(
+            ParentUnlockOverrideExpiry.activityName(
+                ownerID: UUID(uuidString: "AAAAAAAA-0000-0000-0000-000000000001")!,
+                revision: 7
+            )
+        )
+
+        let firstPlanner = AppLimitPlanner(scheduler: scheduler, now: { reference }, ownerProvider: { nil })
+        XCTAssertEqual(firstPlanner.arm(rules: rules), .armed(activityCount: 19, eventCount: 19))
+
+        scheduler.seed("evlin.shield.active-lock")
+        let restartedPlanner = AppLimitPlanner(scheduler: scheduler, now: { reference }, ownerProvider: { nil })
+
+        XCTAssertEqual(
+            restartedPlanner.arm(rules: rules),
+            .quotaExceeded(windows: 19, slotsNeeded: 21, cap: 20)
+        )
     }
 
     // MARK: - Daily window collapses to ONE activity with N events

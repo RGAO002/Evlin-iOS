@@ -43,6 +43,7 @@ enum FamilyGoneDetector {
         releaseRestrictions: (() async -> Void)? = nil,
         teardownEarned: (() -> Void)? = nil
     ) async {
+        ParentUnlockOverrideExpiry.clearForIdentityTeardown()
         if let teardownEarned {
             teardownEarned()
         } else {

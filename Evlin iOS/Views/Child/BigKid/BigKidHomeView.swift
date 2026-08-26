@@ -3,6 +3,7 @@ import SwiftUI
 
 struct BigKidHomeView: View {
     @Environment(BigKidState.self) private var state
+    var parentUnlockOverride: ParentUnlockOverrideChildPresentation? = nil
     var onTaskTap: (BigKidTask) -> Void
     var onManageApps: (() -> Void)? = nil
     var onCommandDelivery: (() -> Void)? = nil
@@ -18,7 +19,13 @@ struct BigKidHomeView: View {
         state.tasks.filter { $0.status == .done || $0.bypass?.status == .approved }.count
     }
     private var allDone: Bool { state.allTasksDone }
-    private var outOfTime: Bool { allDone && state.minutesLeft <= 0 }
+    private var outOfTime: Bool {
+        ParentUnlockOverrideChildPresentation.shouldShowTimeUp(
+            allTasksDone: allDone,
+            minutesLeft: state.minutesLeft,
+            activeOverride: parentUnlockOverride
+        )
+    }
     private var showTimeHero: Bool { allDone }
     private var displayChildName: String {
         BigKidDisplayName.resolve(
@@ -154,12 +161,44 @@ struct BigKidHomeView: View {
 
     @ViewBuilder
     private var heroCard: some View {
-        if outOfTime {
+        if let parentUnlockOverride {
+            parentUnlockCard(parentUnlockOverride)
+        } else if outOfTime {
             outOfTimeCard
         } else if showTimeHero {
             timeLeftCard
         } else {
             lockedCard
+        }
+    }
+
+    private func parentUnlockCard(
+        _ override: ParentUnlockOverrideChildPresentation
+    ) -> some View {
+        EvKidCard(tone: .tinted, padding: 22) {
+            HStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 14).fill(EvlinKidColors.green100)
+                    Image(systemName: "lock.open.fill")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundStyle(EvlinKidColors.green700)
+                }
+                .frame(width: 48, height: 48)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("UNLOCKED BY PARENT")
+                        .font(.system(size: 11, weight: .heavy))
+                        .tracking(1)
+                        .foregroundStyle(EvlinKidColors.green700)
+                    Text("\(override.remainingMinutes) min left")
+                        .font(.system(size: 22, weight: .heavy))
+                        .foregroundStyle(EvlinKidColors.ink)
+                    Text("Screen time is available now")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(EvlinKidColors.ink3)
+                }
+                Spacer(minLength: 0)
+                EvKidChip("ACTIVE", tone: .green)
+            }
         }
     }
 

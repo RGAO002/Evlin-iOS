@@ -244,6 +244,22 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         defaults?.set(marker, forKey: "evlin.lastIntervalDidEnd")
         NSLog("[Evlin/Ext] intervalDidEnd %@", marker)
 
+        if raw.hasPrefix(ParentUnlockOverrideExpiry.activityPrefix) {
+            guard let owner = ExtensionConfig.childId else { return }
+            awaitBounded(traceContext: traceContext) { [weak self] in
+                let result = try? await ParentUnlockOverrideExpiry.reconcile(
+                    now: Date(),
+                    expectedOwner: owner,
+                    scheduler: DeviceActivityCenterScheduler()
+                )
+                guard case .expired? = result,
+                      let shields = self?.loadShields()
+                else { return }
+                self?.recomputeAndApplyShields(shields)
+            }
+            return
+        }
+
         if raw.hasPrefix(MeteringRouteNamespace.prefix) {
             let project: ([String: ShieldRecord]) -> Void = { [weak self] shields in
                 self?.recomputeAndApplyShields(shields)

@@ -57,6 +57,17 @@ final class DiagnosticDeviceActivitySchedulerTests: XCTestCase {
         XCTAssertEqual(fixture.journal.read().map(\.operation), [.start, .stopNames])
     }
 
+    func testParentUnlockExpiryUsesDedicatedDiagnosticNamespace() throws {
+        let fixture = makeFixture()
+        let expiry = DeviceActivityName(
+            "evlin.parent-unlock-expiry.aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.7"
+        )
+
+        try fixture.scheduler.startMonitoring(expiry, during: fixture.schedule)
+
+        XCTAssertEqual(fixture.journal.read().last?.namespace, "parent_unlock_expiry")
+    }
+
     func testGlobalStopIsRecordedAsHighSeverityAndDelegated() {
         let fixture = makeFixture()
 

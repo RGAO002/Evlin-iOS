@@ -61,6 +61,7 @@ struct BigKidRootView: View {
     @State private var reflectionPath = NavigationPath()
     @State private var showLockListGate = false
     @State private var showParentControls = false
+    @State private var parentUnlockOverride: ParentUnlockOverrideChildPresentation?
 
     /// Screen Time (FamilyControls) authorization can be revoked mid-life by
     /// iOS; when it is, nothing can count or lock while everything looks
@@ -88,6 +89,7 @@ struct BigKidRootView: View {
             switch BigKidRouter.route(state) {
             case .home:
                 BigKidHomeView(
+                    parentUnlockOverride: parentUnlockOverride,
                     onTaskTap: { task in taskNav = task },
                     onManageApps: { showLockListGate = true },
                     onCommandDelivery: commandDeliveryDebugAction
@@ -166,6 +168,7 @@ struct BigKidRootView: View {
         .task {
             notifMonitor.refresh()
             refreshScreenTimeAuthorization()
+            refreshParentUnlockOverride()
         }
         // The system syncs the real authorization state asynchronously after
         // launch; the publisher delivers the truth even when the snapshot
@@ -190,6 +193,7 @@ struct BigKidRootView: View {
             if newPhase == .active {
                 notifMonitor.refresh()
                 refreshScreenTimeAuthorization()
+                refreshParentUnlockOverride()
             }
         }
         .onAppear {
@@ -204,6 +208,7 @@ struct BigKidRootView: View {
             Task { await poller.refreshNow() }
             Task { await AppMeteringEntry.shared.recoverIfConfigured() }
             ensureCommandPollerRunning()
+            refreshParentUnlockOverride()
         }
         .onDisappear { poller.stop() }
         .onChange(of: scenePhase) { _, new in
@@ -222,6 +227,9 @@ struct BigKidRootView: View {
             // Same belt for in-app events: any state invalidation implies
             // someone expects the poller to be alive — make it true.
             poller.start()
+        }
+        .onReceive(Timer.publish(every: 30, on: .main, in: .common).autoconnect()) { _ in
+            refreshParentUnlockOverride()
         }
         #if DEBUG
         .overlay(alignment: .bottom) {
@@ -372,6 +380,7 @@ struct BigKidRootView: View {
         DefaultLockGroupStore.clearAllListsForIdentityTeardown()
         LocalAliasStore.shared.removeAllAliases()
         ManagedSettingsStore().clearAllSettings()
+        ParentUnlockOverrideExpiry.clearForIdentityTeardown()
 
         CommandPoller.shared.stop()
         poller.stop()
@@ -402,6 +411,17 @@ struct BigKidRootView: View {
     private func refreshScreenTimeAuthorization() {
         screenTimeAuthorizationOff =
             AuthorizationCenter.shared.authorizationStatus != .approved
+    }
+
+    private func refreshParentUnlockOverride(now: Date = Date()) {
+        let snapshot = try? ParentUnlockOverrideStore.shared.read(
+            expectedOwner: childDeviceID
+        )
+        parentUnlockOverride = ParentUnlockOverrideChildPresentation.active(
+            snapshot: snapshot,
+            now: now,
+            expectedOwner: childDeviceID
+        )
     }
 
     private func ensureCommandPollerRunning() {

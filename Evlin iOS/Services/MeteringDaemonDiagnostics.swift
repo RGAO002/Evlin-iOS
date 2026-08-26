@@ -1053,6 +1053,9 @@ nonisolated final class DiagnosticDeviceActivityScheduler: DeviceActivitySchedul
     private static func namespace(for activityName: String) -> String {
         if activityName.hasPrefix("evlin.limit.v2.") { return "per_app_v2" }
         if activityName.hasPrefix("evlin.limit.window.") { return "per_app_legacy" }
+        if activityName.hasPrefix(ParentUnlockOverrideExpiry.activityPrefix) {
+            return "parent_unlock_expiry"
+        }
         if activityName.hasPrefix("evlin.earned.") { return "earned" }
         if activityName == "evlin.bigkid.freeplay" { return "legacy_device_total" }
         if activityName.hasPrefix("evlin.command.") { return "command" }

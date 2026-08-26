@@ -223,6 +223,7 @@ final class AuthService {
 
     func signOutLocally() {
         KeychainStore.shared.clear()
+        ParentUnlockOverrideExpiry.clearForIdentityTeardown()
         DeviceIdentity.shared.clear()
         Self.clearFamilyScopedLocalState()
         state = .signedOut
@@ -244,6 +245,7 @@ final class AuthService {
             appGroupDefaults: appGroupDefaults,
             appLimitStore: appLimitStore
         ) else { return }
+        ParentUnlockOverrideExpiry.clearForIdentityTeardown()
         if let teardownEarned {
             teardownEarned()
         } else {

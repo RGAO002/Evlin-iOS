@@ -514,6 +514,11 @@ enum NSELockApplier {
                 guard disposition == .applied || disposition == .replayed else {
                     return nil
                 }
+                _ = try await ParentUnlockOverrideExpiry.reconcile(
+                    now: Date(),
+                    expectedOwner: fetchedDeviceID,
+                    scheduler: DeviceActivityCenterScheduler()
+                )
                 return Outcome(
                     verb: cmd.action.rawValue,
                     displayName: cmd.action == .parentUnlockOverrideCancel

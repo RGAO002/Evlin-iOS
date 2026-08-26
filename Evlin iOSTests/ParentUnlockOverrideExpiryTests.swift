@@ -94,7 +94,7 @@ final class ParentUnlockOverrideExpiryTests: XCTestCase {
         )
     }
 
-    func testArmUsesPersistedServerDeadlineAndZeroEventSchedule() async throws {
+    func testExpiryActivityUsesResolvedServerDeadline() async throws {
         let scheduler = ParentUnlockExpirySchedulerSpy()
         let staleName = ParentUnlockOverrideExpiry.activityName(
             ownerID: ownerID,
@@ -218,6 +218,74 @@ final class ParentUnlockOverrideExpiryTests: XCTestCase {
         XCTAssertEqual(try harness.store.read(expectedOwner: ownerID)?.status, .active)
     }
 
+    func testExpiryReconcilerIsIdempotentAcrossDAMAndForeground() async throws {
+        let harness = try makeHarness()
+        _ = try harness.store.ingest(
+            envelope(revision: 7),
+            expectedOwner: ownerID,
+            now: startedAt
+        )
+        let scheduler = ParentUnlockExpirySchedulerSpy()
+        scheduler.seed(ParentUnlockOverrideExpiry.activityName(ownerID: ownerID, revision: 7))
+        let projection = ExpiryProjectionRecorder()
+
+        let dam = try await ParentUnlockOverrideExpiry.reconcileAndProject(
+            now: expiresAt,
+            expectedOwner: ownerID,
+            store: harness.store,
+            scheduler: scheduler,
+            calendar: utcCalendar()
+        ) {
+            await projection.record()
+        }
+        let foreground = try await ParentUnlockOverrideExpiry.reconcileAndProject(
+            now: expiresAt.addingTimeInterval(30),
+            expectedOwner: ownerID,
+            store: harness.store,
+            scheduler: scheduler,
+            calendar: utcCalendar()
+        ) {
+            await projection.record()
+        }
+
+        XCTAssertEqual(dam, .expired(revision: 7))
+        XCTAssertEqual(foreground, .unchanged)
+        let projectionCount = await projection.count
+        XCTAssertEqual(projectionCount, 1)
+        XCTAssertEqual(try harness.store.read(expectedOwner: ownerID)?.status, .expired)
+    }
+
+    func testForceQuitPathExpiresAndReappliesLatestRules() async throws {
+        let harness = try makeHarness()
+        _ = try harness.store.ingest(
+            envelope(revision: 7),
+            expectedOwner: ownerID,
+            now: startedAt
+        )
+        let scheduler = ParentUnlockExpirySchedulerSpy()
+        scheduler.seed(ParentUnlockOverrideExpiry.activityName(ownerID: ownerID, revision: 7))
+        let projection = ExpiryProjectionRecorder()
+
+        let result = try await ParentUnlockOverrideExpiry.reconcileAndProject(
+            now: expiresAt,
+            expectedOwner: ownerID,
+            store: harness.store,
+            scheduler: scheduler,
+            calendar: utcCalendar()
+        ) {
+            let status = try? harness.store.read(expectedOwner: self.ownerID)?.status
+            await projection.record(status: status)
+        }
+
+        XCTAssertEqual(result, .expired(revision: 7))
+        let projectedStatuses = await projection.statuses
+        XCTAssertEqual(projectedStatuses, [.expired])
+        XCTAssertEqual(
+            scheduler.stoppedNames,
+            [[ParentUnlockOverrideExpiry.activityName(ownerID: ownerID, revision: 7)]]
+        )
+    }
+
     private func snapshot(
         revision: Int64,
         status: ParentUnlockOverrideSnapshot.Status = .active,
@@ -263,6 +331,18 @@ final class ParentUnlockOverrideExpiryTests: XCTestCase {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         return calendar
+    }
+}
+
+private actor ExpiryProjectionRecorder {
+    private(set) var count = 0
+    private(set) var statuses: [ParentUnlockOverrideSnapshot.Status] = []
+
+    func record(status: ParentUnlockOverrideSnapshot.Status? = nil) {
+        count += 1
+        if let status {
+            statuses.append(status)
+        }
     }
 }
 

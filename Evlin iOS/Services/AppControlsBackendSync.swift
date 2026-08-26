@@ -466,6 +466,7 @@ enum AppControlsIdentityGuard {
         let stamped = defaults?.string(forKey: ownerKey)
         defer { defaults?.set(childDeviceID.uuidString, forKey: ownerKey) }
         guard stamped != childDeviceID.uuidString else { return }
+        ParentUnlockOverrideExpiry.clearForIdentityTeardown()
         purge(reason: stamped == nil ? "unstamped_selection" : "identity_changed")
     }
 

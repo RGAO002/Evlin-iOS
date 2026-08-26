@@ -163,6 +163,49 @@ nonisolated enum ParentUnlockOverrideExpiry {
         }
     }
 
+    @discardableResult
+    static func reconcileAndProject(
+        now: Date,
+        expectedOwner: UUID,
+        store: ParentUnlockOverrideStore = .shared,
+        scheduler: any DeviceActivityScheduling,
+        calendar: Calendar = .current,
+        project: () async -> Void
+    ) async throws -> Result {
+        let result = try await reconcile(
+            now: now,
+            expectedOwner: expectedOwner,
+            store: store,
+            scheduler: scheduler,
+            calendar: calendar
+        )
+        if case .expired = result {
+            await project()
+        }
+        return result
+    }
+
+    static func clearForIdentityTeardown(
+        store: ParentUnlockOverrideStore = .shared,
+        scheduler: any DeviceActivityScheduling
+    ) async throws {
+        try store.clearForIdentityTeardown()
+        let names = try await liveActivityNames(scheduler)
+            .filter { $0.hasPrefix(activityPrefix) }
+            .sorted()
+        try await stop(names, scheduler: scheduler)
+    }
+
+    static func clearForIdentityTeardown() {
+        try? ParentUnlockOverrideStore.shared.clearForIdentityTeardown()
+        Task {
+            try? await clearForIdentityTeardown(
+                store: .shared,
+                scheduler: DeviceActivityCenterScheduler()
+            )
+        }
+    }
+
     private static func liveActivityNames(
         _ scheduler: any DeviceActivityScheduling
     ) async throws -> Set<String> {
@@ -218,5 +261,36 @@ nonisolated enum ParentUnlockOverrideExpiry {
             intervalEnd: calendar.dateComponents([.hour, .minute, .second], from: end),
             repeats: false
         )
+    }
+}
+
+nonisolated struct ParentUnlockOverrideChildPresentation: Equatable, Sendable {
+    let remainingMinutes: Int
+    let label: String
+
+    static func active(
+        snapshot: ParentUnlockOverrideSnapshot?,
+        now: Date,
+        expectedOwner: UUID
+    ) -> Self? {
+        guard let snapshot,
+              snapshot.childDeviceID == expectedOwner,
+              snapshot.status == .active,
+              !snapshot.envelope.cancelled,
+              now < snapshot.expiresAt
+        else { return nil }
+
+        return Self(
+            remainingMinutes: max(1, Int(ceil(snapshot.expiresAt.timeIntervalSince(now) / 60))),
+            label: "Unlocked by parent"
+        )
+    }
+
+    static func shouldShowTimeUp(
+        allTasksDone: Bool,
+        minutesLeft: Int,
+        activeOverride: Self?
+    ) -> Bool {
+        allTasksDone && minutesLeft <= 0 && activeOverride == nil
     }
 }

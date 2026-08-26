@@ -98,6 +98,14 @@ nonisolated final class ParentUnlockOverrideStore: @unchecked Sendable {
         }
     }
 
+    func clearForIdentityTeardown() throws {
+        try withLock {
+            let url = try resolvedFileURL()
+            guard try fileIO.read(from: url) != nil else { return }
+            try fileIO.remove(at: url)
+        }
+    }
+
     private func resolvedFileURL() throws -> URL {
         if let fileURL { return fileURL }
         guard let container = FileManager.default.containerURL(

@@ -266,6 +266,7 @@ enum AppLimitRecoveryTrigger {
 
     static func silentRemoteNotification() async {
         await convergeCurrentIdentity()
+        await reconcileParentUnlockOverrideExpiry()
         await hydrateFromSnapshotIfConfigured()
         await AppLimitOwnerRecoveryEntry.shared.recoverIfConfigured()
         await AppLimitEffectRecoveryEntry.shared.recoverIfConfigured()
@@ -308,10 +309,22 @@ enum AppLimitRecoveryTrigger {
         reapplyRestrictions: () async -> Void
     ) async {
         await convergeIdentity()
+        await reconcileParentUnlockOverrideExpiry()
         await recoverOwnerWork()
         await recoverEffects()
         await reconcileRules()
         await reapplyRestrictions()
+    }
+
+    private static func reconcileParentUnlockOverrideExpiry() async {
+        guard let owner = MeteringOwnerMirror.current() else { return }
+        _ = try? await ParentUnlockOverrideExpiry.reconcileAndProject(
+            now: Date(),
+            expectedOwner: owner,
+            scheduler: DeviceActivityCenterScheduler()
+        ) {
+            await ActiveLockStore.shared.reapplyCurrentRestrictions()
+        }
     }
 
     /// Polling normally processes durable work only. A physically impossible
@@ -569,6 +582,13 @@ final class CommandPoller {
                 // callbacks can be delayed or missed. Polling is our foreground
                 // fallback so timed shields/blocks don't stay applied forever.
                 _ = await ActiveLockStore.shared.sweepExpired()
+                _ = try? await ParentUnlockOverrideExpiry.reconcileAndProject(
+                    now: Date(),
+                    expectedOwner: deviceID,
+                    scheduler: DeviceActivityCenterScheduler()
+                ) {
+                    await ActiveLockStore.shared.reapplyCurrentRestrictions()
+                }
                 guard isExpectedDeviceCurrent(deviceID) else {
                     coalescePollForCurrentIdentity(expectedDeviceID: deviceID)
                     continue
