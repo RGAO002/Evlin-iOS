@@ -185,6 +185,27 @@ nonisolated enum ParentUnlockOverrideExpiry {
         return result
     }
 
+    /// DeviceActivity already ended this exact one-shot activity. Expire the
+    /// matching durable mirror without consulting the daemon again so the
+    /// synchronous extension callback never waits on XPC.
+    static func expireFromActivityCallback(
+        activityName: String,
+        now: Date,
+        expectedOwner: UUID,
+        store: ParentUnlockOverrideStore = .shared
+    ) throws -> Result {
+        guard let identity = callbackIdentity(activityName),
+              identity.ownerID == expectedOwner,
+              let snapshot = try store.read(expectedOwner: expectedOwner),
+              snapshot.revision == identity.revision,
+              now >= snapshot.expiresAt,
+              try store.expireIfNeeded(expectedOwner: expectedOwner, now: now)
+        else {
+            return .unchanged
+        }
+        return .expired(revision: identity.revision)
+    }
+
     static func clearForIdentityTeardown(
         store: ParentUnlockOverrideStore = .shared,
         scheduler: any DeviceActivityScheduling
@@ -215,6 +236,18 @@ nonisolated enum ParentUnlockOverrideExpiry {
             throw ExpiryError.gatewayUnavailable
         }
         return names
+    }
+
+    private static func callbackIdentity(
+        _ activityName: String
+    ) -> (ownerID: UUID, revision: Int64)? {
+        guard activityName.hasPrefix(activityPrefix) else { return nil }
+        let suffix = activityName.dropFirst(activityPrefix.count)
+        guard let separator = suffix.lastIndex(of: "."),
+              let ownerID = UUID(uuidString: String(suffix[..<separator])),
+              let revision = Int64(suffix[suffix.index(after: separator)...])
+        else { return nil }
+        return (ownerID, revision)
     }
 
     private static func stop(

@@ -286,6 +286,53 @@ final class ParentUnlockOverrideExpiryTests: XCTestCase {
         )
     }
 
+    func testDAMExpiryCallbackCommitsLocallyWithoutConsultingScheduler() throws {
+        let harness = try makeHarness()
+        _ = try harness.store.ingest(
+            envelope(revision: 7),
+            expectedOwner: ownerID,
+            now: startedAt
+        )
+        let activityName = ParentUnlockOverrideExpiry.activityName(
+            ownerID: ownerID,
+            revision: 7
+        )
+
+        let result = try ParentUnlockOverrideExpiry.expireFromActivityCallback(
+            activityName: activityName,
+            now: expiresAt,
+            expectedOwner: ownerID,
+            store: harness.store
+        )
+
+        XCTAssertEqual(result, .expired(revision: 7))
+        XCTAssertEqual(try harness.store.read(expectedOwner: ownerID)?.status, .expired)
+    }
+
+    func testLateDAMExpiryCallbackCannotExpireNewerOverrideRevision() throws {
+        let harness = try makeHarness()
+        _ = try harness.store.ingest(
+            envelope(revision: 8),
+            expectedOwner: ownerID,
+            now: startedAt
+        )
+        let staleActivity = ParentUnlockOverrideExpiry.activityName(
+            ownerID: ownerID,
+            revision: 7
+        )
+
+        let result = try ParentUnlockOverrideExpiry.expireFromActivityCallback(
+            activityName: staleActivity,
+            now: expiresAt,
+            expectedOwner: ownerID,
+            store: harness.store
+        )
+
+        XCTAssertEqual(result, .unchanged)
+        XCTAssertEqual(try harness.store.read(expectedOwner: ownerID)?.status, .active)
+        XCTAssertEqual(try harness.store.read(expectedOwner: ownerID)?.revision, 8)
+    }
+
     private func snapshot(
         revision: Int64,
         status: ParentUnlockOverrideSnapshot.Status = .active,

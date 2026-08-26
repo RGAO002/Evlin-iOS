@@ -246,16 +246,14 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
 
         if raw.hasPrefix(ParentUnlockOverrideExpiry.activityPrefix) {
             guard let owner = ExtensionConfig.childId else { return }
-            awaitBounded(traceContext: traceContext) { [weak self] in
-                let result = try? await ParentUnlockOverrideExpiry.reconcile(
-                    now: Date(),
-                    expectedOwner: owner,
-                    scheduler: DeviceActivityCenterScheduler()
-                )
-                guard case .expired? = result,
-                      let shields = self?.loadShields()
-                else { return }
-                self?.recomputeAndApplyShields(shields)
+            let result = try? ParentUnlockOverrideExpiry.expireFromActivityCallback(
+                activityName: raw,
+                now: Date(),
+                expectedOwner: owner
+            )
+            if case .expired? = result,
+               let shields = loadShields() {
+                recomputeAndApplyShields(shields)
             }
             return
         }
