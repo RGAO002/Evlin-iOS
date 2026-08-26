@@ -5,12 +5,13 @@ Date: 2026-08-26
 ## Immutable inputs
 
 - Backend branch: `feature/master-unlock-override`
-- Backend tested SHA: `4fc3a6c`
+- Backend tested SHA: `fe5e6ff`
 - iOS branch: `visual-v2`
-- iOS tested SHA: `2eeb770`
+- iOS tested SHA: `cd2f17b`
 - Backend creation flag: off by default (`master_unlock_creation_enabled=false`)
-- Signed archive: `/Users/fred/Downloads/Evlin-visual-v2-2eeb770.xcarchive`
-- Development IPA: `/Users/fred/Downloads/Evlin-visual-v2-2eeb770/Evlin iOS.ipa`
+- Signed archive: `/Users/fred/Downloads/Evlin-visual-v2-cd2f17b.xcarchive`
+- Development IPA: `/Users/fred/Downloads/Evlin-visual-v2-cd2f17b/Evlin iOS.ipa`
+- IPA SHA-256: `abbc2ee3f95082532c6dfb1627bd87d5ea3031a7f87f25c023fbb4cde659f026`
 - App version/build: `1.1 (2)`
 - Signing team: `D9FM36P37F`
 
@@ -21,12 +22,13 @@ production main branch by this acceptance record.
 
 | Layer | Evidence | Result |
 | --- | --- | --- |
-| Backend focused | Override model, API, command ordering, expiry, reflection/task/app-limit integration | 118 passed |
-| Backend adjacent | Selected set, earned time, task lock, app limit, command delivery, pairing, account deletion, reflection | 349 passed; 18 baseline failures reproduced at `dd61ac7` |
+| Backend focused | Override model, API, delivery, expiry, authority migration, reflection/task/app-limit integration | 110 passed |
+| Backend adjacent | Override contract and adjacent transition families | 191 passed; a broader legacy suite retained 17 previously recorded baseline failures in untouched files |
 | Backend migration | Feature migration upgrade/downgrade/upgrade against PostgreSQL | 1 passed |
 | Alembic topology | `2026_08_25_child_unlock_override` | one head |
-| iOS feature/UI | Master projection/operation, override store/wire/enforcement/expiry/identity teardown, app-limit slot accounting, command poller, phone snapshots | 185 passed |
-| iOS metering isolation | Authoritative correction, conservative resume, rollover, cold reopen, production integration, app-limit pause/recovery, task/reflection locks | 190 passed |
+| iOS focused enforcement | Poll/NSE command preparation, durable manual-source mutation, absolute expiry, callback recovery, slot accounting | 35 passed |
+| iOS feature/UI | Master projection/operation, override store/wire/enforcement/expiry/identity teardown, app-limit and command-delivery families, phone snapshots | 378 passed |
+| iOS metering isolation | Authoritative correction, conservative resume, rollover, cold reopen, production integration, app-limit pause/recovery, task/reflection locks | 236 passed |
 | iPad visual gate | All Profile snapshots on iPad A16 | passed |
 | Release build | Generic iOS Release, main app and embedded extensions | passed |
 | Signed archive/export | Development-signed archive and IPA from tested SHA | passed |
@@ -51,10 +53,12 @@ the API smoke test below succeeds.
 
 ## Pre-device smoke test
 
-- [ ] Deploy backend SHA `4fc3a6c` to a non-production service.
+- [ ] Deploy backend SHA `fe5e6ff` to a non-production service.
 - [ ] Confirm the database reports one Alembic head.
-- [ ] Create a 15-minute override, read it back, cancel it, then create a
-      one-minute override and observe expiry commands/receipts.
+- [ ] Create a 15-minute override, read it back, and cancel it; create an
+      until-tomorrow override and confirm the returned child-local midnight.
+- [ ] Run the staging expiry worker against a controlled due row and observe
+      the revisioned expiry commands/receipts.
 - [ ] Confirm a stale lower revision cannot replace a newer desired state.
 - [ ] Confirm Reflection remains authoritative while an override is active.
 
