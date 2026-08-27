@@ -140,6 +140,16 @@ nonisolated enum MasterLockOperationStore {
         defaults.removeObject(forKey: key(childProfileID))
     }
 
+    static func clearIfMatching(
+        _ operation: MasterLockOperation,
+        defaults: UserDefaults = .standard
+    ) {
+        guard load(childProfileID: operation.childProfileID, defaults: defaults) == operation else {
+            return
+        }
+        clear(childProfileID: operation.childProfileID, defaults: defaults)
+    }
+
     private static func key(_ childProfileID: UUID) -> String {
         keyPrefix + childProfileID.uuidString.lowercased()
     }
@@ -153,6 +163,7 @@ nonisolated enum MasterLockOperationResumeAction: Equatable, Sendable {
 nonisolated enum MasterLockConfirmationResult: Equatable, Sendable {
     case projectionChanged(MasterLockProjection, MasterLockPresentation)
     case submitted(MasterLockOperation, MasterLockProjection)
+    case submissionFailed(MasterLockOperation, MasterLockProjection, String)
 }
 
 nonisolated enum MasterLockOperationCoordinator {
@@ -170,6 +181,7 @@ nonisolated enum MasterLockOperationCoordinator {
     ) async throws -> MasterLockConfirmationResult {
         let current = try await refresh()
         guard current.matchesConfirmation(of: operation) else {
+            MasterLockOperationStore.clearIfMatching(operation, defaults: defaults)
             return .projectionChanged(
                 current,
                 MasterLockPresentation.reduce(projection: current)
@@ -177,7 +189,12 @@ nonisolated enum MasterLockOperationCoordinator {
         }
 
         MasterLockOperationStore.save(operation, defaults: defaults)
-        let response = try await submit(operation)
+        let response: MasterLockControlResponse
+        do {
+            response = try await submit(operation)
+        } catch {
+            return .submissionFailed(operation, current, error.localizedDescription)
+        }
         let submitted = try operation.accepting(response)
         MasterLockOperationStore.save(submitted, defaults: defaults)
         return .submitted(submitted, response.projection)

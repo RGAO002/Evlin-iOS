@@ -181,6 +181,125 @@ final class MasterLockOperationTests: XCTestCase {
         )
     }
 
+    func testSubmissionFailureReturnsRetryableOperationInsteadOfThrowing() async throws {
+        let defaults = try makeDefaults()
+        let projection = makeProjection(
+            digest: "digest-5",
+            revision: 5,
+            devices: [makeDevice(id: phoneID, name: "Phone", earnedExhausted: true)]
+        )
+        let operation = MasterLockOperation.prepared(
+            projection: projection,
+            operationID: operationID,
+            requestedAction: .unlockOverride(.minutes(30))
+        )
+
+        let result: MasterLockConfirmationResult?
+        do {
+            result = try await MasterLockOperationCoordinator.confirm(
+                operation: operation,
+                defaults: defaults,
+                refresh: { projection },
+                submit: { _ in throw URLError(.badServerResponse) }
+            )
+        } catch {
+            result = nil
+        }
+
+        guard case .submissionFailed(let retained, let returnedProjection, let message) = result else {
+            return XCTFail("A failed POST must remain an immediately retryable operation")
+        }
+        XCTAssertEqual(retained, operation)
+        XCTAssertEqual(returnedProjection, projection)
+        XCTAssertFalse(message.isEmpty)
+        let reconciliation = MasterLockOperationReconciliation.evaluate(
+            operation: retained,
+            projection: returnedProjection
+        )
+        guard case .delivery(let delivery) = reconciliation.presentation else {
+            return XCTFail("A failed POST must show the delivery retry control")
+        }
+        XCTAssertTrue(delivery.canRetry)
+        XCTAssertEqual(delivery.waitingDeviceNames, ["Phone"])
+        XCTAssertEqual(
+            MasterLockOperationStore.load(childProfileID: childID, defaults: defaults),
+            operation
+        )
+    }
+
+    func testRetryClearsPersistedOperationWhenProjectionChanged() async throws {
+        let defaults = try makeDefaults()
+        let original = makeProjection(
+            digest: "digest-5",
+            revision: 5,
+            devices: [makeDevice(id: phoneID, name: "Phone", earnedExhausted: true)]
+        )
+        let changed = makeProjection(
+            digest: "digest-6",
+            revision: 6,
+            devices: [makeDevice(id: phoneID, name: "Phone")]
+        )
+        let operation = MasterLockOperation.prepared(
+            projection: original,
+            operationID: operationID,
+            requestedAction: .unlockOverride(.minutes(30))
+        )
+        MasterLockOperationStore.save(operation, defaults: defaults)
+
+        let result = try await MasterLockOperationCoordinator.confirm(
+            operation: operation,
+            defaults: defaults,
+            refresh: { changed },
+            submit: { _ in throw URLError(.badServerResponse) }
+        )
+
+        guard case .projectionChanged(let projection, _) = result else {
+            return XCTFail("Expected the stale retry to rebuild from the current projection")
+        }
+        XCTAssertEqual(projection, changed)
+        XCTAssertNil(
+            MasterLockOperationStore.load(childProfileID: childID, defaults: defaults),
+            "The stale persisted operation must not auto-submit on the next refresh"
+        )
+    }
+
+    func testStaleRetryDoesNotClearAnewerPersistedOperation() async throws {
+        let defaults = try makeDefaults()
+        let original = makeProjection(
+            digest: "digest-5",
+            revision: 5,
+            devices: [makeDevice(id: phoneID, name: "Phone", earnedExhausted: true)]
+        )
+        let changed = makeProjection(
+            digest: "digest-6",
+            revision: 6,
+            devices: [makeDevice(id: phoneID, name: "Phone")]
+        )
+        let stale = MasterLockOperation.prepared(
+            projection: original,
+            operationID: operationID,
+            requestedAction: .unlockOverride(.minutes(30))
+        )
+        let newer = MasterLockOperation.prepared(
+            projection: changed,
+            operationID: UUID(),
+            requestedAction: .lockApps
+        )
+        MasterLockOperationStore.save(newer, defaults: defaults)
+
+        _ = try await MasterLockOperationCoordinator.confirm(
+            operation: stale,
+            defaults: defaults,
+            refresh: { changed },
+            submit: { _ in throw URLError(.badServerResponse) }
+        )
+
+        XCTAssertEqual(
+            MasterLockOperationStore.load(childProfileID: childID, defaults: defaults),
+            newer
+        )
+    }
+
     func testReconciliationUsesRevisionAndPerDeviceReceipts() {
         let operation = makeOperation(
             revision: 6,

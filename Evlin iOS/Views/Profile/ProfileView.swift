@@ -1241,6 +1241,17 @@ struct ProfileView: View {
                     ),
                     operation: submitted
                 )
+            case .submissionFailed(let retained, let projection, let message):
+                pendingMasterLockOperation = retained
+                masterLockProjection = projection
+                applyMasterLockReconciliation(
+                    MasterLockOperationReconciliation.evaluate(
+                        operation: retained,
+                        projection: projection
+                    ),
+                    operation: retained
+                )
+                masterLockError = message
             }
         } catch {
             pendingMasterLockOperation = MasterLockOperationStore.load(
