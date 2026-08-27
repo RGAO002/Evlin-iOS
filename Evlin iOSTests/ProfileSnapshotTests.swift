@@ -42,15 +42,16 @@ private struct SnapshotEnvironment {
             throw SnapshotFailure.unpinnedEnvironment
         }
 
-        switch (env["SIMULATOR_DEVICE_NAME"], env["SIMULATOR_MODEL_IDENTIFIER"]) {
-        case ("iPhone 17 Pro", "iPhone18,1"):
+        let simulatorName = env["SIMULATOR_DEVICE_NAME"] ?? ""
+        switch env["SIMULATOR_MODEL_IDENTIFIER"] {
+        case "iPhone18,1" where simulatorName.hasSuffix("iPhone 17 Pro"):
             return .init(
                 folder: "iPhone17Pro-iOS26.3.1-23D8133-en_US-light-AX2",
                 deviceName: "iPhone 17 Pro",
                 modelIdentifier: "iPhone18,1",
                 logicalSize: CGSize(width: 402, height: 874)
             )
-        case ("iPad (A16)", "iPad15,7"):
+        case "iPad15,7" where simulatorName.hasSuffix("iPad (A16)"):
             return .init(
                 folder: "iPadA16-iOS26.3.1-23D8133-en_US-light-AX2",
                 deviceName: "iPad (A16)",
