@@ -27,6 +27,22 @@ final class ParentUnlockOverrideExpiryTests: XCTestCase {
         XCTAssertEqual(schedule.intervalStart.timeZone, calendar.timeZone)
         XCTAssertEqual(schedule.intervalEnd.timeZone, calendar.timeZone)
     }
+
+    func testOneShotScheduleNeverEndsBeforeFractionalServerDeadline() throws {
+        let calendar = utcCalendar()
+        let start = Date(timeIntervalSince1970: 1_777_255_200.125)
+        let end = Date(timeIntervalSince1970: 1_777_256_100.979)
+
+        let schedule = ParentUnlockOverrideExpiry.scheduleForTesting(
+            start: start,
+            end: end,
+            calendar: calendar
+        )
+
+        let scheduledEnd = try XCTUnwrap(calendar.date(from: schedule.intervalEnd))
+        XCTAssertGreaterThanOrEqual(scheduledEnd, end)
+        XCTAssertLessThan(scheduledEnd.timeIntervalSince(end), 1)
+    }
     private let ownerID = UUID(uuidString: "AAAAAAAA-0000-0000-0000-000000000001")!
     private let otherOwnerID = UUID(uuidString: "BBBBBBBB-0000-0000-0000-000000000002")!
     private let operationID = UUID(uuidString: "CCCCCCCC-0000-0000-0000-000000000003")!

@@ -321,12 +321,18 @@ nonisolated enum ParentUnlockOverrideExpiry {
         end: Date,
         calendar: Calendar
     ) -> DeviceActivitySchedule {
+        // DeviceActivitySchedule stores whole-second components. Rounding a
+        // fractional server deadline down can fire the one-shot callback just
+        // before the durable override expires, after which it never retries.
+        let scheduledEnd = Date(
+            timeIntervalSinceReferenceDate: ceil(end.timeIntervalSinceReferenceDate)
+        )
         let components: Set<Calendar.Component> = [
             .calendar, .timeZone, .year, .month, .day, .hour, .minute, .second,
         ]
         return DeviceActivitySchedule(
             intervalStart: calendar.dateComponents(components, from: start),
-            intervalEnd: calendar.dateComponents(components, from: end),
+            intervalEnd: calendar.dateComponents(components, from: scheduledEnd),
             repeats: false
         )
     }
