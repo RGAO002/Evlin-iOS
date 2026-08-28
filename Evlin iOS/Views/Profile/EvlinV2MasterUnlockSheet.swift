@@ -53,30 +53,41 @@ struct EvlinV2MasterUnlockSheet: View {
                     }
 
                     restrictionSummary
-
-                    Button {
-                        onConfirm(selected)
-                    } label: {
-                        Text("Unlock for \(selected.label)")
-                            .font(EvlinV2ProfileTokens.font(15, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(maxWidth: .infinity, minHeight: 52)
-                            .background(RoundedRectangle(cornerRadius: 14).fill(EvlinV2ProfileTokens.accent))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Unlock apps for \(selected.label)")
-
-                    Button("Cancel", action: onCancel)
-                        .font(EvlinV2ProfileTokens.font(14, weight: .semibold))
-                        .foregroundStyle(EvlinV2ProfileTokens.textMuted)
-                        .frame(maxWidth: .infinity, minHeight: 44)
                 }
                 .padding(20)
+            }
+            .safeAreaInset(edge: .bottom) {
+                actionButtons
             }
             .navigationTitle("Unlock \(childName)'s apps?")
             .navigationBarTitleDisplayMode(.inline)
         }
-        .presentationDetents([.medium, .large])
+        .presentationDetents([.large])
+    }
+
+    private var actionButtons: some View {
+        VStack(spacing: 8) {
+            Button {
+                onConfirm(selected)
+            } label: {
+                Text("Unlock for \(selected.label)")
+                    .font(EvlinV2ProfileTokens.font(15, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, minHeight: 52)
+                    .background(RoundedRectangle(cornerRadius: 14).fill(EvlinV2ProfileTokens.accent))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Unlock apps for \(selected.label)")
+
+            Button("Cancel", action: onCancel)
+                .font(EvlinV2ProfileTokens.font(14, weight: .semibold))
+                .foregroundStyle(EvlinV2ProfileTokens.textMuted)
+                .frame(maxWidth: .infinity, minHeight: 44)
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 12)
+        .padding(.bottom, 8)
+        .background(EvlinV2ProfileTokens.surface)
     }
 
     private var restrictionSummary: some View {
