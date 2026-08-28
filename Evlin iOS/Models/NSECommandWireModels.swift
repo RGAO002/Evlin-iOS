@@ -27,6 +27,7 @@ nonisolated struct NSEWireCommand: Decodable {
             listName: poll.target.list_name,
             listID: poll.target.list_id.flatMap(UUID.init(uuidString:)),
             categoryHint: categoryHint,
+            targetKey: poll.target.target_key,
             targetAll: poll.target.target_all ?? false,
             allSelected: poll.target.all_selected,
             defaultLockGroup: poll.target.default_lock_group,
@@ -180,6 +181,7 @@ nonisolated struct NSEWireTarget: Decodable {
     let list_id: String?
     let has_pending_blob: Bool?
     let category_hint: String?
+    let target_key: String?
     let target_all: Bool?
     let all_selected: Bool?
     let default_lock_group: Bool?
@@ -202,6 +204,7 @@ nonisolated struct NSEWireTarget: Decodable {
         case has_pending_blob
         case category_hint
         case categoryHint
+        case target_key
         case target_all
         case all_selected
         case default_lock_group
@@ -231,6 +234,7 @@ nonisolated struct NSEWireTarget: Decodable {
         has_pending_blob = try c.decodeIfPresent(Bool.self, forKey: .has_pending_blob)
         category_hint = try c.decodeIfPresent(String.self, forKey: .category_hint)
             ?? c.decodeIfPresent(String.self, forKey: .categoryHint)
+        target_key = try c.decodeIfPresent(String.self, forKey: .target_key)
         target_all = try c.decodeIfPresent(Bool.self, forKey: .target_all)
         all_selected = try c.decodeIfPresent(Bool.self, forKey: .all_selected)
         default_lock_group = try c.decodeIfPresent(Bool.self, forKey: .default_lock_group)

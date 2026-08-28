@@ -477,7 +477,6 @@ nonisolated struct ManualLockButtonPresentation: Equatable {
 }
 
 nonisolated enum MasterLockPresentation: Equatable, Sendable {
-    case hiddenForReflection
     case updating
     case lockApps
     case unlockDirect
@@ -490,9 +489,6 @@ nonisolated enum MasterLockPresentation: Equatable, Sendable {
         projection: MasterLockProjection,
         operation: MasterLockOperation? = nil
     ) -> MasterLockPresentation {
-        if projection.devices.contains(where: \.reflectionActive) {
-            return .hiddenForReflection
-        }
         guard !projection.devices.isEmpty,
               projection.devices.allSatisfy(\.identityVerified)
         else {

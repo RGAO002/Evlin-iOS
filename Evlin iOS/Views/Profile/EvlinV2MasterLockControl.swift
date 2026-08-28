@@ -6,7 +6,6 @@ nonisolated struct EvlinV2MasterLockAccessibility: Equatable, Sendable {
 
     static func describe(_ presentation: MasterLockPresentation) -> Self {
         switch presentation {
-        case .hiddenForReflection: Self(label: nil, enabled: false)
         case .updating: Self(label: "Updating devices", enabled: false)
         case .lockApps: Self(label: "Lock apps", enabled: true)
         case .unlockDirect, .unlockWithDuration: Self(label: "Unlock apps", enabled: true)
@@ -28,37 +27,31 @@ struct EvlinV2MasterLockControl: View {
     let onRetry: () -> Void
 
     var body: some View {
-        if case .hiddenForReflection = presentation {
-            EmptyView()
-        } else {
-            VStack(spacing: 8) {
-                controlButton
-                if let status = statusCopy {
-                    HStack(alignment: .top, spacing: 8) {
-                        Image(systemName: status.icon)
-                            .font(.system(size: 12, weight: .semibold))
-                        Text(status.text)
-                            .font(EvlinV2ProfileTokens.font(11, weight: .medium))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .foregroundStyle(status.color)
-                }
-                if let errorMessage, !errorMessage.isEmpty {
-                    Text(errorMessage)
+        VStack(spacing: 8) {
+            controlButton
+            if let status = statusCopy {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: status.icon)
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(status.text)
                         .font(EvlinV2ProfileTokens.font(11, weight: .medium))
-                        .foregroundStyle(EvlinV2ProfileTokens.danger)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .foregroundStyle(status.color)
             }
-            .accessibilityElement(children: .contain)
+            if let errorMessage, !errorMessage.isEmpty {
+                Text(errorMessage)
+                    .font(EvlinV2ProfileTokens.font(11, weight: .medium))
+                    .foregroundStyle(EvlinV2ProfileTokens.danger)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
+        .accessibilityElement(children: .contain)
     }
 
     @ViewBuilder
     private var controlButton: some View {
         switch presentation {
-        case .hiddenForReflection:
-            EmptyView()
         case .updating:
             button(title: "Updating devices", icon: "arrow.triangle.2.circlepath", tone: .neutral, enabled: false) {}
         case .lockApps:

@@ -6,6 +6,116 @@ import XCTest
 /// executor's token-byte selection; real shield application remains device QA.
 @MainActor
 final class CommandCatalogPayloadTests: XCTestCase {
+    func testReflectionCommandUsesScopedTargetKeyAcrossPollAndNSE() throws {
+        let json = """
+        {
+          "command_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          "action": "shield",
+          "tier": "all",
+          "target": {
+            "target_all": true,
+            "target_key": "reflection:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            "target_child_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            "target_display": "All Apps",
+            "original_request": "reflection lockdown",
+            "has_pending_blob": false
+          },
+          "duration_minutes": null,
+          "issued_at": "2026-08-28T12:00:00Z"
+        }
+        """
+
+        let poll = try decodePollCommand(json)
+        let pollCommand = CommandPoller.lockCommand(from: poll)
+        let nseCommand = try NSECommandWireDecoder.decode(Data(json.utf8))
+
+        XCTAssertEqual(
+            pollCommand.target.targetKey,
+            "reflection:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        )
+        XCTAssertEqual(nseCommand.target.targetKey, pollCommand.target.targetKey)
+
+        let record = try ActionExecutor.shared.buildShieldRecord(
+            from: pollCommand,
+            blob: nil,
+            persistDefaultLockGroupIdentity: false
+        )
+        XCTAssertEqual(
+            record.recordKey,
+            "all:reflection:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        )
+        XCTAssertEqual(record.tier, .allApps)
+        XCTAssertTrue(record.webOpen)
+
+        let localRecord = ReflectionLockRecordFactory.make(
+            rid: UUID(uuidString: "cccccccc-cccc-cccc-cccc-cccccccccccc")!,
+            expiresAt: Date(timeIntervalSince1970: 2_000),
+            childID: UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!
+        )
+        XCTAssertEqual(localRecord.recordKey, record.recordKey)
+    }
+
+    func testReflectionUnshieldPreservesUnrelatedTaskShield() async throws {
+        let childID = UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!
+        let store = ActiveLockStore()
+        let reflection = ReflectionLockRecordFactory.make(
+            rid: UUID(),
+            expiresAt: Date().addingTimeInterval(1_200),
+            childID: childID
+        )
+        let taskRecord = ShieldRecord(
+            recordKey: "savedList:task-set",
+            tier: .savedList,
+            targetKey: "task-set",
+            displayName: "Task lock",
+            lastCommandID: UUID(),
+            appTokens: [],
+            categoryTokens: [],
+            webDomainTokens: [],
+            appliesToAll: false,
+            issuedAt: Date(),
+            originalRequest: "task incomplete",
+            targetChildID: childID,
+            sources: [.taskPause]
+        )
+        _ = await store.addShield(reflection, force: true)
+        _ = await store.addShield(taskRecord, force: true)
+
+        let json = """
+        {
+          "command_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          "action": "unshield",
+          "tier": "all",
+          "target": {
+            "target_all": true,
+            "target_key": "reflection:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            "target_child_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            "target_display": "All Apps",
+            "original_request": "reflection resolved",
+            "has_pending_blob": false
+          },
+          "duration_minutes": null,
+          "issued_at": "2026-08-28T12:00:00Z"
+        }
+        """
+        let command = try NSECommandWireDecoder.decode(Data(json.utf8))
+        let recordKey = ShieldRecord.makeRecordKey(
+            tier: command.tier ?? .all,
+            targetKey: command.target.targetKey ?? "all"
+        )
+
+        let outcome = await NSELockMutationDispatcher.apply(
+            command,
+            recordKey: recordKey,
+            store: store
+        )
+        let remaining = await store.allCurrent().shields
+
+        XCTAssertEqual(outcome, .unshield)
+        XCTAssertFalse(remaining.contains { $0.recordKey == reflection.recordKey })
+        XCTAssertTrue(remaining.contains { $0.recordKey == taskRecord.recordKey })
+    }
+
     func test_commandPollerMapsCanonicalExactAppCatalogTokenIntoCommandTarget() throws {
         let tokenBlob = Data("APP_TOKEN".utf8).base64EncodedString()
         let poll = try decodePollCommand("""

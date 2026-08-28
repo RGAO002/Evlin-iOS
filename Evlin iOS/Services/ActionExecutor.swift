@@ -1222,12 +1222,13 @@ final class ActionExecutor: @unchecked Sendable {
             targetKey = hint.lowercased()
             displayName = cmd.target.targetDisplay ?? hint.capitalized
         case .all, .allApps:
-            targetKey = "all"
+            targetKey = cmd.target.targetKey ?? "all"
             appliesToAll = true
             displayName = "All Apps"
         }
 
-        let recordKey = ShieldRecord.makeRecordKey(tier: tier, targetKey: targetKey)
+        let recordTier = ShieldRecord.effectiveTier(tier: tier, targetKey: targetKey)
+        let recordKey = ShieldRecord.makeRecordKey(tier: recordTier, targetKey: targetKey)
         var expiresAt = cmd.expiresAt
         if let exp = expiresAt, exp.timeIntervalSinceNow < TimeInterval(Self.minScheduleMinutes * 60) {
             expiresAt = Date().addingTimeInterval(TimeInterval(Self.minScheduleMinutes * 60))
@@ -1235,7 +1236,7 @@ final class ActionExecutor: @unchecked Sendable {
 
         return ShieldRecord(
             recordKey: recordKey,
-            tier: tier,
+            tier: recordTier,
             targetKey: targetKey,
             displayName: displayName,
             lastCommandID: cmd.id,
@@ -1247,7 +1248,8 @@ final class ActionExecutor: @unchecked Sendable {
             expiresAt: expiresAt,
             originalRequest: cmd.target.originalRequest,
             targetChildID: expectedChildID ?? cmd.target.targetChildID ?? UUID(),
-            sources: Self.shieldSources(fromWireLockSource: cmd.lockSource)
+            sources: Self.shieldSources(fromWireLockSource: cmd.lockSource),
+            webOpen: ShieldRecord.isReflectionTargetKey(targetKey)
         )
     }
 
@@ -1459,9 +1461,17 @@ final class ActionExecutor: @unchecked Sendable {
                 identity: identity
             )
         case .all:
-            return await removeExplicit(tier: .all, targetKey: "all", identity: identity)
+            return await removeExplicit(
+                tier: .all,
+                targetKey: cmd.target.targetKey ?? "all",
+                identity: identity
+            )
         case .allApps:
-            return await removeExplicit(tier: .allApps, targetKey: "all", identity: identity)
+            return await removeExplicit(
+                tier: .allApps,
+                targetKey: cmd.target.targetKey ?? "all",
+                identity: identity
+            )
         case .exactApp:
             guard let resolved = try? resolveExactApp(from: cmd.target, requireActiveToken: false) else {
                 return .failed(.applicationNotConfigured(resolveExactAppFailureReference(from: cmd.target)))

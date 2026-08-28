@@ -30,13 +30,6 @@ final class MasterLockAccessibilityTests: XCTestCase {
         }
     }
 
-    func testReflectionRemovesMasterControlFromAccessibilityTree() {
-        XCTAssertEqual(
-            EvlinV2MasterLockAccessibility.describe(.hiddenForReflection),
-            .init(label: nil, enabled: false)
-        )
-    }
-
     func testEveryVisibleStableStateHasOneUnambiguousAction() {
         XCTAssertEqual(EvlinV2MasterLockAccessibility.describe(.lockApps).label, "Lock apps")
         XCTAssertEqual(EvlinV2MasterLockAccessibility.describe(.unlockDirect).label, "Unlock apps")

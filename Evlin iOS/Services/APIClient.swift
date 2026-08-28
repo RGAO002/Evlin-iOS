@@ -444,6 +444,7 @@ struct PollTargetDTO: Decodable {
     let list_id: String?                 // new: saved list UUID (spec §3.2)
     let has_pending_blob: Bool?
     let category_hint: String?
+    let target_key: String?
     let target_all: Bool?                // new: "shield everything"
     let all_selected: Bool?              // Task 3: kid's saved-list selection was "all" at upload time
     let default_lock_group: Bool?        // command targets the default "Locked set"
@@ -467,6 +468,7 @@ struct PollTargetDTO: Decodable {
         case has_pending_blob
         case category_hint
         case categoryHint
+        case target_key
         case target_all
         case all_selected
         case default_lock_group
@@ -498,6 +500,7 @@ struct PollTargetDTO: Decodable {
         category_hint =
             try c.decodeIfPresent(String.self, forKey: .category_hint)
                 ?? c.decodeIfPresent(String.self, forKey: .categoryHint)
+        target_key = try c.decodeIfPresent(String.self, forKey: .target_key)
         target_all = try c.decodeIfPresent(Bool.self, forKey: .target_all)
         all_selected = try c.decodeIfPresent(Bool.self, forKey: .all_selected)
         default_lock_group = try c.decodeIfPresent(Bool.self, forKey: .default_lock_group)

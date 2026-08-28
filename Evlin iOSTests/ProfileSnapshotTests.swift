@@ -393,9 +393,6 @@ final class ProfileSnapshotTests: XCTestCase {
         manualLockState: ManualLockAggregateState,
         automaticCoveringSources: [String]
     ) -> MasterLockPresentation {
-        if automaticCoveringSources.contains("reflection") {
-            return .hiddenForReflection
-        }
         guard let childID = UUID(uuidString: child.id) else { return .updating }
         let projectedDevices = devices.compactMap { device -> MasterLockDeviceProjection? in
             guard let deviceID = device.deviceUUID else { return nil }

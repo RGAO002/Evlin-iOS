@@ -1,10 +1,42 @@
 import Foundation
 
 enum ReflectionLockRecordFactory {
-    static func make(rid: UUID, expiresAt: Date, childID: UUID) -> ShieldRecord {
+    static func targetKey(childID: UUID) -> String {
+        "reflection:\(childID.uuidString.lowercased())"
+    }
+
+    static func recordKey(childID: UUID) -> String {
+        ShieldRecord.makeRecordKey(tier: .allApps, targetKey: targetKey(childID: childID))
+    }
+
+    static func legacyRecordKey(rid: UUID) -> String {
+        "all:reflection:\(rid.uuidString)"
+    }
+
+    static func legacyMake(rid: UUID, expiresAt: Date, childID: UUID) -> ShieldRecord {
         ShieldRecord(
-            recordKey: "all:reflection:\(rid.uuidString)",
-            tier: .allApps, targetKey: "reflection:\(rid.uuidString)",
+            recordKey: legacyRecordKey(rid: rid),
+            tier: .allApps,
+            targetKey: "reflection:\(rid.uuidString)",
+            displayName: "Reflection lock",
+            lastCommandID: UUID(),
+            appTokens: [],
+            categoryTokens: [],
+            webDomainTokens: [],
+            appliesToAll: true,
+            issuedAt: Date(),
+            expiresAt: expiresAt,
+            originalRequest: "reflection lockdown",
+            targetChildID: childID,
+            webOpen: true
+        )
+    }
+
+    static func make(rid: UUID, expiresAt: Date, childID: UUID) -> ShieldRecord {
+        let targetKey = targetKey(childID: childID)
+        return ShieldRecord(
+            recordKey: recordKey(childID: childID),
+            tier: .allApps, targetKey: targetKey,
             displayName: "Reflection lock", lastCommandID: UUID(),
             appTokens: [], categoryTokens: [], webDomainTokens: [],
             appliesToAll: true, issuedAt: Date(), expiresAt: expiresAt,
@@ -84,10 +116,16 @@ final class ReflectionLockApplier {
         }
         let sticky = loadSticky()
         let r = snapshot.reflectionRequest
-        let heldRecordKey = sticky.heldRID.map { "all:reflection:\($0.uuidString)" }
+        let heldRecordKey = sticky.heldRID.map { _ in
+            ReflectionLockRecordFactory.recordKey(childID: childID)
+        }
         var currentExpiry: Date? = nil
         if let key = heldRecordKey {
-            currentExpiry = await store.allCurrent().shields.first(where: { $0.recordKey == key })?.expiresAt
+            let shields = await store.allCurrent().shields
+            currentExpiry = shields.first(where: { $0.recordKey == key })?.expiresAt
+            if currentExpiry != nil, let heldRID = sticky.heldRID {
+                await removeLegacyReflectionRecordIfOwned(rid: heldRID, childID: childID)
+            }
             guard identityIsCurrent(childID) else { return }
         }
         let (decision, next) = ReflectionLockReconciler.decide(
@@ -107,6 +145,7 @@ final class ReflectionLockApplier {
                 return
             }
             await scheduleOrDiagnose(rec, rid: rid)
+            await removeLegacyReflectionRecordIfOwned(rid: rid, childID: childID)
             // The schedule is a suspension point, so the device may have changed
             // hands while it was in flight — and unlike the checks above, this one
             // has to undo something that has already landed with Apple. Without
@@ -125,23 +164,25 @@ final class ReflectionLockApplier {
             // server-side; never blocks the lock.
             postLockAppliedBestEffort(childID: childID, rid: rid)
         case .release(let rid):
-            let key = "all:reflection:\(rid.uuidString)"
+            let key = ReflectionLockRecordFactory.recordKey(childID: childID)
             let held = await store.allCurrent().shields.first { $0.recordKey == key }
             guard identityIsCurrent(childID) else { return }
             if held?.targetChildID == childID {
                 _ = await store.removeShield(recordKey: key)
             }
+            await removeLegacyReflectionRecordIfOwned(rid: rid, childID: childID)
             guard identityIsCurrent(childID) else { return }
             let name = ReflectionLockRecordFactory
                 .make(rid: rid, expiresAt: now, childID: childID).deviceActivityName
             await cancelOrDiagnose(name, rid: rid)
         case .swap(let releaseRID, let applyRID, let expiresAt):
-            let releaseKey = "all:reflection:\(releaseRID.uuidString)"
+            let releaseKey = ReflectionLockRecordFactory.recordKey(childID: childID)
             let held = await store.allCurrent().shields.first { $0.recordKey == releaseKey }
             guard identityIsCurrent(childID) else { return }
             if held?.targetChildID == childID {
                 _ = await store.removeShield(recordKey: releaseKey)
             }
+            await removeLegacyReflectionRecordIfOwned(rid: releaseRID, childID: childID)
             guard identityIsCurrent(childID) else { return }
             await cancelOrDiagnose(
                 ReflectionLockRecordFactory
@@ -170,6 +211,7 @@ final class ReflectionLockApplier {
                 return
             }
             await scheduleOrDiagnose(rec, rid: applyRID)
+            await removeLegacyReflectionRecordIfOwned(rid: applyRID, childID: childID)
             guard identityIsCurrent(childID) else {
                 await cancelOrDiagnose(rec.deviceActivityName, rid: applyRID)
                 await removeReflectionRecordIfOwned(rec)
@@ -261,6 +303,20 @@ final class ReflectionLockApplier {
         }
         guard current?.targetChildID == record.targetChildID else { return }
         _ = await store.removeShield(recordKey: record.recordKey)
+    }
+
+    private func removeLegacyReflectionRecordIfOwned(rid: UUID, childID: UUID) async {
+        let legacy = ReflectionLockRecordFactory.legacyMake(
+            rid: rid,
+            expiresAt: Date(),
+            childID: childID
+        )
+        let held = await store.allCurrent().shields.first {
+            $0.recordKey == legacy.recordKey
+        }
+        guard held?.targetChildID == childID else { return }
+        _ = await store.removeShield(recordKey: legacy.recordKey)
+        await cancelOrDiagnose(legacy.deviceActivityName, rid: rid)
     }
 
     private func clearReflectionStickyIfHeld(in reflectionIDs: Set<UUID>) {

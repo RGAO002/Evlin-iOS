@@ -112,6 +112,9 @@ struct ShieldRecord: Codable, Sendable, Equatable {
     /// UUID-shaped, so case-folding them here would be a no-op at best and a
     /// correctness risk at worst.
     static func makeRecordKey(tier: ShieldTier, targetKey: String) -> String {
+        if isReflectionTargetKey(targetKey), tier == .all || tier == .allApps {
+            return "all:\(targetKey.lowercased())"
+        }
         switch tier {
         case .all: return "all"
         case .allApps: return "allApps:\(targetKey)"
@@ -119,6 +122,14 @@ struct ShieldRecord: Codable, Sendable, Equatable {
         case .savedList: return "savedList:\(targetKey.lowercased())"
         case .category: return "category:\(targetKey)"
         }
+    }
+
+    static func isReflectionTargetKey(_ targetKey: String) -> Bool {
+        targetKey.lowercased().hasPrefix("reflection:")
+    }
+
+    static func effectiveTier(tier: ShieldTier, targetKey: String) -> ShieldTier {
+        isReflectionTargetKey(targetKey) ? .allApps : tier
     }
 
     /// Extract tier from a recordKey.

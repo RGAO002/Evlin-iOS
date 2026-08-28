@@ -1197,9 +1197,10 @@ enum NSEShieldRecordFactory {
         appliesToAll: Bool,
         expiresAt: Date?
     ) -> ShieldRecord {
-        ShieldRecord(
-            recordKey: ShieldRecord.makeRecordKey(tier: tier, targetKey: targetKey),
-            tier: tier,
+        let recordTier = ShieldRecord.effectiveTier(tier: tier, targetKey: targetKey)
+        return ShieldRecord(
+            recordKey: ShieldRecord.makeRecordKey(tier: recordTier, targetKey: targetKey),
+            tier: recordTier,
             targetKey: targetKey,
             displayName: displayName,
             lastCommandID: command.id,
@@ -1211,7 +1212,8 @@ enum NSEShieldRecordFactory {
             expiresAt: expiresAt,
             originalRequest: command.target.originalRequest,
             targetChildID: command.target.targetChildID ?? UUID(),
-            sources: NSECommandSourceResolver.shieldSources(from: command.lockSource)
+            sources: NSECommandSourceResolver.shieldSources(from: command.lockSource),
+            webOpen: ShieldRecord.isReflectionTargetKey(targetKey)
         )
     }
 }

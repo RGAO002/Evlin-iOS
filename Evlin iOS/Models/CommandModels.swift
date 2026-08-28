@@ -243,6 +243,7 @@ struct CommandTarget: Codable, Sendable {
     var listName: String?
     var listID: UUID?                 // stable identifier for a Saved List
     var categoryHint: String?
+    var targetKey: String? = nil      // stable scoped key for all-tier records
     var targetAll: Bool = false       // true when kind=all
     // Task 3 (paper-lock fix): true when the backend's `all_selected` flag
     // (Task 1/2 plumbing) says the kid's saved-list selection was "all apps

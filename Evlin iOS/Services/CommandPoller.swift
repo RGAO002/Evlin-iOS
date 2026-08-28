@@ -861,6 +861,7 @@ final class CommandPoller {
             listName: poll.target.list_name,
             listID: poll.target.list_id.flatMap(UUID.init(uuidString:)),
             categoryHint: categoryHint,
+            targetKey: poll.target.target_key,
             targetAll: poll.target.target_all ?? false,
             allSelected: poll.target.all_selected,
             defaultLockGroup: poll.target.default_lock_group,

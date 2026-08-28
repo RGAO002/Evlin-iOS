@@ -9,28 +9,21 @@ final class MasterLockProjectionTests: XCTestCase {
     private let appID = UUID(uuidString: "00000000-0000-0000-0000-000000000201")!
     private let expiresAt = Date(timeIntervalSince1970: 1_788_019_200)
 
-    func testReflectionHidesControl() {
+    func testReflectionDoesNotIndependentlyHideControl() {
         let projection = makeProjection(
-            overrideRevision: 8,
-            overrideExpiresAt: expiresAt,
             devices: [
                 makeDevice(
                     id: phoneID,
                     name: "Phone",
-                    manualAllApps: true,
-                    earnedExhausted: true,
-                    taskIncomplete: true,
-                    deviceLimitActive: true,
-                    limitedAppIDs: [appID],
                     reflectionActive: true,
-                    deliveryState: .failed
+                    deliveryState: .confirmed
                 )
             ]
         )
 
         XCTAssertEqual(
             MasterLockPresentation.reduce(projection: projection),
-            .hiddenForReflection
+            .lockApps
         )
     }
 

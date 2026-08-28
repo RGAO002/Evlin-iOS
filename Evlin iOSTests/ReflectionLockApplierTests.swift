@@ -111,7 +111,9 @@ final class ReflectionLockApplierTests: XCTestCase {
         )
         let shields = await store.allCurrent().shields
         XCTAssertFalse(
-            shields.contains { $0.recordKey == "all:reflection:\(rid.uuidString)" },
+            shields.contains {
+                $0.recordKey == ReflectionLockRecordFactory.recordKey(childID: oldID)
+            },
             "the old family's reflection record must not survive the switch"
         )
     }
@@ -501,8 +503,12 @@ final class ReflectionLockApplierTests: XCTestCase {
         await applier.reconcile(snapshot: pendingSnapshot(rid: rid), childID: childID)
 
         let shields = await store.allCurrent().shields
-        XCTAssertTrue(shields.contains(where: { $0.recordKey == "all:reflection:\(rid.uuidString)" }),
-                      "expected a reflection record keyed by rid")
+        XCTAssertTrue(
+            shields.contains {
+                $0.recordKey == ReflectionLockRecordFactory.recordKey(childID: childID)
+            },
+            "expected the device-scoped reflection record"
+        )
         XCTAssertEqual(spy.started.count, 1)
     }
 
@@ -524,7 +530,9 @@ final class ReflectionLockApplierTests: XCTestCase {
                                 childID: childID)
 
         let shields = await store.allCurrent().shields
-        XCTAssertFalse(shields.contains(where: { $0.recordKey == "all:reflection:\(rid.uuidString)" }),
+        XCTAssertFalse(shields.contains(where: {
+            $0.recordKey == ReflectionLockRecordFactory.recordKey(childID: childID)
+        }),
                        "record should be gone after release")
         XCTAssertEqual(spy.stopped.count, 1)
     }
@@ -550,7 +558,9 @@ final class ReflectionLockApplierTests: XCTestCase {
                                 childID: childID)
 
         let current = await store.allCurrent()
-        XCTAssertFalse(current.shields.contains(where: { $0.recordKey == "all:reflection:\(rid.uuidString)" }),
+        XCTAssertFalse(current.shields.contains(where: {
+            $0.recordKey == ReflectionLockRecordFactory.recordKey(childID: childID)
+        }),
                        "reflection release must remove only its dedicated all-apps shield")
         XCTAssertTrue(current.blocks.contains(where: { $0.bundleID == "com.burbn.instagram" }),
                       "reflection release must not clear unrelated active blocks")
@@ -604,7 +614,9 @@ final class ReflectionLockApplierTests: XCTestCase {
         await reconcile.value
 
         let shields = await store.allCurrent().shields
-        XCTAssertFalse(shields.contains { $0.recordKey == "all:reflection:\(rid.uuidString)" })
+        XCTAssertFalse(shields.contains {
+            $0.recordKey == ReflectionLockRecordFactory.recordKey(childID: oldID)
+        })
         XCTAssertTrue(spy.started.isEmpty)
         XCTAssertNil(groupDefaults?.data(forKey: stickyKey))
     }
