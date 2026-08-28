@@ -41,6 +41,19 @@ nonisolated struct MasterLockProjection: Equatable, Sendable {
         devices.map(\.childDeviceID)
     }
 
+    func displaysDeviceAsLocked(
+        _ deviceID: UUID,
+        fallbackLocked: Bool
+    ) -> Bool {
+        guard overrideExpiresAt != nil,
+              let device = devices.first(where: { $0.childDeviceID == deviceID }),
+              device.deliveryState == .confirmed
+        else {
+            return fallbackLocked
+        }
+        return false
+    }
+
     func matchesConfirmation(of operation: MasterLockOperation) -> Bool {
         snapshotDigest == operation.snapshotDigest
             && overrideRevision == operation.revision

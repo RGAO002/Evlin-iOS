@@ -106,6 +106,44 @@ final class MasterLockProjectionTests: XCTestCase {
         )
     }
 
+    func testConfirmedOverrideDisplaysDeviceAsUnlockedDespiteUnderlyingTaskLock() {
+        let projection = makeProjection(
+            overrideRevision: 4,
+            overrideExpiresAt: expiresAt,
+            devices: [
+                makeDevice(
+                    id: phoneID,
+                    name: "Phone",
+                    taskIncomplete: true,
+                    deliveryState: .confirmed
+                )
+            ]
+        )
+
+        XCTAssertFalse(
+            projection.displaysDeviceAsLocked(phoneID, fallbackLocked: true)
+        )
+    }
+
+    func testWaitingOverrideKeepsUnderlyingDeviceLockVisible() {
+        let projection = makeProjection(
+            overrideRevision: 4,
+            overrideExpiresAt: expiresAt,
+            devices: [
+                makeDevice(
+                    id: phoneID,
+                    name: "Phone",
+                    taskIncomplete: true,
+                    deliveryState: .waiting
+                )
+            ]
+        )
+
+        XCTAssertTrue(
+            projection.displaysDeviceAsLocked(phoneID, fallbackLocked: true)
+        )
+    }
+
     func testPartialDeliveryNamesWaitingAndFailedDevices() {
         let projection = makeProjection(
             overrideRevision: 6,

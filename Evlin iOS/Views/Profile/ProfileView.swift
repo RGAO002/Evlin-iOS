@@ -700,10 +700,10 @@ struct ProfileView: View {
             titleVisibility: .visible
         ) {
             Button("Lock now") {
-                Task { await resolveTaskOverrideChoice(.lockNow) }
+                beginTaskOverrideChoice(.lockNow)
             }
             Button("Keep unlocked until the current time") {
-                Task { await resolveTaskOverrideChoice(.keepUnlocked) }
+                beginTaskOverrideChoice(.keepUnlocked)
             }
             Button("Cancel", role: .cancel) { pendingTaskOverrideProjection = nil }
         } message: {
@@ -1185,7 +1185,7 @@ struct ProfileView: View {
     }
 
     @MainActor
-    private func resolveTaskOverrideChoice(_ choice: MasterLockTaskOverrideChoice) async {
+    private func beginTaskOverrideChoice(_ choice: MasterLockTaskOverrideChoice) {
         guard let projection = pendingTaskOverrideProjection else { return }
         let decision = MasterLockTaskOverrideDecision.resolve(
             choice: choice,
@@ -1200,7 +1200,7 @@ struct ProfileView: View {
                 projection: unchanged
             )
         case .submit(let operation):
-            await confirmMasterLockOperation(operation)
+            Task { await confirmMasterLockOperation(operation) }
         }
     }
 
@@ -1709,7 +1709,11 @@ struct ProfileView: View {
     /// row does not flash "ACTIVE" while the truth is still unknown.
     private func isDeviceRowLocked(_ deviceID: UUID?) -> Bool {
         guard let deviceID else { return localStatus != .unlocked }
-        return lockedByDeviceID[deviceID] ?? (localStatus != .unlocked)
+        let fallback = lockedByDeviceID[deviceID] ?? (localStatus != .unlocked)
+        return masterLockProjection?.displaysDeviceAsLocked(
+            deviceID,
+            fallbackLocked: fallback
+        ) ?? fallback
     }
 
     private func manualLockedByDevice(

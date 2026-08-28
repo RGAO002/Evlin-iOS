@@ -16,6 +16,20 @@ final class MasterLockAccessibilityTests: XCTestCase {
         }
     }
 
+    private var profileViewSource: String {
+        get throws {
+            let repositoryRoot = URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+            return try String(
+                contentsOf: repositoryRoot.appendingPathComponent(
+                    "Evlin iOS/Views/Profile/ProfileView.swift"
+                ),
+                encoding: .utf8
+            )
+        }
+    }
+
     func testReflectionRemovesMasterControlFromAccessibilityTree() {
         XCTAssertEqual(
             EvlinV2MasterLockAccessibility.describe(.hiddenForReflection),
@@ -47,5 +61,14 @@ final class MasterLockAccessibilityTests: XCTestCase {
         let source = try masterUnlockSheetSource
 
         XCTAssertTrue(source.contains(".safeAreaInset(edge: .bottom)"))
+    }
+
+    func testTaskOverrideChoiceCapturesProjectionBeforeDialogDismissal() throws {
+        let source = try profileViewSource
+
+        XCTAssertTrue(source.contains("beginTaskOverrideChoice(.lockNow)"))
+        XCTAssertTrue(source.contains("beginTaskOverrideChoice(.keepUnlocked)"))
+        XCTAssertFalse(source.contains("Task { await resolveTaskOverrideChoice(.lockNow) }"))
+        XCTAssertFalse(source.contains("Task { await resolveTaskOverrideChoice(.keepUnlocked) }"))
     }
 }
