@@ -150,6 +150,39 @@ final class ParentUnlockOverrideExpiryTests: XCTestCase {
         )
     }
 
+    func testFifteenMinuteOverrideKeepsServerStartWhenDeliveryIsOneSecondLate() async throws {
+        let scheduler = ParentUnlockExpirySchedulerSpy()
+        let calendar = utcCalendar()
+        let exactDeadline = startedAt.addingTimeInterval(15 * 60)
+        let delayedApplication = startedAt.addingTimeInterval(1)
+        let exactSnapshot = ParentUnlockOverrideSnapshot(
+            envelope: ParentUnlockOverrideEnvelope(
+                revision: 7,
+                childDeviceID: ownerID,
+                usageDate: "2026-04-26",
+                startedAt: startedAt,
+                expiresAt: exactDeadline,
+                operationID: operationID,
+                scopes: [.manual, .earnedTime, .taskPause, .deviceLimit, .perAppLimit],
+                cancelled: false
+            ),
+            status: .active
+        )
+
+        _ = try await ParentUnlockOverrideExpiry.arm(
+            snapshot: exactSnapshot,
+            now: delayedApplication,
+            scheduler: scheduler,
+            calendar: calendar
+        )
+
+        let started = try XCTUnwrap(scheduler.startedWithoutEvents.first)
+        let scheduledStart = try XCTUnwrap(calendar.date(from: started.schedule.intervalStart))
+        let scheduledEnd = try XCTUnwrap(calendar.date(from: started.schedule.intervalEnd))
+        XCTAssertEqual(scheduledStart, startedAt)
+        XCTAssertEqual(scheduledEnd.timeIntervalSince(scheduledStart), 15 * 60)
+    }
+
     func testReconcileRearmsPersistedDeadlineAfterRestart() async throws {
         let harness = try makeHarness()
         _ = try harness.store.ingest(

@@ -12,6 +12,7 @@ nonisolated enum ParentUnlockOverrideExpiry {
     struct Plan: Equatable, Sendable {
         let ownerID: UUID
         let revision: Int64
+        let startedAt: Date
         let deadline: Date
 
         var activityName: String {
@@ -68,6 +69,7 @@ nonisolated enum ParentUnlockOverrideExpiry {
         let plan = Plan(
             ownerID: snapshot.childDeviceID,
             revision: snapshot.revision,
+            startedAt: snapshot.startedAt,
             deadline: snapshot.expiresAt
         )
         let desiredName = plan.activityName
@@ -97,7 +99,7 @@ nonisolated enum ParentUnlockOverrideExpiry {
                 try await stop(replacing, scheduler: scheduler)
             }
             if !names.contains(plan.activityName) {
-                try await start(plan, now: now, scheduler: scheduler, calendar: calendar)
+                try await start(plan, scheduler: scheduler, calendar: calendar)
             }
             return .armed(revision: plan.revision, deadline: plan.deadline)
         case .expire(let revision, let activityNames):
@@ -163,7 +165,7 @@ nonisolated enum ParentUnlockOverrideExpiry {
                 try await stop(replacing, scheduler: scheduler)
             }
             if !monitoredNames.contains(plan.activityName) {
-                try await start(plan, now: now, scheduler: scheduler, calendar: calendar)
+                try await start(plan, scheduler: scheduler, calendar: calendar)
             }
             return .armed(revision: plan.revision, deadline: plan.deadline)
         case .unchanged:
@@ -292,7 +294,6 @@ nonisolated enum ParentUnlockOverrideExpiry {
 
     private static func start(
         _ plan: Plan,
-        now: Date,
         scheduler: any DeviceActivityScheduling,
         calendar: Calendar
     ) async throws {
@@ -300,7 +301,11 @@ nonisolated enum ParentUnlockOverrideExpiry {
             do {
                 try scheduler.startMonitoring(
                     DeviceActivityName(plan.activityName),
-                    during: scheduleForTesting(start: now, end: plan.deadline, calendar: calendar)
+                    during: scheduleForTesting(
+                        start: plan.startedAt,
+                        end: plan.deadline,
+                        calendar: calendar
+                    )
                 )
                 return true
             } catch {
