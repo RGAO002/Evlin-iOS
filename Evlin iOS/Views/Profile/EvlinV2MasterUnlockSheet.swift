@@ -15,54 +15,60 @@ struct EvlinV2MasterUnlockSheet: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    Text("Choose how long \(childName)'s apps stay unlocked. Screen time still counts toward today's pool.")
-                        .font(EvlinV2ProfileTokens.font(14, weight: .medium))
-                        .foregroundStyle(EvlinV2ProfileTokens.textMuted)
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        Text("Choose how long \(childName)'s apps stay unlocked. Screen time still counts toward today's pool.")
+                            .font(EvlinV2ProfileTokens.font(14, weight: .medium))
+                            .foregroundStyle(EvlinV2ProfileTokens.textMuted)
 
-                    HStack(spacing: 10) {
-                        Image(systemName: "clock.fill").foregroundStyle(EvlinV2ProfileTokens.accent)
-                        Text("\(format(usageTodayMinutes)) used today")
-                            .font(EvlinV2ProfileTokens.font(15, weight: .bold))
-                    }
-                    .padding(14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(EvlinV2ProfileTokens.surfaceMuted)
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                    Text("UNLOCK FOR")
-                        .font(EvlinV2ProfileTokens.font(11, weight: .bold))
-                        .foregroundStyle(EvlinV2ProfileTokens.textMuted)
-
-                    LazyVGrid(columns: [.init(.flexible()), .init(.flexible())], spacing: 9) {
-                        ForEach(options, id: \.label) { option in
-                            Button {
-                                selected = option
-                            } label: {
-                                Text(option.label)
-                                    .font(EvlinV2ProfileTokens.font(13, weight: .bold))
-                                    .foregroundStyle(selected == option ? .white : EvlinV2ProfileTokens.primary)
-                                    .frame(maxWidth: .infinity, minHeight: 46)
-                                    .background(selected == option ? EvlinV2ProfileTokens.primary : EvlinV2ProfileTokens.surface)
-                                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(EvlinV2ProfileTokens.outline))
-                                    .clipShape(RoundedRectangle(cornerRadius: 14))
-                            }
-                            .buttonStyle(.plain)
+                        HStack(spacing: 10) {
+                            Image(systemName: "clock.fill").foregroundStyle(EvlinV2ProfileTokens.accent)
+                            Text("\(format(usageTodayMinutes)) used today")
+                                .font(EvlinV2ProfileTokens.font(15, weight: .bold))
                         }
-                    }
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(EvlinV2ProfileTokens.surfaceMuted)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
-                    restrictionSummary
+                        Text("UNLOCK FOR")
+                            .font(EvlinV2ProfileTokens.font(11, weight: .bold))
+                            .foregroundStyle(EvlinV2ProfileTokens.textMuted)
+
+                        LazyVGrid(columns: [.init(.flexible()), .init(.flexible())], spacing: 9) {
+                            ForEach(options, id: \.label) { option in
+                                Button {
+                                    selected = option
+                                } label: {
+                                    Text(option.label)
+                                        .font(EvlinV2ProfileTokens.font(13, weight: .bold))
+                                        .foregroundStyle(selected == option ? .white : EvlinV2ProfileTokens.primary)
+                                        .frame(maxWidth: .infinity, minHeight: 46)
+                                        .background(selected == option ? EvlinV2ProfileTokens.primary : EvlinV2ProfileTokens.surface)
+                                        .overlay(RoundedRectangle(cornerRadius: 14).stroke(EvlinV2ProfileTokens.outline))
+                                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+
+                        restrictionSummary
+                    }
+                    .padding(20)
                 }
-                .padding(20)
-            }
-            .safeAreaInset(edge: .bottom) {
+                .scrollBounceBehavior(.basedOnSize)
+
+                Divider()
                 actionButtons
             }
             .navigationTitle("Unlock \(childName)'s apps?")
             .navigationBarTitleDisplayMode(.inline)
         }
         .presentationDetents([.large])
+        .presentationDragIndicator(.hidden)
+        .presentationContentInteraction(.scrolls)
+        .interactiveDismissDisabled()
     }
 
     private var actionButtons: some View {

@@ -95,14 +95,30 @@ debugger. Capture each device's current DAM trace sequence before installation.
       the task is not being approved.
 - [ ] At expiry, the task lock returns if the task remains incomplete.
 - [ ] Completing the task prevents that source from returning.
+- [ ] If a fresh device effective-state snapshot is newer than the recorded
+      task-lock command but no longer contains the task-pause shield, treat the
+      ledger marker as stale and re-issue the task lock. This covers the
+      observed legacy Reflection `unshield_all` residue where P correctly
+      showed Unlock while the K device was physically unshielded.
 
 ### 4. Reflection priority
 
 - [ ] Start Reflection during an active override.
-- [ ] Reflection shields immediately and hides the Master Button.
+- [ ] Reflection shields immediately; the existing Reflection status surface
+      replaces the summary card, without a second hide rule inside the Master
+      Button presentation.
 - [ ] Completing Reflection returns to the still-valid override, or to current
       rules if the override expired meanwhile.
 - [ ] The Reflection record is never removed by a Master Unlock command.
+- [ ] Resolving Reflection removes only the device-scoped Reflection record;
+      task-pause, manual, limit, and earned-time shields remain intact.
+
+### 4a. Unlock sheet presentation
+
+- [ ] The default sheet height shows every duration option and Cancel without
+      requiring an upward drag.
+- [ ] The sheet uses one fixed presentation height and cannot be interactively
+      expanded or collapsed.
 
 ### 5. Asymmetric offline devices
 

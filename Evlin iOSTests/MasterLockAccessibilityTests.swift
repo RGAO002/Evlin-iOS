@@ -48,12 +48,16 @@ final class MasterLockAccessibilityTests: XCTestCase {
 
         XCTAssertTrue(source.contains(".presentationDetents([.large])"))
         XCTAssertFalse(source.contains(".presentationDetents([.medium, .large])"))
+        XCTAssertTrue(source.contains(".presentationDragIndicator(.hidden)"))
+        XCTAssertTrue(source.contains(".presentationContentInteraction(.scrolls)"))
+        XCTAssertTrue(source.contains(".interactiveDismissDisabled()"))
     }
 
     func testMasterUnlockActionsStayOutsideScrollableContent() throws {
         let source = try masterUnlockSheetSource
 
-        XCTAssertTrue(source.contains(".safeAreaInset(edge: .bottom)"))
+        XCTAssertFalse(source.contains(".safeAreaInset(edge: .bottom)"))
+        XCTAssertTrue(source.contains("Divider()"))
     }
 
     func testTaskOverrideChoiceCapturesProjectionBeforeDialogDismissal() throws {
