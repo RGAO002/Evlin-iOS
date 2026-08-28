@@ -11,6 +11,30 @@ final class BigKidAPIClientTests: XCTestCase {
         XCTAssertEqual(APIClient.defaultURL, "https://evlin-backend.onrender.com/api/v1")
     }
 
+    func testDebugBuildMigratesStaleLANBackendToCurrentDevelopmentHost() throws {
+        #if DEBUG
+        let key = "serverURL"
+        let defaults = UserDefaults.standard
+        let original = defaults.object(forKey: key)
+        defer {
+            if let original {
+                defaults.set(original, forKey: key)
+            } else {
+                defaults.removeObject(forKey: key)
+            }
+        }
+
+        defaults.set("http://192.168.1.174:8000/api/v1", forKey: key)
+
+        let client = APIClient()
+
+        XCTAssertEqual(client.baseURL, APIClient.localDevURL)
+        XCTAssertEqual(defaults.string(forKey: key), APIClient.localDevURL)
+        #else
+        throw XCTSkip("The stale-LAN migration is DEBUG-only.")
+        #endif
+    }
+
     // MARK: - Obsolete: release-build local→production URL migration
     //
     // These four tests were TDD-red specs for an `effectiveInitialBaseURL` /

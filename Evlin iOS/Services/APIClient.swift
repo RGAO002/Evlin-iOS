@@ -19,7 +19,7 @@ class APIClient: ObservableObject {
     /// loopback host (localhost/127.0.0.1) only works on the simulator; on a
     /// real device 127.0.0.1 is the phone itself. Run uvicorn with
     /// `--host 0.0.0.0` so the LAN IP is reachable. Update if the Mac IP changes.
-    static let localDevHost = "192.168.1.175"
+    static let localDevHost = "192.168.1.152"
 
     /// Local dev preset — used by the DEBUG-only Local/Production picker in
     /// HomeSettingsSheet. Path keeps `/api/v1` so chat / queue / etc. route
@@ -80,6 +80,18 @@ class APIClient: ObservableObject {
             saved = ""
             UserDefaults.standard.removeObject(forKey: "serverURL")
         }
+        // Overwrite installs preserve UserDefaults. When the Mac receives a
+        // different LAN address, an older debug build's saved private host
+        // would otherwise win over this build's current development preset.
+        // Migrate only private IPv4 development hosts; explicit public/custom
+        // backends remain untouched.
+        if !saved.isEmpty,
+           let savedHost = URL(string: saved)?.host,
+           Self.isPrivateIPv4DevelopmentHost(savedHost),
+           savedHost != Self.localDevHost {
+            saved = Self.localDevURL
+            UserDefaults.standard.set(saved, forKey: "serverURL")
+        }
         #else
         let fallbackURL = Self.defaultURL
         // A production (Release / TestFlight) build must NEVER talk to a
@@ -122,6 +134,17 @@ class APIClient: ObservableObject {
         // Mirror the resolved host process-wide so `sharedRefresher` refreshes
         // against the SAME backend this live instance uses (see currentBaseURL).
         Self.currentBaseURL = self.baseURL
+    }
+
+    private static func isPrivateIPv4DevelopmentHost(_ host: String) -> Bool {
+        if host.hasPrefix("10.") || host.hasPrefix("192.168.") {
+            return true
+        }
+
+        let octets = host.split(separator: ".").compactMap { Int($0) }
+        return octets.count == 4
+            && octets[0] == 172
+            && (16...31).contains(octets[1])
     }
 
     nonisolated deinit {}
