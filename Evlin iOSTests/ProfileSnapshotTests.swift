@@ -374,8 +374,6 @@ final class ProfileSnapshotTests: XCTestCase {
             rules: ProfileMockData.rules(for: child.id, dailyLimitMinutes: 120),
             dailyLimitMinutes: 120,
             localStatus: localStatus,
-            manualLockState: manualLockState,
-            automaticCoveringSources: automaticCoveringSources,
             masterLockPresentation: snapshotMasterLockPresentation(
                 child: child,
                 devices: devices,

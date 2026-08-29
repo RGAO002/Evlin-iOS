@@ -62,11 +62,6 @@ nonisolated enum ProfileRouteIdentityReconciler {
     }
 }
 
-private struct ProfileLockCommandAck: Sendable {
-    let deviceID: UUID
-    let outcome: ManualLockAckOutcome
-}
-
 private struct ProfileDeviceLockSnapshot: Sendable {
     let deviceID: UUID
     let state: APIClient.DeviceLockStateResponse?
@@ -164,28 +159,11 @@ struct ProfileView: View {
     /// `localStatus` stays the any-device-locked aggregate for the big lock
     /// button; rows and the device tally must not borrow it.
     @State private var lockedByDeviceID: [UUID: Bool] = [:]
-    // Manual provenance across every displayed child device. Automatic sources
-    // still drive localStatus but never turn this button into an Unlock action.
-    @State private var manualLockState: ManualLockAggregateState = .pending
-    @State private var automaticCoveringSources: [String] = []
-    @State private var automaticActionBusy = false
-    @State private var automaticActionError: String?
     // B11: earned-time summary from A3 backend endpoint.
     // Nil until the first fetch completes; progress bar / countdown uses static
     // config values until then (graceful degradation).
     @State private var earnedSummary: APIClient.EarnedSummaryDTO? = nil
     @State private var summaryFetchedAt: Date? = nil
-    // Lock-selected CTA wiring (POST /parent/device/lock-selected|unlock-selected).
-    @State private var lockBusy = false
-    @State private var lockError: String? = nil
-    // Neutral (non-error) status note, e.g. "queued — will apply when the
-    // phone next checks in". Shown in muted text, distinct from lockError.
-    @State private var lockNote: String? = nil
-    /// Durable child-wide intent and per-device command receipts while one or
-    /// more devices still need acknowledgement or a matching state snapshot.
-    @State private var pendingManualLockOperation: ManualLockOperation? = nil
-    @State private var manualLockRequestInFlight = false
-    @State private var automaticallyResumedManualOperationIDs = Set<UUID>()
     /// Task 8 read/operation state. Task 9 renders these immutable models; this
     /// task only keeps them refreshed and durable behind the existing UI.
     @State private var masterLockProjection: MasterLockProjection? = nil
@@ -231,39 +209,6 @@ struct ProfileView: View {
             names[deviceID] = device.name
         }
         return names
-    }
-
-    private var manualLockPresentation: ManualLockButtonPresentation {
-        ManualLockButtonPresentation.from(
-            state: manualLockState,
-            childName: displayChild.name,
-            requestActive: lockBusy,
-            retryIntent: pendingManualLockIntent
-        )
-    }
-
-    private var pendingManualLockIntent: ManualLockButtonIntent? {
-        pendingManualLockOperation?.intent
-    }
-
-    private var automaticLockNotice: AutomaticLockNotice? {
-        AutomaticLockNotice.make(
-            coveringSources: automaticCoveringSources,
-            exhausted: earnedSummary?.state == "exhausted",
-            overrideActive: earnedSummary?.override_active == true,
-            usageDate: earnedSummary?.usage_date
-        )
-    }
-
-    private var manualLockButtonBackground: AnyShapeStyle {
-        switch manualLockPresentation.tone {
-        case .lock:
-            return AnyShapeStyle(Color.evSecondaryGradient)
-        case .unlock:
-            return AnyShapeStyle(Color.evError)
-        case .updating:
-            return AnyShapeStyle(Color.evOnSurfaceVariant)
-        }
     }
 
     /// Format minutes into a human-readable limit string (same logic as ProfileMockData).
@@ -745,19 +690,20 @@ struct ProfileView: View {
             }
             // Initialise local mutables from the source profile. `child.status`
             // already carries the live lock state when navigated from Home
-            // (FamilyStore overlays it); refreshLockState then reconciles against
+            // (FamilyStore overlays it); the physical shield read then reconciles against
             // the device's REAL truth, so a stale snapshot can't leave the
             // button green after the kid is actually locked.
             localStatus = child.status
             if let childProfileID = UUID(uuidString: child.id) {
-                pendingManualLockOperation = ManualLockOperationStore.load(
-                    childProfileID: childProfileID
-                )
+                // The revisioned Master Lock coordinator replaced the legacy
+                // selected-set writer. Never replay an operation persisted by
+                // that retired coordinator after an upgrade.
+                ManualLockOperationStore.clear(childProfileID: childProfileID)
                 pendingMasterLockOperation = MasterLockOperationStore.load(
                     childProfileID: childProfileID
                 )
             }
-            Task { await refreshLockState() }
+            Task { await refreshPhysicalShieldState() }
             Task { await refreshMasterLockState() }
             if localName.isEmpty { localName = child.name }
             if localAge == 0    { localAge = child.age }
@@ -877,9 +823,7 @@ struct ProfileView: View {
             localStatus = liveProfile.status
             syncDevicesFromFamilyStore()
             if let childProfileID = UUID(uuidString: child.id) {
-                pendingManualLockOperation = ManualLockOperationStore.load(
-                    childProfileID: childProfileID
-                )
+                ManualLockOperationStore.clear(childProfileID: childProfileID)
                 pendingMasterLockOperation = MasterLockOperationStore.load(
                     childProfileID: childProfileID
                 )
@@ -887,7 +831,7 @@ struct ProfileView: View {
             if let cachedSummary = familyStore.earnedSummary(forChildID: child.id) {
                 earnedSummary = cachedSummary
             }
-            await refreshLockState()
+            await refreshPhysicalShieldState()
             await refreshMasterLockState()
             await refreshEarnedSummary()
         }
@@ -936,7 +880,7 @@ struct ProfileView: View {
             await refreshFromBackend()
         }
         if scope.refreshLockState {
-            await refreshLockState()
+            await refreshPhysicalShieldState()
             await refreshMasterLockState()
         }
         if scope.refreshEarnedSummary {
@@ -1327,261 +1271,15 @@ struct ProfileView: View {
         }
     }
 
-    /// HP-2: Delete Profile — really delete via DELETE /family/children/{id},
-    /// refresh the family aggregate, then pop. On failure (409 = child still
-    /// has a linked device, mapped through `ChildCRUDMapper` like the
-    /// HomeSettingsSheet flow) show the error and do NOT pop.
-    /// Adds or removes only the manual selected-set source for every child device.
     @MainActor
-    private func toggleDeviceLock() async {
-        let displayedDeviceIDs = displayedChildDeviceIDs
-        guard let pid = UUID(uuidString: child.id),
-              let famRaw = UserDefaults.standard.string(forKey: "evlin.familyID"),
-              let famID = UUID(uuidString: famRaw),
-              !displayedDeviceIDs.isEmpty else {
-            lockError = "Pair \(displayChild.name)'s device first."
-            return
-        }
-        guard !manualLockRequestInFlight else { return }
-
-        guard let intent = ManualLockButtonIntent.from(
-            state: manualLockState,
-            retryIntent: pendingManualLockIntent
-        ) else { return }
-        let wantLocked = intent.wantsLocked
-
-        let previousState = manualLockState
-        let previousOperation = pendingManualLockOperation
-        lockBusy = true
-        lockError = nil
-        lockNote = nil
-        manualLockState = .pending
-        manualLockRequestInFlight = true
-        defer {
-            manualLockRequestInFlight = false
-            lockBusy = false
-        }
-
-        let actions = ManualLockOperationOrchestrator.begin(
-            childProfileID: pid,
-            operationID: UUID(),
-            intent: intent,
-            expectedDeviceIDs: displayedDeviceIDs
-        )
-        var provisionalOperation: ManualLockOperation?
-        var response: APIClient.ChildSelectedSetResponse?
-        do {
-            for action in actions {
-                switch action {
-                case .persist(let operation):
-                    ManualLockOperationStore.save(operation)
-                    pendingManualLockOperation = operation
-                    provisionalOperation = operation
-                case .post(let operation):
-                    response = try await postManualLockOperation(
-                        operation,
-                        familyID: famID
-                    )
-                }
-            }
-        } catch {
-            if let operation = provisionalOperation,
-               let retained = ManualLockOperationOrchestrator.operationAfterFailure(
-                   operation,
-                   disposition: Self.manualLockFailureDisposition(error)
-               ) {
-                ManualLockOperationStore.save(retained)
-                pendingManualLockOperation = retained
-                manualLockState = .pending
-                lockNote = "Update is still pending."
-            } else {
-                if let operation = provisionalOperation {
-                    ManualLockOperationStore.clear(
-                        childProfileID: operation.childProfileID
-                    )
-                }
-                pendingManualLockOperation = previousOperation
-                manualLockState = previousState
-                if ProfileView.isNoLockedSetError(error) {
-                    lockError = "Select which apps to lock first — tap \"App Controls\" (the lock list) to set up the Locked set, then try again."
-                } else {
-                    lockError = "Couldn't \(wantLocked ? "lock" : "unlock"): \(String(describing: error))"
-                }
-            }
-            return
-        }
-
-        guard let provisionalOperation, let response else { return }
-        if let localDeviceID = UUID(uuidString: pairedChildID),
-           let localReceipt = response.devices.first(where: { $0.child_device_id == localDeviceID }) {
-            applyListIDIfNeeded(localReceipt.list_id.uuidString)
-        }
-
-        let operation = mergeManualLockResponse(response, into: provisionalOperation)
-        pendingManualLockOperation = operation
-        ManualLockOperationStore.save(operation)
-
-        let targetDeviceIDs = operation.expectedDeviceIDs
-        let ackByDevice = await waitForCommandAcknowledgements(
-            operation.receipts,
-            expectedDeviceIDs: targetDeviceIDs
-        )
-        let snapshots = await fetchDeviceLockStates(
-            familyID: famID,
-            deviceIDs: targetDeviceIDs
-        )
-        let reducedState = applyLockSnapshots(snapshots, deviceIDs: targetDeviceIDs)
-
-        let reconciliation = ManualLockOperationReconciliation.evaluate(
-            operation: operation,
-            ackByDevice: ackByDevice,
-            manualLockedByDevice: manualLockedByDevice(from: snapshots),
-            aggregateState: reducedState
-        )
-        applyManualLockReconciliation(reconciliation, operation: operation)
-
-        await familyStore.refresh()
-    }
-
-    @MainActor
-    private func postManualLockOperation(
-        _ operation: ManualLockOperation,
-        familyID: UUID
-    ) async throws -> APIClient.ChildSelectedSetResponse {
-        switch operation.intent {
-        case .lockSelectedForChild:
-            return try await apiClient.lockSelectedForChild(
-                familyID: familyID,
-                childProfileID: operation.childProfileID,
-                operationID: operation.operationID
-            )
-        case .unlockSelectedForChild:
-            return try await apiClient.unlockSelectedForChild(
-                familyID: familyID,
-                childProfileID: operation.childProfileID,
-                operationID: operation.operationID
-            )
-        }
-    }
-
-    private func mergeManualLockResponse(
-        _ response: APIClient.ChildSelectedSetResponse,
-        into operation: ManualLockOperation
-    ) -> ManualLockOperation {
-        operation.merging(receipts: response.devices.map {
-            ManualLockOperationReceipt(
-                deviceID: $0.child_device_id,
-                commandID: $0.command_id
-            )
-        })
-    }
-
-    private static func manualLockFailureDisposition(
-        _ error: Error
-    ) -> ManualLockRequestFailureDisposition {
-        if case APIError.serverError(let status) = error,
-           (400..<500).contains(status),
-           ![408, 425, 429].contains(status) {
-            return .definitive
-        }
-        if let urlError = error as? URLError,
-           [.badURL, .unsupportedURL].contains(urlError.code) {
-            return .definitive
-        }
-        return .ambiguous
-    }
-
-    @MainActor
-    private func refreshLockState() async {
-        var operation: ManualLockOperation?
-        if let pendingManualLockOperation {
-            operation = pendingManualLockOperation
-        } else if let childProfileID = UUID(uuidString: child.id),
-                  let persisted = ManualLockOperationStore.load(childProfileID: childProfileID) {
-            pendingManualLockOperation = persisted
-            operation = persisted
-        } else {
-            operation = nil
-        }
+    private func refreshPhysicalShieldState() async {
         guard let famRaw = UserDefaults.standard.string(forKey: "evlin.familyID"),
-              let famID = UUID(uuidString: famRaw) else {
-            manualLockState = .pending
-            return
-        }
-
-        if let currentOperation = operation,
-           let action = ManualLockOperationOrchestrator.resumeAction(
-               for: currentOperation,
-               requestInFlight: manualLockRequestInFlight,
-               attemptedOperationIDs: automaticallyResumedManualOperationIDs
-           ),
-           case .post(let resumeOperation) = action {
-            automaticallyResumedManualOperationIDs.insert(resumeOperation.operationID)
-            manualLockRequestInFlight = true
-            lockBusy = true
-            manualLockState = .pending
-            do {
-                let response = try await postManualLockOperation(
-                    resumeOperation,
-                    familyID: famID
-                )
-                let merged = mergeManualLockResponse(response, into: resumeOperation)
-                ManualLockOperationStore.save(merged)
-                pendingManualLockOperation = merged
-                operation = merged
-                if let localDeviceID = UUID(uuidString: pairedChildID),
-                   let localReceipt = response.devices.first(where: {
-                       $0.child_device_id == localDeviceID
-                   }) {
-                    applyListIDIfNeeded(localReceipt.list_id.uuidString)
-                }
-            } catch {
-                let retained = ManualLockOperationOrchestrator.operationAfterFailure(
-                    resumeOperation,
-                    disposition: Self.manualLockFailureDisposition(error)
-                )
-                if let retained {
-                    ManualLockOperationStore.save(retained)
-                    pendingManualLockOperation = retained
-                    operation = retained
-                    lockNote = "Update is still pending."
-                } else {
-                    ManualLockOperationStore.clear(
-                        childProfileID: resumeOperation.childProfileID
-                    )
-                    pendingManualLockOperation = nil
-                    operation = nil
-                    lockError = "Couldn't finish the device update: \(String(describing: error))"
-                }
-            }
-            manualLockRequestInFlight = false
-            lockBusy = false
-        }
-
-        let deviceIDs = ManualLockOperationStatus.expectedDeviceIDs(
-            displayed: displayedChildDeviceIDs,
-            receipts: operation?.expectedDeviceIDs ?? []
-        )
-        guard !deviceIDs.isEmpty else {
-            manualLockState = .pending
-            return
-        }
+              let famID = UUID(uuidString: famRaw) else { return }
+        let deviceIDs = displayedChildDeviceIDs
+        guard !deviceIDs.isEmpty else { return }
 
         let snapshots = await fetchDeviceLockStates(familyID: famID, deviceIDs: deviceIDs)
-        let reducedState = applyLockSnapshots(snapshots, deviceIDs: deviceIDs)
-        if let operation {
-            let ackByDevice = await fetchCommandAcknowledgementsOnce(
-                operation.receipts,
-                expectedDeviceIDs: operation.expectedDeviceIDs
-            )
-            let reconciliation = ManualLockOperationReconciliation.evaluate(
-                operation: operation,
-                ackByDevice: ackByDevice,
-                manualLockedByDevice: manualLockedByDevice(from: snapshots),
-                aggregateState: reducedState
-            )
-            applyManualLockReconciliation(reconciliation, operation: operation)
-        }
+        applyLockSnapshots(snapshots, deviceIDs: deviceIDs)
     }
 
     private func fetchDeviceLockStates(
@@ -1607,103 +1305,6 @@ struct ProfileView: View {
         }
     }
 
-    private func waitForCommandAcknowledgements(
-        _ receipts: [ManualLockOperationReceipt],
-        expectedDeviceIDs: [UUID]
-    ) async -> [UUID: ManualLockAckOutcome] {
-        var commandByDevice: [UUID: UUID] = [:]
-        for receipt in receipts {
-            guard commandByDevice[receipt.deviceID] == nil,
-                  let commandID = receipt.commandID
-            else { continue }
-            commandByDevice[receipt.deviceID] = commandID
-        }
-        var ackByDevice = Dictionary(
-            uniqueKeysWithValues: expectedDeviceIDs.map { ($0, ManualLockAckOutcome.pending) }
-        )
-
-        for attempt in 0..<6 {
-            let waitingCommands: [(UUID, UUID)] = expectedDeviceIDs.compactMap { deviceID in
-                guard ackByDevice[deviceID] == .pending,
-                      let commandID = commandByDevice[deviceID]
-                else { return nil }
-                return (deviceID, commandID)
-            }
-            let round = await withTaskGroup(of: ProfileLockCommandAck.self) { group in
-                for (deviceID, commandID) in waitingCommands {
-                    group.addTask { @MainActor in
-                        let status = try? await apiClient.fetchRichAckStatus(commandID: commandID)
-                        return ProfileLockCommandAck(
-                            deviceID: deviceID,
-                            outcome: status.map { ManualLockAckOutcome.from(status: $0.status) } ?? .pending
-                        )
-                    }
-                }
-
-                var acknowledgements: [ProfileLockCommandAck] = []
-                for await acknowledgement in group {
-                    acknowledgements.append(acknowledgement)
-                }
-                return acknowledgements
-            }
-            for acknowledgement in round {
-                ackByDevice[acknowledgement.deviceID] = acknowledgement.outcome
-            }
-
-            let status = ManualLockOperationStatus.from(
-                expectedDeviceIDs: expectedDeviceIDs,
-                ackByDevice: ackByDevice
-            )
-            applyLockOperationStatus(status)
-            if status.remainingDeviceCount == 0 { break }
-            if attempt < 5 {
-                try? await Task.sleep(nanoseconds: 2_500_000_000)
-            }
-        }
-        return ackByDevice
-    }
-
-    private func fetchCommandAcknowledgementsOnce(
-        _ receipts: [ManualLockOperationReceipt],
-        expectedDeviceIDs: [UUID]
-    ) async -> [UUID: ManualLockAckOutcome] {
-        var commandByDevice: [UUID: UUID] = [:]
-        for receipt in receipts {
-            guard commandByDevice[receipt.deviceID] == nil,
-                  let commandID = receipt.commandID
-            else { continue }
-            commandByDevice[receipt.deviceID] = commandID
-        }
-        var ackByDevice = Dictionary(
-            uniqueKeysWithValues: expectedDeviceIDs.map { ($0, ManualLockAckOutcome.pending) }
-        )
-        let commands = expectedDeviceIDs.compactMap { deviceID -> (UUID, UUID)? in
-            guard let commandID = commandByDevice[deviceID] else { return nil }
-            return (deviceID, commandID)
-        }
-        let round = await withTaskGroup(of: ProfileLockCommandAck.self) { group in
-            for (deviceID, commandID) in commands {
-                group.addTask { @MainActor in
-                    let status = try? await apiClient.fetchRichAckStatus(commandID: commandID)
-                    return ProfileLockCommandAck(
-                        deviceID: deviceID,
-                        outcome: status.map { ManualLockAckOutcome.from(status: $0.status) } ?? .pending
-                    )
-                }
-            }
-
-            var acknowledgements: [ProfileLockCommandAck] = []
-            for await acknowledgement in group {
-                acknowledgements.append(acknowledgement)
-            }
-            return acknowledgements
-        }
-        for acknowledgement in round {
-            ackByDevice[acknowledgement.deviceID] = acknowledgement.outcome
-        }
-        return ackByDevice
-    }
-
     /// A row is locked by its OWN device's snapshot when one exists; before
     /// the first snapshot arrives, fall back to the child-level status so the
     /// row does not flash "ACTIVE" while the truth is still unknown.
@@ -1716,40 +1317,16 @@ struct ProfileView: View {
         ) ?? fallback
     }
 
-    private func manualLockedByDevice(
-        from snapshots: [ProfileDeviceLockSnapshot]
-    ) -> [UUID: Bool] {
-        let pairs: [(UUID, Bool)] = snapshots.compactMap { snapshot in
-            guard let isManualLocked = ManualLockAggregateState.isManualLocked(
-                coveringSources: snapshot.state?.covering_sources
-            ) else { return nil }
-            return (snapshot.deviceID, isManualLocked)
-        }
-        return Dictionary(uniqueKeysWithValues: pairs)
-    }
-
-    @discardableResult
     @MainActor
     private func applyLockSnapshots(
         _ snapshots: [ProfileDeviceLockSnapshot],
         deviceIDs: [UUID]
-    ) -> ManualLockAggregateState {
+    ) {
         let statePairs: [(UUID, APIClient.DeviceLockStateResponse)] = snapshots.compactMap { snapshot in
             guard let state = snapshot.state else { return nil }
             return (snapshot.deviceID, state)
         }
         let snapshotByDevice = Dictionary(uniqueKeysWithValues: statePairs)
-        let sources = deviceIDs.map { snapshotByDevice[$0]?.covering_sources }
-        let reducedState = ManualLockAggregateState.reduce(
-            expectedDeviceCount: deviceIDs.count,
-            coveringSources: sources
-        )
-        if let completeSources = AutomaticLockNotice.completeCoveringSources(
-            expectedDeviceCount: deviceIDs.count,
-            coveringSources: sources
-        ) {
-            automaticCoveringSources = completeSources
-        }
         let lockedByDevice = snapshotByDevice.mapValues(\.deviceLocked)
         let automaticState = AutomaticLockAggregateState.reduce(
             expectedDeviceIDs: deviceIDs,
@@ -1762,7 +1339,6 @@ struct ProfileView: View {
         }
 
         withAnimation(.easeOut(duration: 0.18)) {
-            manualLockState = reducedState
             if let automaticState {
                 localStatus = automaticState == .locked ? .locked : .unlocked
             }
@@ -1773,57 +1349,6 @@ struct ProfileView: View {
             // (2026-08-05): a lock that covers one device must not repaint
             // its unlocked sibling.
             lockedByDeviceID = lockedByDevice
-        }
-        return reducedState
-    }
-
-    @MainActor
-    private func performAutomaticLockAction(_ action: AutomaticLockNoticeAction) async {
-        guard !automaticActionBusy,
-              let childProfileID = childProfileUUID
-        else { return }
-
-        automaticActionBusy = true
-        automaticActionError = nil
-        defer { automaticActionBusy = false }
-
-        do {
-            try await AutomaticLockActionRunner.run(
-                action: action,
-                childProfileID: childProfileID
-            ) { id, usageDate in
-                _ = try await apiClient.unlockOverride(
-                    childProfileID: id,
-                    usageDate: usageDate
-                )
-            }
-            await refreshEarnedSummary()
-            await refreshLockState()
-        } catch {
-            automaticActionError = error.localizedDescription
-        }
-    }
-
-    @MainActor
-    private func applyLockOperationStatus(_ status: ManualLockOperationStatus) {
-        lockError = status.errorMessage
-        lockNote = status.noteMessage
-    }
-
-    @MainActor
-    private func applyManualLockReconciliation(
-        _ reconciliation: ManualLockOperationReconciliation,
-        operation: ManualLockOperation
-    ) {
-        guard pendingManualLockOperation == operation else { return }
-        applyLockOperationStatus(reconciliation.status)
-        manualLockState = reconciliation.displayState
-        if reconciliation.shouldClearPersistence {
-            ManualLockOperationStore.clear(childProfileID: operation.childProfileID)
-            pendingManualLockOperation = nil
-        } else {
-            ManualLockOperationStore.save(operation)
-            pendingManualLockOperation = operation
         }
     }
 
@@ -1863,7 +1388,7 @@ struct ProfileView: View {
     /// to the generic raw-error display so they remain diagnosable.
     ///
     /// Exposed as `internal` (not private) so the unit test can call it directly
-    /// without going through the full async `toggleDeviceLock()` path.
+    /// without going through a full async lock operation.
     static func isNoLockedSetError(_ error: Error) -> Bool {
         if case .serverError(let code) = error as? APIError {
             // 400: selected_set_missing_or_empty or similar validation failure.
@@ -2399,8 +1924,6 @@ extension ProfileView {
         let rules: [RuleItem]
         let dailyLimitMinutes: Int
         let localStatus: ChildProfile.Status
-        let manualLockState: ManualLockAggregateState
-        let automaticCoveringSources: [String]
         let masterLockPresentation: MasterLockPresentation
         let earnedSummary: APIClient.EarnedSummaryDTO?
         let profileTab: ProfileSubTab
@@ -2414,8 +1937,6 @@ extension ProfileView {
         _rules = State(initialValue: fixture.rules)
         _dailyLimitMinutes = State(initialValue: fixture.dailyLimitMinutes)
         _localStatus = State(initialValue: fixture.localStatus)
-        _manualLockState = State(initialValue: fixture.manualLockState)
-        _automaticCoveringSources = State(initialValue: fixture.automaticCoveringSources)
         _masterLockPresentation = State(initialValue: fixture.masterLockPresentation)
         _earnedSummary = State(initialValue: fixture.earnedSummary)
         _profileTab = State(initialValue: fixture.profileTab)

@@ -68,4 +68,15 @@ final class MasterLockAccessibilityTests: XCTestCase {
         XCTAssertFalse(source.contains("Task { await resolveTaskOverrideChoice(.lockNow) }"))
         XCTAssertFalse(source.contains("Task { await resolveTaskOverrideChoice(.keepUnlocked) }"))
     }
+
+    func testProfileDoesNotRetainLegacyMasterLockWriter() throws {
+        let source = try profileViewSource
+
+        XCTAssertFalse(source.contains("pendingManualLockOperation"))
+        XCTAssertFalse(source.contains("ManualLockOperationOrchestrator"))
+        XCTAssertFalse(source.contains("lockSelectedForChild("))
+        XCTAssertFalse(source.contains("unlockSelectedForChild("))
+        XCTAssertFalse(source.contains("toggleDeviceLock()"))
+        XCTAssertTrue(source.contains("refreshPhysicalShieldState()"))
+    }
 }
