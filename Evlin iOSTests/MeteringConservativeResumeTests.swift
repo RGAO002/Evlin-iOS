@@ -377,6 +377,119 @@ final class MeteringConservativeResumeTests: XCTestCase {
         )
     }
 
+    func testPausedPriorDayResumesWithinSamePolicyGeneration() async throws {
+        // iPad 2026-08-28: all tasks completed after the device had remained
+        // paused on 08-26. The 08-28 conservative candidate existed in the
+        // SAME policy generation, so stale-day candidate selection ignored it
+        // and the pool never restarted.
+        let fixture = try ResumeFixture(owner: owner, start: start)
+        defer { fixture.cleanup() }
+        let pausedAt = start.addingTimeInterval(3_600)
+        let nextDay = start.addingTimeInterval(86_400)
+        let runtime = EarnedTimeRuntime(
+            usageDate: "2026-07-18",
+            timezone: "America/New_York",
+            policyRevision: "resume",
+            dailyPoolMinutes: 120,
+            deviceCapMinutes: 60,
+            remainingMinutes: 60,
+            estimatedMinutes: 0
+        )
+
+        try makeDriver(fixture, clock: ResumeClock(now: pausedAt))
+            .reconcileUsageGate(
+                ownerChildDeviceID: owner,
+                allowed: false,
+                runtime: resumeRuntime()
+            )
+        let seeded = try fixture.store.read()
+        let generationID = try XCTUnwrap(seeded.activeGenerationID)
+        let generation = try XCTUnwrap(seeded.generations[generationID])
+        let generationKey = MeteringGenerationKey(
+            protocolVersion: generation.protocolVersion,
+            childDeviceID: generation.childDeviceID,
+            canonicalTimezone: generation.canonicalTimezone,
+            policyRevision: generation.policyRevision,
+            measurementSelectionDigest: generation.measurementSelectionDigest,
+            enforcementSetID: generation.enforcementSetID
+        )
+        _ = try fixture.store.reconcileMeteringHorizon(MeteringHorizonRequest(
+            ownerChildDeviceID: owner,
+            today: runtime.usageDate,
+            generationKey: generationKey,
+            persistedSelectionBytes: generation.measurementSelectionBytes,
+            poolMinutes: runtime.dailyPoolMinutes,
+            deviceCapMinutes: runtime.deviceCapMinutes,
+            authoritativeBaseAcceptedMinutes: 0,
+            now: nextDay
+        ))
+        _ = try fixture.store.ingestDesiredPolicy(MeteringDesiredPolicy(
+            commandID: UUID(),
+            ownerChildDeviceID: owner,
+            orderingToken: 1,
+            policyRevision: runtime.policyRevision,
+            usageDate: runtime.usageDate,
+            canonicalTimezone: runtime.timezone,
+            dailyPoolMinutes: runtime.dailyPoolMinutes,
+            deviceCapMinutes: runtime.deviceCapMinutes,
+            remainingMinutes: runtime.remainingMinutes,
+            enforcementSetID: generation.enforcementSetID,
+            receivedAt: nextDay,
+            appliedAt: nil,
+            ackedAt: nil
+        ))
+        try makeDriver(fixture, clock: ResumeClock(now: nextDay.addingTimeInterval(1)))
+            .reconcileUsageGate(
+                ownerChildDeviceID: owner,
+                allowed: true,
+                runtime: runtime
+            )
+
+        var state = try fixture.store.read()
+        let candidate = try XCTUnwrap(state.routes.values.first {
+            $0.routeID != fixture.oldRouteID
+                && $0.generationID == generationID
+                && $0.usageDate == runtime.usageDate
+                && state.epochs[$0.epochID]?.resumeBoundaryPending == true
+        })
+        XCTAssertEqual(candidate.generationID, state.activeGenerationID)
+        fixture.transport.results = [
+            registrationResult(
+                epochID: candidate.epochID,
+                usageDate: runtime.usageDate,
+                estimatedMinutes: 0,
+                capMinutes: runtime.deviceCapMinutes
+            ),
+            activationResult(
+                epochID: candidate.epochID,
+                usageDate: runtime.usageDate,
+                estimatedMinutes: 0,
+                capMinutes: runtime.deviceCapMinutes
+            ),
+        ]
+
+        for pass in 1...5 {
+            try await makeDriver(
+                fixture,
+                clock: ResumeClock(
+                    now: nextDay.addingTimeInterval(TimeInterval(5 * pass))
+                )
+            ).recover(ownerChildDeviceID: owner)
+            state = try fixture.store.read()
+            if state.activeRouteID == candidate.routeID { break }
+        }
+
+        state = try fixture.store.read()
+        XCTAssertEqual(state.activeRouteID, candidate.routeID)
+        XCTAssertEqual(state.activeEpochID, candidate.epochID)
+        XCTAssertEqual(
+            state.registrationWork.values.first {
+                $0.routeID == candidate.routeID
+            }?.request.reason,
+            .gateResumeConservative
+        )
+    }
+
     func testElapsedNeverRegisteredCandidateHandoffIsAbandonedSoNextDayResumes() async throws {
         // #53 (FIX-0c), iPad 2026-08-05: a same-day gate-resume candidate that
         // never managed to register is stranded when midnight passes — the

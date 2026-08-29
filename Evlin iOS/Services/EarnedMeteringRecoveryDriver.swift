@@ -131,6 +131,7 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
         _ = try store.reconcileEpochStartsFromSuccessfulRegistrations(owner: effectiveOwner)
         try settlePausedRouteSamples(owner: effectiveOwner)
         try abandonElapsedCandidateHandoffIfNeeded(owner: effectiveOwner)
+        try closeElapsedRolloverWorkIfNeeded(owner: effectiveOwner)
         try cancelBackwardPreparingHandoffIfNeeded(owner: effectiveOwner)
         try yieldSupersededCanonicalRolloverIfNeeded(owner: effectiveOwner)
         try markElapsedActivePriorAbsentIfNeeded(owner: effectiveOwner)
@@ -273,6 +274,39 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
                 state.installWork[workID] = install
             }
             state.v2RouteHandoff = nil
+        }
+    }
+
+    /// Closes the parent rollover after its candidate has already been retired
+    /// as elapsed. The candidate abandon path historically terminalized the
+    /// activation and tombstoned the route but left `rolloverEffectsWork`
+    /// pending. Recovery then returned at that impossible rollover forever and
+    /// never reached a newer task-gate or policy candidate (iPad 2026-08-28).
+    private func closeElapsedRolloverWorkIfNeeded(owner: UUID) throws {
+        try store.transaction(expectedOwner: owner) { state in
+            guard var work = state.rolloverEffectsWork,
+                  work.ownerChildDeviceID == owner,
+                  work.retry.terminal == .pending,
+                  !work.activationAcknowledged,
+                  state.routes[work.newRouteID]?.lifecycle == .tombstoned,
+                  state.epochs[work.newEpochID]?.status == .retired,
+                  state.epochs[work.newEpochID]?.retireReason == .activationSuperseded,
+                  state.activationWork.values.contains(where: {
+                      $0.ownerChildDeviceID == owner
+                          && $0.epochID == work.newEpochID
+                          && $0.routeID == work.newRouteID
+                          && $0.retry.terminal == .superseded
+                          && $0.retry.lastErrorCode == "candidate_day_elapsed"
+                  })
+            else { return }
+
+            work.retry.terminal = .superseded
+            work.retry.lastErrorCode = "candidate_day_elapsed"
+            work.retry.nextAttemptAt = clock.now
+            state.rolloverEffectsWork = work
+            if state.v2RouteHandoff?.toRouteID == work.newRouteID {
+                state.v2RouteHandoff = nil
+            }
         }
     }
 
@@ -2693,12 +2727,14 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
     ///
     /// Ordinary replacement only ever swaps routes WITHIN the active day, and
     /// canonical rollover only ever advances WITHIN one generation. When the
-    /// active day is over and the active generation's policy revision is dead,
-    /// neither can move — the device meters nothing until it is reinstalled
-    /// (iPhone, 2026-07-25). This branch, reached only after the same-day search
-    /// finds nothing, lets the replacement machinery cross both boundaries at
-    /// once and adopt canonical today on the revision the backend actually
-    /// accepts.
+    /// active day is over, neither can move — the device meters nothing until
+    /// it is reinstalled (iPhone, 2026-07-25). The same dead end also occurs
+    /// when a task gate spans midnight without changing the policy revision:
+    /// the conservative candidate belongs to the active generation but is the
+    /// only route allowed to resume accounting (iPad, 2026-08-28). This branch,
+    /// reached only after the same-day search finds nothing, lets replacement
+    /// cross the day boundary and adopt canonical today on the revision the
+    /// backend actually accepts.
     ///
     /// The desired revision is the whole gate, and deliberately so: a wedged
     /// device also accumulates several never-retired generations on dead
@@ -2715,7 +2751,6 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
               desired.ownerChildDeviceID == owner,
               !desired.policyRevision.isEmpty,
               let activeGeneration = state.generations[activeRoute.generationID],
-              activeGeneration.policyRevision != desired.policyRevision,
               let today = MeteringEpochContract.canonicalUsageDate(
                   at: clock.now,
                   timezoneIdentifier: activeGeneration.canonicalTimezone
@@ -2725,7 +2760,8 @@ nonisolated final class EarnedMeteringRecoveryDriver: @unchecked Sendable {
         return candidateRoutes(in: state, owner: owner).first {
             $0.routeID != activeRoute.routeID
                 && $0.createdAt >= activeRoute.createdAt
-                && $0.generationID != activeRoute.generationID
+                && ($0.generationID != activeRoute.generationID
+                    || state.epochs[$0.epochID]?.resumeBoundaryPending == true)
                 && $0.usageDate == today
                 && state.generations[$0.generationID]?.policyRevision == desired.policyRevision
         }

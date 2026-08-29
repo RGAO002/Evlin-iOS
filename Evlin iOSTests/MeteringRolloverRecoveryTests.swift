@@ -55,6 +55,82 @@ final class MeteringRolloverRecoveryTests: XCTestCase {
         XCTAssertEqual(state.routes[fixture.newRouteID]?.lifecycle, .planned)
     }
 
+    func testElapsedTombstonedRolloverCannotBlockLaterRecovery() async throws {
+        // iPad 2026-08-28: the 08-27 candidate had already been retired with
+        // candidate_day_elapsed, but its parent rollover work remained pending.
+        // Every recovery pass returned at that dead work and never reached the
+        // current-day task-gate candidate.
+        let fixture = try seedActiveAndReservedRoutes()
+        let workID = try store.prepareCanonicalRollover(
+            owner: owner,
+            toUsageDate: "2026-07-18",
+            now: start.addingTimeInterval(86_400)
+        )
+        try store.transaction(expectedOwner: owner) { state in
+            var work = try XCTUnwrap(state.rolloverEffectsWork)
+            work.earnedSourceResetAcknowledged = true
+            work.perAppResetAcknowledged = true
+            work.taskStateResetAcknowledged = true
+            work.bypassExpiryAcknowledged = true
+            work.installAcknowledged = true
+            work.registrationAcknowledged = true
+            state.rolloverEffectsWork = work
+            state.v2RouteHandoff = nil
+            state.routes[fixture.newRouteID]?.lifecycle = .tombstoned
+            let retiredRoute = try XCTUnwrap(state.routes[fixture.newRouteID])
+            state.epochs[fixture.newEpochID]?.status = .retired
+            state.epochs[fixture.newEpochID]?.retiredAt = self.start.addingTimeInterval(2 * 86_400)
+            state.epochs[fixture.newEpochID]?.retireReason = .activationSuperseded
+            state.tombstones[fixture.newRouteID] = MeteringRouteTombstone(
+                routeID: retiredRoute.routeID,
+                activityName: retiredRoute.activityName,
+                eventNames: retiredRoute.plannedEvents.map(\.eventName),
+                ownerChildDeviceID: owner,
+                usageDate: retiredRoute.usageDate,
+                epochID: retiredRoute.epochID,
+                generationID: retiredRoute.generationID,
+                canonicalDayEnd: self.start.addingTimeInterval(2 * 86_400),
+                stopAcknowledgedAt: nil,
+                referencedWorkIDs: [],
+                retainedUntil: nil
+            )
+            let activationID = UUID()
+            state.activationWork[activationID] = EpochActivationWork(
+                workID: activationID,
+                ownerChildDeviceID: owner,
+                epochID: fixture.newEpochID,
+                routeID: fixture.newRouteID,
+                request: EpochActivationRequestDTO(
+                    protocolVersion: 2,
+                    deviceID: owner,
+                    routeID: fixture.newRouteID,
+                    verifiedAt: self.start.addingTimeInterval(86_405)
+                ),
+                claim: nil,
+                retry: MeteringRetryState(
+                    attemptCount: 2,
+                    nextAttemptAt: self.start,
+                    lastErrorCode: "candidate_day_elapsed",
+                    terminal: .superseded
+                ),
+                createdAt: self.start.addingTimeInterval(86_405)
+            )
+        }
+
+        let center = RolloverCenter()
+        let transport = RolloverTransport(results: [])
+        try await makeDriver(
+            center: center,
+            transport: transport,
+            clock: RolloverClock(now: start.addingTimeInterval(2 * 86_400))
+        ).recover(ownerChildDeviceID: owner)
+
+        let state = try store.read()
+        XCTAssertNotEqual(state.rolloverEffectsWork?.workID, workID)
+        XCTAssertNotEqual(state.rolloverEffectsWork?.newRouteID, fixture.newRouteID)
+        XCTAssertNotEqual(state.rolloverEffectsWork?.newEpochID, fixture.newEpochID)
+    }
+
     func testCanonicalRolloverDoesNotCarryPriorRoutePhysicalOffset() throws {
         let fixture = try seedActiveAndReservedRoutes()
         try store.transaction(expectedOwner: owner) { state in
