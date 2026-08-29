@@ -912,6 +912,51 @@ final class EarnedMeteringCallbackTests: XCTestCase {
                       "expired parked entry must be pruned")
     }
 
+    func testExpiredTerminalResumeCallbackMarksPhysicalLadderConsumed() throws {
+        // iPad 2026-08-28: a task-gate candidate parked t120 while still
+        // planned. The park expired before activation, so replay discarded the
+        // only proof that every one-shot rung had already fired. The route then
+        // became logically active with no physical events left to report.
+        let fixture = try CallbackFixture.active()
+        defer { fixture.cleanup() }
+        try fixture.mutate { state in
+            state.routes[fixture.routeID]?.lifecycle = .planned
+            state.routes[fixture.routeID]?.plannedEvents = [
+                MeteringEventPlan(
+                    eventName: MeteringRouteNamespace.eventName(
+                        routeID: fixture.routeID,
+                        thresholdMinutes: 5
+                    ),
+                    thresholdMinutes: 5
+                )
+            ]
+            state.epochs[fixture.epochID]?.resumeBoundaryPending = true
+            state.activeRouteID = nil
+            state.activeEpochID = nil
+            state.activeGenerationID = nil
+        }
+        _ = try fixture.callbackHandler().handle(
+            fixture.callback(threshold: 5),
+            expectedOwnerChildDeviceID: fixture.owner
+        )
+
+        _ = try fixture.store.replayDeferredCallbacks(
+            owner: fixture.owner,
+            now: fixture.start.addingTimeInterval(
+                DeviceEpochStore.deferredCallbackGraceSeconds + 600
+            )
+        )
+
+        let state = try fixture.store.read()
+        XCTAssertTrue(state.deferredCallbacks.isEmpty)
+        XCTAssertEqual(
+            state.installWork.values.first {
+                $0.routeID == fixture.routeID
+            }?.retry.lastErrorCode,
+            "physical_events_consumed_too_early"
+        )
+    }
+
     func testActivatingRouteFoldsBurstIntoOneMonotonicDeferredHighWater() throws {
         let fixture = try CallbackFixture.active()
         defer { fixture.cleanup() }

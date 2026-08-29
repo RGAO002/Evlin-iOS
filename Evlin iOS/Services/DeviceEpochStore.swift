@@ -2796,6 +2796,24 @@ nonisolated final class DeviceEpochStore: @unchecked Sendable {
                     results.append(result)
                 case .planned:
                     if now.timeIntervalSince(parked.parkedAt) > Self.deferredCallbackGraceSeconds {
+                        if let epoch = state.epochs[route.epochID],
+                           epoch.resumeBoundaryPending,
+                           let terminalThreshold = route.plannedEvents
+                               .map(\.thresholdMinutes)
+                               .max(),
+                           parked.thresholdMinutes >= terminalThreshold,
+                           let installID = state.installWork.first(where: {
+                               $0.value.ownerChildDeviceID == owner
+                                   && $0.value.routeID == route.routeID
+                           })?.key {
+                            // The expired park is still durable proof that the
+                            // daemon consumed this route's entire one-shot
+                            // ladder before it became authoritative. Preserve
+                            // that proof for the existing physical-identity
+                            // repair instead of activating a deaf route.
+                            state.installWork[installID]?.retry.lastErrorCode =
+                                "physical_events_consumed_too_early"
+                        }
                         state.deferredCallbacks[key] = nil
                         prunedReasons.append("grace_elapsed")
                     }
