@@ -286,6 +286,25 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
     }
 
     @MainActor
+    func testProjectionCommitRejectsAcknowledgementWhenDurableStateCannotReload() async throws {
+        let suiteName = "override-projection-failure-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let lockStore = ActiveLockStore(defaults: defaults)
+        defaults.set(Data("not-json-or-plist".utf8), forKey: "evlin.blockRecords")
+
+        do {
+            try await ParentUnlockOverrideProjectionApplication.reapplyCurrentRestrictions(
+                store: lockStore
+            )
+            XCTFail("a command must not confirm when restrictions were not projected")
+        } catch let error as ParentUnlockOverrideCommandApplicationError {
+            XCTAssertEqual(error, .projectionFailed)
+        }
+    }
+
+    @MainActor
     func testCommandPollerEntryPointAppliesDurableOverrideBeforeProjection() async throws {
         let harness = try makeOverrideHarness()
         var projectedRevision: Int64?

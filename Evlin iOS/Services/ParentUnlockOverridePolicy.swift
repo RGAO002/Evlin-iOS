@@ -96,6 +96,7 @@ nonisolated enum ParentUnlockOverrideProjectionApplication {
 
 nonisolated enum ParentUnlockOverrideCommandApplicationError: Error, Equatable {
     case malformedCommand
+    case projectionFailed
 }
 
 nonisolated enum ParentUnlockOverrideAck {

@@ -13,6 +13,20 @@ final class ActiveLockStoreTests: XCTestCase {
         defaults?.removeObject(forKey: EarnedShieldEffectStore.envelopeKey)
     }
 
+    func test_reapplyCurrentRestrictions_reportsFailureWhenDurableStateCannotReload() async throws {
+        let suiteName = "active-lock-reapply-failure-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = ActiveLockStore(defaults: defaults)
+        defaults.removeObject(forKey: "evlin.lastRecompute")
+        defaults.set(Data("not-json-or-plist".utf8), forKey: "evlin.blockRecords")
+        let reapplied = await store.reapplyCurrentRestrictions()
+
+        XCTAssertFalse(reapplied)
+        XCTAssertNil(defaults.string(forKey: "evlin.lastRecompute"))
+    }
+
     func test_durable_lock_serializes_extension_write_after_cas_persist() throws {
         let recordKey = "all:all"
         let compared = DispatchSemaphore(value: 0)

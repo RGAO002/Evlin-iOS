@@ -215,7 +215,7 @@ final class ActionExecutor: @unchecked Sendable {
         parentUnlockOverrideStore: ParentUnlockOverrideStore = .shared,
         parentUnlockOverrideNow: @escaping () -> Date = Date.init,
         parentUnlockOverrideProjection: @escaping () async throws -> Void = {
-            await ActiveLockStore.shared.reapplyCurrentRestrictions()
+            try await ParentUnlockOverrideProjectionApplication.reapplyCurrentRestrictions()
         },
         parentMasterLockMutation: (() async -> Bool)? = nil,
         parentMasterUnlockMutation: (() async -> Bool)? = nil,

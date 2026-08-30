@@ -553,7 +553,8 @@ enum NSELockApplier {
                     expectedOwner: fetchedDeviceID,
                     expiryScheduler: DeviceActivityCenterScheduler(),
                     project: {
-                        await ActiveLockStore.shared.reapplyCurrentRestrictions()
+                        try await ParentUnlockOverrideProjectionApplication
+                            .reapplyCurrentRestrictions()
                     }
                 )
                 guard disposition == .applied || disposition == .replayed else {

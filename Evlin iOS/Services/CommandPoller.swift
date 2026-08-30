@@ -973,7 +973,7 @@ final class CommandPoller {
         store: ParentUnlockOverrideStore = .shared,
         expiryScheduler: (any DeviceActivityScheduling)? = DeviceActivityCenterScheduler(),
         project: () async throws -> Void = {
-            await ActiveLockStore.shared.reapplyCurrentRestrictions()
+            try await ParentUnlockOverrideProjectionApplication.reapplyCurrentRestrictions()
         }
     ) async throws -> ParentUnlockOverrideDisposition {
         try await ParentUnlockOverrideCommandApplication.apply(

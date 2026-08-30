@@ -615,11 +615,13 @@ actor ActiveLockStore {
         (Array(shieldRecords.values), Array(blockRecords.values))
     }
 
-    func reapplyCurrentRestrictions() {
-        _ = ActiveLockPersistenceLock.shared.withLock {
-            guard reloadDurableState() else { return }
+    @discardableResult
+    func reapplyCurrentRestrictions() -> Bool {
+        ActiveLockPersistenceLock.shared.withLock {
+            guard reloadDurableState() else { return false }
             recomputeAndApply()
-        }
+            return true
+        } ?? false
     }
 
     func effectiveState(for query: AppQuery) -> EffectiveState {
@@ -1148,6 +1150,16 @@ actor ActiveLockStore {
         }
 
         return (expiredShields, expiredBlocks)
+    }
+}
+
+extension ParentUnlockOverrideProjectionApplication {
+    static func reapplyCurrentRestrictions(
+        store: ActiveLockStore = .shared
+    ) async throws {
+        guard await store.reapplyCurrentRestrictions() else {
+            throw ParentUnlockOverrideCommandApplicationError.projectionFailed
+        }
     }
 }
 
