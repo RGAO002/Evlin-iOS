@@ -150,3 +150,42 @@ Merge/deploy is allowed only when all six scenarios and memory/daemon checks
 are recorded as passed. Until then, rollback is simply: keep backend creation
 disabled and do not distribute the `visual-v2` IPA outside the designated
 devices.
+
+## 2026-08-30 field ledger
+
+Completed code changes awaiting final device acceptance:
+
+- Unlock-sheet action visibility and fixed presentation: `df435cb`, `7b1fe92`.
+- Reflection shield scoping and Master controls: `944ea97`.
+- Task override/device-state correction and stale task-gate pool recovery:
+  `dcab255`, `9a52a57`, `fd5c336`.
+- Legacy duplicate Master lock writer removal: `bb96960`.
+- Override-expiry projection acknowledgement hardening: `e910b0f`.
+
+Observed expiry failure before installing `e910b0f`:
+
+- Override revision 30 expired at 2026-08-30 04:55:49Z.
+- The iPad acknowledged `parent_unlock_override_cancel` at 04:56:28Z, while
+  its App Group had no matching `evlin.lastRecompute` entry and apps remained
+  physically unlocked.
+- A separate explicit shield at 04:57:06Z finally recomputed two shields and
+  physically locked the device, leaving an approximately 77-second false-green
+  window on the parent UI.
+- `e910b0f` makes projection success observable and prevents NSE, poll, or
+  foreground execution from confirming an override command when durable lock
+  state could not be reloaded and projected.
+
+Remaining true-device checks:
+
+- [ ] Repeat a 15-minute override on the iPad build containing `e910b0f`; at
+      expiry, physical lock and parent state must converge without a false-green
+      interval or a later repair shield.
+- [ ] Complete all tasks and confirm task shielding clears and the existing pool
+      route resumes on both K devices without opening Evlin.
+- [ ] Complete Reflection and confirm the Master control returns with a physical
+      state matching its label; an unexpired override must resume for its
+      remaining duration.
+- [ ] Verify device-limit and per-app-limit shields are suppressed during an
+      override and both return at expiry.
+- [ ] Repeat expiry with the K app force-quit and with one K device offline.
+- [ ] Recheck that the duration sheet shows Cancel at its default fixed height.
