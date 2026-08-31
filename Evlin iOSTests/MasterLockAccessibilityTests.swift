@@ -30,6 +30,20 @@ final class MasterLockAccessibilityTests: XCTestCase {
         }
     }
 
+    private var mixedLockSheetSource: String {
+        get throws {
+            let repositoryRoot = URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+            return try String(
+                contentsOf: repositoryRoot.appendingPathComponent(
+                    "Evlin iOS/Views/Profile/EvlinV2MixedLockSheet.swift"
+                ),
+                encoding: .utf8
+            )
+        }
+    }
+
     func testEveryVisibleStableStateHasOneUnambiguousAction() {
         XCTAssertEqual(EvlinV2MasterLockAccessibility.describe(.lockApps).label, "Lock apps")
         XCTAssertEqual(EvlinV2MasterLockAccessibility.describe(.unlockDirect).label, "Unlock apps")
@@ -58,6 +72,16 @@ final class MasterLockAccessibilityTests: XCTestCase {
 
         XCTAssertFalse(source.contains(".safeAreaInset(edge: .bottom)"))
         XCTAssertTrue(source.contains("Divider()"))
+    }
+
+    func testMixedLockSheetPreservesFullCopyAtOneFixedHeight() throws {
+        let source = try mixedLockSheetSource
+
+        XCTAssertTrue(source.contains("ScrollView"))
+        XCTAssertTrue(source.contains(".fixedSize(horizontal: false, vertical: true)"))
+        XCTAssertTrue(source.contains(".presentationDetents([.fraction(0.68)])"))
+        XCTAssertFalse(source.contains(".presentationDetents([.medium])"))
+        XCTAssertTrue(source.contains(".presentationDragIndicator(.hidden)"))
     }
 
     func testTaskOverrideChoiceCapturesProjectionBeforeDialogDismissal() throws {

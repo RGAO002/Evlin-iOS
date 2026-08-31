@@ -9,35 +9,40 @@ struct EvlinV2MixedLockSheet: View {
 
     var body: some View {
         NavigationStack {
-            VStack(alignment: .leading, spacing: 18) {
-                Text("\(childName)'s devices do not currently match. Choose the state you want across all enrolled devices.")
-                    .font(EvlinV2ProfileTokens.font(14, weight: .medium))
-                    .foregroundStyle(EvlinV2ProfileTokens.textMuted)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text("\(childName)'s devices do not currently match. Choose the state you want across all enrolled devices.")
+                        .font(EvlinV2ProfileTokens.font(14, weight: .medium))
+                        .foregroundStyle(EvlinV2ProfileTokens.textMuted)
+                        .fixedSize(horizontal: false, vertical: true)
 
-                deviceGroup(title: "LOCKED", names: model.lockedDeviceNames, icon: "lock.fill")
-                deviceGroup(title: "UNLOCKED", names: model.unlockedDeviceNames, icon: "lock.open.fill")
+                    deviceGroup(title: "LOCKED", names: model.lockedDeviceNames, icon: "lock.fill")
+                    deviceGroup(title: "UNLOCKED", names: model.unlockedDeviceNames, icon: "lock.open.fill")
 
-                Button(action: onLockAll) {
-                    actionLabel("Lock apps across devices", icon: "lock.fill", color: EvlinV2ProfileTokens.accent)
+                    Button(action: onLockAll) {
+                        actionLabel("Lock apps across devices", icon: "lock.fill", color: EvlinV2ProfileTokens.accent)
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(action: onUnlockAll) {
+                        actionLabel("Unlock apps across devices", icon: "lock.open.fill", color: EvlinV2ProfileTokens.danger)
+                    }
+                    .buttonStyle(.plain)
+
+                    Button("Cancel", action: onCancel)
+                        .font(EvlinV2ProfileTokens.font(14, weight: .semibold))
+                        .foregroundStyle(EvlinV2ProfileTokens.textMuted)
+                        .frame(maxWidth: .infinity, minHeight: 44)
                 }
-                .buttonStyle(.plain)
-
-                Button(action: onUnlockAll) {
-                    actionLabel("Unlock apps across devices", icon: "lock.open.fill", color: EvlinV2ProfileTokens.danger)
-                }
-                .buttonStyle(.plain)
-
-                Button("Cancel", action: onCancel)
-                    .font(EvlinV2ProfileTokens.font(14, weight: .semibold))
-                    .foregroundStyle(EvlinV2ProfileTokens.textMuted)
-                    .frame(maxWidth: .infinity, minHeight: 44)
-                Spacer(minLength: 0)
+                .padding(20)
             }
-            .padding(20)
+            .scrollIndicators(.hidden)
             .navigationTitle("Some devices are locked")
             .navigationBarTitleDisplayMode(.inline)
         }
-        .presentationDetents([.medium])
+        .presentationDetents([.fraction(0.68)])
+        .presentationDragIndicator(.hidden)
+        .presentationContentInteraction(.scrolls)
     }
 
     private func deviceGroup(title: String, names: [String], icon: String) -> some View {
