@@ -9,8 +9,9 @@ nonisolated struct EvlinV2MasterLockAccessibility: Equatable, Sendable {
         case .updating: Self(label: "Updating devices", enabled: false)
         case .lockApps: Self(label: "Lock apps", enabled: true)
         case .unlockDirect, .unlockWithDuration: Self(label: "Unlock apps", enabled: true)
-        case .mixed: Self(label: "Lock and unlock apps", enabled: true)
-        case .overrideActive: Self(label: "Lock and unlock apps", enabled: true)
+        case .mixed: Self(label: "Some devices are locked", enabled: true)
+        case .overrideActive(let desiredLocked, _):
+            Self(label: desiredLocked ? "Unlock apps" : "Lock now", enabled: true)
         case .delivery(let model): Self(label: model.canRetry ? "Retry device update" : "Updating devices", enabled: model.canRetry)
         }
     }
@@ -22,6 +23,8 @@ struct EvlinV2MasterLockControl: View {
     let errorMessage: String?
     let onLockWithDuration: (MasterUnlockSheetModel) -> Void
     let onUnlockWithDuration: (MasterUnlockSheetModel) -> Void
+    let onShowMixed: (MasterLockMixedModel) -> Void
+    let onLockNow: () -> Void
     let onRetry: () -> Void
 
     var body: some View {
@@ -52,18 +55,29 @@ struct EvlinV2MasterLockControl: View {
         switch presentation {
         case .updating:
             button(title: "Updating devices", icon: "arrow.triangle.2.circlepath", tone: .neutral, enabled: false) {}
-        case .lockApps, .unlockDirect, .unlockWithDuration, .mixed, .overrideActive:
+        case .lockApps:
             if let sheetModel {
-                VStack(spacing: 8) {
-                    button(title: "Lock apps", icon: "lock.fill", tone: .lock) {
-                        onLockWithDuration(sheetModel)
-                    }
-                    button(title: "Unlock apps", icon: "lock.open.fill", tone: .unlock) {
-                        onUnlockWithDuration(sheetModel)
-                    }
+                button(title: "Lock apps", icon: "lock.fill", tone: .lock) {
+                    onLockWithDuration(sheetModel)
+                }
+            }
+        case .unlockDirect, .unlockWithDuration:
+            if let sheetModel {
+                button(title: "Unlock apps", icon: "lock.open.fill", tone: .unlock) {
+                    onUnlockWithDuration(sheetModel)
+                }
+            }
+        case .mixed(let model):
+            button(title: "Some devices are locked", icon: "rectangle.2.swap", tone: .neutral) {
+                onShowMixed(model)
+            }
+        case .overrideActive(let desiredLocked, _):
+            if desiredLocked, let sheetModel {
+                button(title: "Unlock apps", icon: "lock.open.fill", tone: .unlock) {
+                    onUnlockWithDuration(sheetModel)
                 }
             } else {
-                button(title: "Updating devices", icon: "arrow.triangle.2.circlepath", tone: .neutral, enabled: false) {}
+                button(title: "Lock now", icon: "lock.fill", tone: .lock, action: onLockNow)
             }
         case .delivery(let model):
             button(

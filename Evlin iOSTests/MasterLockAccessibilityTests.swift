@@ -44,12 +44,30 @@ final class MasterLockAccessibilityTests: XCTestCase {
         }
     }
 
+    private var mixedLockSheetSource: String {
+        get throws {
+            let repositoryRoot = URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+            return try String(
+                contentsOf: repositoryRoot.appendingPathComponent(
+                    "Evlin iOS/Views/Profile/EvlinV2MixedLockSheet.swift"
+                ),
+                encoding: .utf8
+            )
+        }
+    }
+
     func testEveryVisibleStableStateHasOneUnambiguousAction() {
         XCTAssertEqual(EvlinV2MasterLockAccessibility.describe(.lockApps).label, "Lock apps")
         XCTAssertEqual(EvlinV2MasterLockAccessibility.describe(.unlockDirect).label, "Unlock apps")
         XCTAssertEqual(
             EvlinV2MasterLockAccessibility.describe(.overrideActive(desiredLocked: false, expiresAt: .distantFuture)).label,
-            "Lock and unlock apps"
+            "Lock now"
+        )
+        XCTAssertEqual(
+            EvlinV2MasterLockAccessibility.describe(.overrideActive(desiredLocked: true, expiresAt: .distantFuture)).label,
+            "Unlock apps"
         )
     }
 
@@ -74,16 +92,23 @@ final class MasterLockAccessibilityTests: XCTestCase {
         XCTAssertTrue(source.contains("Divider()"))
     }
 
-    func testMixedStateOffersBothDirectionsWithoutIntermediateSheet() throws {
+    func testMixedStateUsesOneEntryAndPresentsChoiceSheet() throws {
         let control = try masterLockControlSource
         let profile = try profileViewSource
 
-        XCTAssertFalse(control.contains("Some devices are locked"))
-        XCTAssertFalse(control.contains("onShowMixed"))
-        XCTAssertTrue(control.contains("Lock apps"))
-        XCTAssertTrue(control.contains("Unlock apps"))
-        XCTAssertFalse(profile.contains("presentedMasterMixedSheet"))
-        XCTAssertFalse(profile.contains("EvlinV2MixedLockSheet("))
+        XCTAssertTrue(control.contains("Some devices are locked"))
+        XCTAssertTrue(control.contains("onShowMixed"))
+        XCTAssertTrue(profile.contains("presentedMasterMixedSheet"))
+        XCTAssertTrue(profile.contains("EvlinV2MixedLockSheet("))
+    }
+
+    func testMixedChoiceActionsShareOneHorizontalRow() throws {
+        let source = try mixedLockSheetSource
+
+        XCTAssertTrue(source.contains("HStack(spacing: 10)"))
+        XCTAssertTrue(source.contains("Lock all"))
+        XCTAssertTrue(source.contains("Unlock all"))
+        XCTAssertTrue(source.contains(".frame(maxWidth: .infinity, minHeight: 50)"))
     }
 
     func testLockEntryPresentsDurationUIInsteadOfSubmittingDirectly() throws {

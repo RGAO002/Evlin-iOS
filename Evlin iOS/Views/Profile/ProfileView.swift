@@ -173,6 +173,7 @@ struct ProfileView: View {
     @State private var masterLockError: String? = nil
     @State private var presentedMasterControlDirection: EvlinV2MasterControlDirection? = nil
     @State private var presentedMasterControlModel: MasterUnlockSheetModel? = nil
+    @State private var presentedMasterMixedSheet: MasterLockMixedModel? = nil
     // B6 carry: once the backend list_id is first learned, remember it so
     // we only call saveLockedSetID + reKeyShieldRecord once per session.
     @State private var knownBackendListID: String? = nil
@@ -632,6 +633,29 @@ struct ProfileView: View {
                         presentedMasterControlDirection = nil
                         presentedMasterControlModel = nil
                     }
+                )
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { presentedMasterMixedSheet != nil },
+            set: { if !$0 { presentedMasterMixedSheet = nil } }
+        )) {
+            if let model = presentedMasterMixedSheet,
+               let projection = masterLockProjection {
+                EvlinV2MixedLockSheet(
+                    childName: displayChild.name,
+                    model: model,
+                    onLockAll: {
+                        presentedMasterMixedSheet = nil
+                        presentedMasterControlDirection = .lock
+                        presentedMasterControlModel = MasterUnlockSheetModel(projection: projection)
+                    },
+                    onUnlockAll: {
+                        presentedMasterMixedSheet = nil
+                        presentedMasterControlDirection = .unlock
+                        presentedMasterControlModel = MasterUnlockSheetModel(projection: projection)
+                    },
+                    onCancel: { presentedMasterMixedSheet = nil }
                 )
             }
         }
@@ -1845,6 +1869,10 @@ struct ProfileView: View {
                 onUnlockWithDuration: {
                     presentedMasterControlDirection = .unlock
                     presentedMasterControlModel = $0
+                },
+                onShowMixed: { presentedMasterMixedSheet = $0 },
+                onLockNow: {
+                    Task { await confirmMasterLockAction(.cancelOverrideAndLock) }
                 },
                 onRetry: {
                     guard let operation = pendingMasterLockOperation else { return }
