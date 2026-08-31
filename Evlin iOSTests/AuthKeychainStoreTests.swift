@@ -41,6 +41,32 @@ final class AuthKeychainStoreTests: XCTestCase {
         XCTAssertEqual(store.load()?.familyID, "fam-2")
     }
 
+    func testSaveDoesNotDeleteExistingSessionBeforeReplacement() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot
+                .appendingPathComponent("Evlin iOS/Services/Auth/KeychainStore.swift"),
+            encoding: .utf8
+        )
+        let saveBody = try XCTUnwrap(
+            source.range(of: "func save(_ tokens: StoredTokens) throws {")
+                .flatMap { start in
+                    source.range(
+                        of: "\n    func load() -> StoredTokens?",
+                        range: start.upperBound..<source.endIndex
+                    ).map { end in String(source[start.lowerBound..<end.lowerBound]) }
+                }
+        )
+
+        XCTAssertTrue(saveBody.contains("SecItemUpdate"))
+        XCTAssertFalse(
+            saveBody.contains("SecItemDelete"),
+            "Replacing a rotated token must never delete the usable session first."
+        )
+    }
+
     func testClearRemovesValue() throws {
         try store.save(StoredTokens(accessToken: "x", refreshToken: "y",
                                     accountID: "z", familyID: nil,

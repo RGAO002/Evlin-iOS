@@ -36,15 +36,43 @@ final class KeychainStore {
 
     func save(_ tokens: StoredTokens) throws {
         let data = try JSONEncoder().encode(tokens)
-        // Delete any existing item first so we don't hit errSecDuplicateItem.
-        SecItemDelete(baseQuery() as CFDictionary)
+        let updates: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+        ]
+        let updateStatus = SecItemUpdate(
+            baseQuery() as CFDictionary,
+            updates as CFDictionary
+        )
+        if updateStatus == errSecSuccess {
+            return
+        }
+        guard updateStatus == errSecItemNotFound else {
+            throw KeychainError.unexpectedStatus(updateStatus)
+        }
+
         var attrs = baseQuery()
         attrs[kSecValueData as String] = data
         attrs[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        let status = SecItemAdd(attrs as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw KeychainError.unexpectedStatus(status)
+        let addStatus = SecItemAdd(attrs as CFDictionary, nil)
+        if addStatus == errSecSuccess {
+            return
         }
+
+        // A second writer may have inserted the item after our update reported
+        // not-found. Retrying the update preserves whichever valid session is
+        // already present until this replacement commits successfully.
+        if addStatus == errSecDuplicateItem {
+            let retryStatus = SecItemUpdate(
+                baseQuery() as CFDictionary,
+                updates as CFDictionary
+            )
+            guard retryStatus == errSecSuccess else {
+                throw KeychainError.unexpectedStatus(retryStatus)
+            }
+            return
+        }
+        throw KeychainError.unexpectedStatus(addStatus)
     }
 
     func load() -> StoredTokens? {
