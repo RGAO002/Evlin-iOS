@@ -349,6 +349,7 @@ final class ActionExecutor: @unchecked Sendable {
                     command: cmd,
                     expectedOwner: expectedChildID,
                     now: parentUnlockOverrideNow(),
+                    currentUsageDate: overrideUsageDateProvider(),
                     store: parentUnlockOverrideStore,
                     setTimedParentLock: { locked, childID, commandID in
                         guard await DefaultGroupLockApplier.setTimedParentLock(

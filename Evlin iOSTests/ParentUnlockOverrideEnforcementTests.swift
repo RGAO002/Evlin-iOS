@@ -282,6 +282,52 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
     }
 
     @MainActor
+    func testCrossDayCancellationDoesNotReapplyPriorDayRestrictions() async throws {
+        let harness = try makeOverrideHarness()
+        var timedLockMutations: [Bool] = []
+        var projectionCount = 0
+
+        let disposition = try await ParentUnlockOverrideCommandApplication.apply(
+            envelope: envelope(cancelled: true),
+            expectedOwner: ownerID,
+            now: now,
+            currentUsageDate: "2026-04-27",
+            store: harness.store,
+            setTimedParentLock: { locked, _, _ in
+                timedLockMutations.append(locked)
+            },
+            project: {
+                projectionCount += 1
+            }
+        )
+
+        XCTAssertEqual(disposition, .applied)
+        XCTAssertEqual(timedLockMutations, [false])
+        XCTAssertEqual(projectionCount, 0)
+    }
+
+    @MainActor
+    func testSameDayCancellationReappliesCurrentRestrictions() async throws {
+        let harness = try makeOverrideHarness()
+        var projectionCount = 0
+
+        let disposition = try await ParentUnlockOverrideCommandApplication.apply(
+            envelope: envelope(cancelled: true),
+            expectedOwner: ownerID,
+            now: now,
+            currentUsageDate: "2026-04-26",
+            store: harness.store,
+            setTimedParentLock: { _, _, _ in },
+            project: {
+                projectionCount += 1
+            }
+        )
+
+        XCTAssertEqual(disposition, .applied)
+        XCTAssertEqual(projectionCount, 1)
+    }
+
+    @MainActor
     func testMainAppEntryPointAppliesDurableOverrideBeforeProjection() async throws {
         let harness = try makeOverrideHarness()
         var projectedRevision: Int64?

@@ -78,13 +78,37 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
 
     private func expireParentUnlockOverrideIfNeeded(now: Date) {
         guard let owner = ExtensionConfig.childId,
+              let expiringSnapshot = parentUnlockOverrideSnapshot(owner: owner),
               case .expired? = try? ParentUnlockOverrideExpiry.expireElapsedMirrorIfNeeded(
                 now: now,
                 expectedOwner: owner
               ),
               let shields = clearTimedParentLockSource()
         else { return }
-        recomputeAndApplyShields(shields)
+        if shouldReapplyRestrictions(afterExpiring: expiringSnapshot, now: now) {
+            recomputeAndApplyShields(shields)
+        }
+    }
+
+    private func parentUnlockOverrideSnapshot(
+        owner: UUID
+    ) -> ParentUnlockOverrideSnapshot? {
+        do {
+            return try ParentUnlockOverrideStore.shared.read(expectedOwner: owner)
+        } catch {
+            return nil
+        }
+    }
+
+    private func shouldReapplyRestrictions(
+        afterExpiring snapshot: ParentUnlockOverrideSnapshot,
+        now: Date
+    ) -> Bool {
+        ParentUnlockOverrideCommandApplication.shouldReapplyRestrictions(
+            expiringUsageDate: snapshot.usageDate,
+            currentUsageDate: EarnedTimeStore.shared
+                .currentCanonicalPolicyUsageDate(now: now)
+        )
     }
 
     private func clearTimedParentLockSource() -> [String: ShieldRecord]? {
@@ -273,7 +297,9 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         NSLog("[Evlin/Ext] intervalDidEnd %@", marker)
 
         if raw.hasPrefix(ParentUnlockOverrideExpiry.activityPrefix) {
-            guard let owner = ExtensionConfig.childId else { return }
+            guard let owner = ExtensionConfig.childId,
+                  let expiringSnapshot = parentUnlockOverrideSnapshot(owner: owner)
+            else { return }
             let result = try? ParentUnlockOverrideExpiry.expireFromActivityCallback(
                 activityName: raw,
                 now: Date(),
@@ -281,7 +307,9 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
             )
             if case .expired? = result,
                let shields = clearTimedParentLockSource() {
-                recomputeAndApplyShields(shields)
+                if shouldReapplyRestrictions(afterExpiring: expiringSnapshot, now: Date()) {
+                    recomputeAndApplyShields(shields)
+                }
             }
             return
         }

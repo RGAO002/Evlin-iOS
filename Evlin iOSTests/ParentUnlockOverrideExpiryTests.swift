@@ -392,6 +392,34 @@ final class ParentUnlockOverrideExpiryTests: XCTestCase {
         )
     }
 
+    func testCrossDayExpiryDoesNotProjectPriorDayRestrictions() async throws {
+        let harness = try makeHarness()
+        _ = try harness.store.ingest(
+            envelope(revision: 7),
+            expectedOwner: ownerID,
+            now: startedAt
+        )
+        let scheduler = ParentUnlockExpirySchedulerSpy()
+        scheduler.seed(ParentUnlockOverrideExpiry.activityName(ownerID: ownerID, revision: 7))
+        let projection = ExpiryProjectionRecorder()
+
+        let result = try await ParentUnlockOverrideExpiry.reconcileAndProject(
+            now: expiresAt,
+            expectedOwner: ownerID,
+            store: harness.store,
+            scheduler: scheduler,
+            calendar: utcCalendar(),
+            currentUsageDate: "2026-04-27"
+        ) {
+            await projection.record()
+        }
+
+        XCTAssertEqual(result, .expired(revision: 7))
+        let projectionCount = await projection.count
+        XCTAssertEqual(projectionCount, 0)
+        XCTAssertEqual(try harness.store.read(expectedOwner: ownerID)?.status, .expired)
+    }
+
     func testDAMExpiryCallbackCommitsLocallyWithoutConsultingScheduler() throws {
         let harness = try makeHarness()
         _ = try harness.store.ingest(

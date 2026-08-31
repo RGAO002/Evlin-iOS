@@ -562,6 +562,8 @@ enum NSELockApplier {
                 let disposition = try await ParentUnlockOverrideNSEApplication.apply(
                     command: cmd,
                     expectedOwner: fetchedDeviceID,
+                    currentUsageDate: EarnedTimeStore.shared
+                        .currentCanonicalPolicyUsageDate(),
                     expiryScheduler: DeviceActivityCenterScheduler(),
                     setTimedParentLock: { locked, childID, commandID in
                         guard await DefaultGroupLockApplier.setTimedParentLock(

@@ -180,8 +180,15 @@ nonisolated enum ParentUnlockOverrideExpiry {
         store: ParentUnlockOverrideStore = .shared,
         scheduler: any DeviceActivityScheduling,
         calendar: Calendar = .current,
+        currentUsageDate: String? = nil,
         project: () async -> Void
     ) async throws -> Result {
+        let expiringUsageDate: String?
+        do {
+            expiringUsageDate = try store.read(expectedOwner: expectedOwner)?.usageDate
+        } catch {
+            expiringUsageDate = nil
+        }
         let result = try await reconcile(
             now: now,
             expectedOwner: expectedOwner,
@@ -189,7 +196,11 @@ nonisolated enum ParentUnlockOverrideExpiry {
             scheduler: scheduler,
             calendar: calendar
         )
-        if case .expired = result {
+        if case .expired = result,
+           ParentUnlockOverrideCommandApplication.shouldReapplyRestrictions(
+                expiringUsageDate: expiringUsageDate,
+                currentUsageDate: currentUsageDate
+           ) {
             await project()
         }
         return result

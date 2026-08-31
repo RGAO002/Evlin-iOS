@@ -126,6 +126,7 @@ nonisolated enum ParentUnlockOverrideCommandApplication {
         envelope: ParentUnlockOverrideEnvelope,
         expectedOwner: UUID,
         now: Date,
+        currentUsageDate: String? = nil,
         store: ParentUnlockOverrideStore = .shared,
         setTimedParentLock: (Bool, UUID, UUID) async throws -> Void,
         project: () async throws -> Void
@@ -142,7 +143,13 @@ nonisolated enum ParentUnlockOverrideCommandApplication {
                 expectedOwner,
                 envelope.operationID
             )
-            try await project()
+            if shouldReapplyRestrictions(
+                expiringUsageDate: envelope.usageDate,
+                currentUsageDate: currentUsageDate,
+                cancelled: envelope.cancelled
+            ) {
+                try await project()
+            }
         case .superseded, .rejectedIdentity:
             break
         }
@@ -153,6 +160,7 @@ nonisolated enum ParentUnlockOverrideCommandApplication {
         command: LockCommand,
         expectedOwner: UUID,
         now: Date,
+        currentUsageDate: String? = nil,
         store: ParentUnlockOverrideStore = .shared,
         setTimedParentLock: (Bool, UUID, UUID) async throws -> Void,
         project: () async throws -> Void
@@ -171,10 +179,23 @@ nonisolated enum ParentUnlockOverrideCommandApplication {
             envelope: envelope,
             expectedOwner: expectedOwner,
             now: now,
+            currentUsageDate: currentUsageDate,
             store: store,
             setTimedParentLock: setTimedParentLock,
             project: project
         )
+    }
+
+    static func shouldReapplyRestrictions(
+        expiringUsageDate: String?,
+        currentUsageDate: String?,
+        cancelled: Bool = true
+    ) -> Bool {
+        guard cancelled,
+              let expiringUsageDate,
+              let currentUsageDate
+        else { return true }
+        return expiringUsageDate == currentUsageDate
     }
 }
 
@@ -183,6 +204,7 @@ nonisolated enum ParentUnlockOverrideNSEApplication {
         command: LockCommand,
         expectedOwner: UUID,
         now: Date = Date(),
+        currentUsageDate: String? = nil,
         store: ParentUnlockOverrideStore = .shared,
         expiryScheduler: (any DeviceActivityScheduling)? = nil,
         setTimedParentLock: (Bool, UUID, UUID) async throws -> Void,
@@ -192,6 +214,8 @@ nonisolated enum ParentUnlockOverrideNSEApplication {
             command: command,
             expectedOwner: expectedOwner,
             now: now,
+            currentUsageDate: currentUsageDate
+                ?? EarnedTimeStore.shared.currentCanonicalPolicyUsageDate(now: now),
             store: store,
             setTimedParentLock: setTimedParentLock,
             project: {

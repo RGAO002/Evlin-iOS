@@ -324,7 +324,8 @@ enum AppLimitRecoveryTrigger {
         _ = try? await ParentUnlockOverrideExpiry.reconcileAndProject(
             now: Date(),
             expectedOwner: owner,
-            scheduler: DeviceActivityCenterScheduler()
+            scheduler: DeviceActivityCenterScheduler(),
+            currentUsageDate: EarnedTimeStore.shared.currentCanonicalPolicyUsageDate()
         ) {
             _ = await DefaultGroupLockApplier.setTimedParentLock(
                 false,
@@ -593,7 +594,8 @@ final class CommandPoller {
                 _ = try? await ParentUnlockOverrideExpiry.reconcileAndProject(
                     now: Date(),
                     expectedOwner: deviceID,
-                    scheduler: DeviceActivityCenterScheduler()
+                    scheduler: DeviceActivityCenterScheduler(),
+                    currentUsageDate: EarnedTimeStore.shared.currentCanonicalPolicyUsageDate()
                 ) {
                     await ActiveLockStore.shared.reapplyCurrentRestrictions()
                 }
@@ -975,6 +977,7 @@ final class CommandPoller {
         command: LockCommand,
         expectedOwner: UUID,
         now: Date = Date(),
+        currentUsageDate: String? = nil,
         store: ParentUnlockOverrideStore = .shared,
         expiryScheduler: (any DeviceActivityScheduling)? = DeviceActivityCenterScheduler(),
         project: () async throws -> Void = {
@@ -985,6 +988,8 @@ final class CommandPoller {
             command: command,
             expectedOwner: expectedOwner,
             now: now,
+            currentUsageDate: currentUsageDate
+                ?? EarnedTimeStore.shared.currentCanonicalPolicyUsageDate(now: now),
             store: store,
             setTimedParentLock: { locked, childID, commandID in
                 guard await DefaultGroupLockApplier.setTimedParentLock(
