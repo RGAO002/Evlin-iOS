@@ -30,14 +30,14 @@ final class MasterLockAccessibilityTests: XCTestCase {
         }
     }
 
-    private var mixedLockSheetSource: String {
+    private var masterLockControlSource: String {
         get throws {
             let repositoryRoot = URL(fileURLWithPath: #filePath)
                 .deletingLastPathComponent()
                 .deletingLastPathComponent()
             return try String(
                 contentsOf: repositoryRoot.appendingPathComponent(
-                    "Evlin iOS/Views/Profile/EvlinV2MixedLockSheet.swift"
+                    "Evlin iOS/Views/Profile/EvlinV2MasterLockControl.swift"
                 ),
                 encoding: .utf8
             )
@@ -48,8 +48,8 @@ final class MasterLockAccessibilityTests: XCTestCase {
         XCTAssertEqual(EvlinV2MasterLockAccessibility.describe(.lockApps).label, "Lock apps")
         XCTAssertEqual(EvlinV2MasterLockAccessibility.describe(.unlockDirect).label, "Unlock apps")
         XCTAssertEqual(
-            EvlinV2MasterLockAccessibility.describe(.overrideActive(expiresAt: .distantFuture)).label,
-            "Lock now"
+            EvlinV2MasterLockAccessibility.describe(.overrideActive(desiredLocked: false, expiresAt: .distantFuture)).label,
+            "Lock and unlock apps"
         )
     }
 
@@ -74,14 +74,25 @@ final class MasterLockAccessibilityTests: XCTestCase {
         XCTAssertTrue(source.contains("Divider()"))
     }
 
-    func testMixedLockSheetPreservesFullCopyAtOneFixedHeight() throws {
-        let source = try mixedLockSheetSource
+    func testMixedStateOffersBothDirectionsWithoutIntermediateSheet() throws {
+        let control = try masterLockControlSource
+        let profile = try profileViewSource
 
-        XCTAssertTrue(source.contains("ScrollView"))
-        XCTAssertTrue(source.contains(".fixedSize(horizontal: false, vertical: true)"))
-        XCTAssertTrue(source.contains(".presentationDetents([.fraction(0.68)])"))
-        XCTAssertFalse(source.contains(".presentationDetents([.medium])"))
-        XCTAssertTrue(source.contains(".presentationDragIndicator(.hidden)"))
+        XCTAssertFalse(control.contains("Some devices are locked"))
+        XCTAssertFalse(control.contains("onShowMixed"))
+        XCTAssertTrue(control.contains("Lock apps"))
+        XCTAssertTrue(control.contains("Unlock apps"))
+        XCTAssertFalse(profile.contains("presentedMasterMixedSheet"))
+        XCTAssertFalse(profile.contains("EvlinV2MixedLockSheet("))
+    }
+
+    func testLockEntryPresentsDurationUIInsteadOfSubmittingDirectly() throws {
+        let profile = try profileViewSource
+
+        XCTAssertFalse(
+            profile.contains("onLock: { Task { await confirmMasterLockAction(.lockApps) } }")
+        )
+        XCTAssertTrue(profile.contains("presentedMasterControlDirection = .lock"))
     }
 
     func testTaskOverrideChoiceCapturesProjectionBeforeDialogDismissal() throws {

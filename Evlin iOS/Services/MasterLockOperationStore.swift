@@ -7,6 +7,7 @@ nonisolated enum MasterUnlockDuration: Codable, Equatable, Sendable {
 
 nonisolated enum MasterLockRequestedAction: Codable, Equatable, Sendable {
     case lockApps
+    case lockOverride(MasterUnlockDuration)
     case unlockDirect
     case unlockOverride(MasterUnlockDuration)
     case cancelOverrideAndLock
@@ -102,6 +103,9 @@ nonisolated struct MasterLockOperation: Codable, Equatable, Sendable {
         switch requestedAction {
         case .lockApps, .cancelOverrideAndLock:
             return projection.overrideExpiresAt == nil && device.manualAllApps
+        case .lockOverride:
+            return projection.overrideExpiresAt != nil
+                && projection.overrideDesiredLocked == true
         case .unlockDirect:
             return projection.overrideExpiresAt == nil && !device.manualAllApps
         case .unlockOverride:
@@ -253,7 +257,7 @@ nonisolated struct MasterLockOperationReconciliation: Equatable, Sendable {
             return false
         }
         switch operation.requestedAction {
-        case .lockApps, .cancelOverrideAndLock, .unlockDirect, .unlockOverride:
+        case .lockApps, .lockOverride, .cancelOverrideAndLock, .unlockDirect, .unlockOverride:
             return operation.expectedDeviceIDs.allSatisfy { deviceID in
                 guard let device = projectionByID[deviceID] else { return false }
                 return operation.desiredStateIsVisible(on: device, projection: projection)

@@ -9,8 +9,8 @@ nonisolated struct EvlinV2MasterLockAccessibility: Equatable, Sendable {
         case .updating: Self(label: "Updating devices", enabled: false)
         case .lockApps: Self(label: "Lock apps", enabled: true)
         case .unlockDirect, .unlockWithDuration: Self(label: "Unlock apps", enabled: true)
-        case .mixed: Self(label: "Some devices are locked", enabled: true)
-        case .overrideActive: Self(label: "Lock now", enabled: true)
+        case .mixed: Self(label: "Lock and unlock apps", enabled: true)
+        case .overrideActive: Self(label: "Lock and unlock apps", enabled: true)
         case .delivery(let model): Self(label: model.canRetry ? "Retry device update" : "Updating devices", enabled: model.canRetry)
         }
     }
@@ -18,12 +18,10 @@ nonisolated struct EvlinV2MasterLockAccessibility: Equatable, Sendable {
 
 struct EvlinV2MasterLockControl: View {
     let presentation: MasterLockPresentation
+    let sheetModel: MasterUnlockSheetModel?
     let errorMessage: String?
-    let onLock: () -> Void
-    let onUnlockDirect: () -> Void
+    let onLockWithDuration: (MasterUnlockSheetModel) -> Void
     let onUnlockWithDuration: (MasterUnlockSheetModel) -> Void
-    let onShowMixed: (MasterLockMixedModel) -> Void
-    let onLockNow: () -> Void
     let onRetry: () -> Void
 
     var body: some View {
@@ -54,20 +52,19 @@ struct EvlinV2MasterLockControl: View {
         switch presentation {
         case .updating:
             button(title: "Updating devices", icon: "arrow.triangle.2.circlepath", tone: .neutral, enabled: false) {}
-        case .lockApps:
-            button(title: "Lock apps", icon: "lock.fill", tone: .lock, action: onLock)
-        case .unlockDirect:
-            button(title: "Unlock apps", icon: "lock.open.fill", tone: .unlock, action: onUnlockDirect)
-        case .unlockWithDuration(let model):
-            button(title: "Unlock apps", icon: "lock.open.fill", tone: .unlock) {
-                onUnlockWithDuration(model)
+        case .lockApps, .unlockDirect, .unlockWithDuration, .mixed, .overrideActive:
+            if let sheetModel {
+                VStack(spacing: 8) {
+                    button(title: "Lock apps", icon: "lock.fill", tone: .lock) {
+                        onLockWithDuration(sheetModel)
+                    }
+                    button(title: "Unlock apps", icon: "lock.open.fill", tone: .unlock) {
+                        onUnlockWithDuration(sheetModel)
+                    }
+                }
+            } else {
+                button(title: "Updating devices", icon: "arrow.triangle.2.circlepath", tone: .neutral, enabled: false) {}
             }
-        case .mixed(let model):
-            button(title: "Some devices are locked", icon: "rectangle.2.swap", tone: .neutral) {
-                onShowMixed(model)
-            }
-        case .overrideActive:
-            button(title: "Lock now", icon: "lock.fill", tone: .lock, action: onLockNow)
         case .delivery(let model):
             button(
                 title: model.canRetry ? "Retry device update" : "Updating devices",
@@ -81,8 +78,12 @@ struct EvlinV2MasterLockControl: View {
 
     private var statusCopy: (icon: String, text: String, color: Color)? {
         switch presentation {
-        case .overrideActive(let expiresAt):
-            return ("timer", "Unlocked by parent until \(expiresAt.formatted(date: .omitted, time: .shortened))", EvlinV2ProfileTokens.accent)
+        case .overrideActive(let desiredLocked, let expiresAt):
+            return (
+                "timer",
+                "\(desiredLocked ? "Locked" : "Unlocked") by parent until \(expiresAt.formatted(date: .omitted, time: .shortened))",
+                EvlinV2ProfileTokens.accent
+            )
         case .delivery(let model):
             let waiting = model.waitingDeviceNames + model.unreachableDeviceNames
             if !model.failedDeviceNames.isEmpty {

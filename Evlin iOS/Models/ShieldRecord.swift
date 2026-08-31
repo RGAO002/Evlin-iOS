@@ -21,6 +21,7 @@ struct ShieldSource: Codable, Sendable, Hashable {
     static let limit = ShieldSource(rawValue: "limit")
     static let earnedTime = ShieldSource(rawValue: "earnedTime")
     static let taskPause = ShieldSource(rawValue: "taskPause")
+    static let parentTimedLock = ShieldSource(rawValue: "parentTimedLock")
 
     init(rawValue: String) {
         self.rawValue = rawValue

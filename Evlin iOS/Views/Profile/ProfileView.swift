@@ -171,8 +171,8 @@ struct ProfileView: View {
     @State private var pendingMasterLockOperation: MasterLockOperation? = nil
     @State private var pendingTaskOverrideProjection: MasterLockProjection? = nil
     @State private var masterLockError: String? = nil
-    @State private var presentedMasterUnlockSheet: MasterUnlockSheetModel? = nil
-    @State private var presentedMasterMixedSheet: MasterLockMixedModel? = nil
+    @State private var presentedMasterControlDirection: EvlinV2MasterControlDirection? = nil
+    @State private var presentedMasterControlModel: MasterUnlockSheetModel? = nil
     // B6 carry: once the backend list_id is first learned, remember it so
     // we only call saveLockedSetID + reKeyShieldRecord once per session.
     @State private var knownBackendListID: String? = nil
@@ -596,43 +596,42 @@ struct ProfileView: View {
             Text(addError ?? "")
         }
         .sheet(isPresented: Binding(
-            get: { presentedMasterUnlockSheet != nil },
-            set: { if !$0 { presentedMasterUnlockSheet = nil } }
+            get: { presentedMasterControlDirection != nil && presentedMasterControlModel != nil },
+            set: {
+                if !$0 {
+                    presentedMasterControlDirection = nil
+                    presentedMasterControlModel = nil
+                }
+            }
         )) {
-            if let model = presentedMasterUnlockSheet {
-                EvlinV2MasterUnlockSheet(
+            if let model = presentedMasterControlModel,
+               let direction = presentedMasterControlDirection {
+                EvlinV2MasterControlSheet(
                     childName: displayChild.name,
+                    direction: direction,
                     model: model,
                     usageTodayMinutes: usedTodayMinutes,
-                    onConfirm: { duration in
-                        presentedMasterUnlockSheet = nil
-                        Task { await confirmMasterLockAction(.unlockOverride(duration)) }
+                    onTimedConfirm: { duration in
+                        presentedMasterControlDirection = nil
+                        presentedMasterControlModel = nil
+                        let action: MasterLockRequestedAction = direction == .lock
+                            ? .lockOverride(duration)
+                            : .unlockOverride(duration)
+                        Task { await confirmMasterLockAction(action) }
                     },
-                    onCancel: { presentedMasterUnlockSheet = nil }
-                )
-            }
-        }
-        .sheet(isPresented: Binding(
-            get: { presentedMasterMixedSheet != nil },
-            set: { if !$0 { presentedMasterMixedSheet = nil } }
-        )) {
-            if let model = presentedMasterMixedSheet {
-                EvlinV2MixedLockSheet(
-                    childName: displayChild.name,
-                    model: model,
-                    onLockAll: {
-                        presentedMasterMixedSheet = nil
-                        Task { await confirmMasterLockAction(.lockApps) }
-                    },
-                    onUnlockAll: {
-                        presentedMasterMixedSheet = nil
-                        if let unlockSheet = model.unlockSheet {
-                            presentedMasterUnlockSheet = unlockSheet
-                        } else {
-                            Task { await confirmMasterLockAction(.unlockDirect) }
+                    onPermanentConfirm: {
+                        presentedMasterControlDirection = nil
+                        presentedMasterControlModel = nil
+                        Task {
+                            await confirmMasterLockAction(
+                                direction == .lock ? .lockApps : .unlockDirect
+                            )
                         }
                     },
-                    onCancel: { presentedMasterMixedSheet = nil }
+                    onCancel: {
+                        presentedMasterControlDirection = nil
+                        presentedMasterControlModel = nil
+                    }
                 )
             }
         }
@@ -1228,7 +1227,7 @@ struct ProfileView: View {
                 childProfileID: operation.childProfileID,
                 request: controlRequest
             )
-        case .unlockOverride(let duration):
+        case .lockOverride(let duration), .unlockOverride(let duration):
             let wireDuration: ParentUnlockOverrideDuration
             let durationMinutes: Int?
             switch duration {
@@ -1239,16 +1238,24 @@ struct ProfileView: View {
                 wireDuration = .untilTomorrow
                 durationMinutes = nil
             }
-            dto = try await apiClient.submitUnlockOverride(
-                childProfileID: operation.childProfileID,
-                request: ParentUnlockOverrideRequestDTO(
-                    duration: wireDuration,
-                    durationMinutes: durationMinutes,
-                    expectedRevision: operation.revision,
-                    expectedSnapshotDigest: operation.snapshotDigest,
-                    operationID: operation.operationID
-                )
+            let request = ParentUnlockOverrideRequestDTO(
+                duration: wireDuration,
+                durationMinutes: durationMinutes,
+                expectedRevision: operation.revision,
+                expectedSnapshotDigest: operation.snapshotDigest,
+                operationID: operation.operationID
             )
+            if case .lockOverride = operation.requestedAction {
+                dto = try await apiClient.submitLockOverride(
+                    childProfileID: operation.childProfileID,
+                    request: request
+                )
+            } else {
+                dto = try await apiClient.submitUnlockOverride(
+                    childProfileID: operation.childProfileID,
+                    request: request
+                )
+            }
         }
         return try MasterLockControlResponse(
             dto: dto,
@@ -1829,12 +1836,16 @@ struct ProfileView: View {
 
             EvlinV2MasterLockControl(
                 presentation: masterLockPresentation,
+                sheetModel: masterLockProjection.map(MasterUnlockSheetModel.init),
                 errorMessage: masterLockError,
-                onLock: { Task { await confirmMasterLockAction(.lockApps) } },
-                onUnlockDirect: { Task { await confirmMasterLockAction(.unlockDirect) } },
-                onUnlockWithDuration: { presentedMasterUnlockSheet = $0 },
-                onShowMixed: { presentedMasterMixedSheet = $0 },
-                onLockNow: { Task { await confirmMasterLockAction(.cancelOverrideAndLock) } },
+                onLockWithDuration: {
+                    presentedMasterControlDirection = .lock
+                    presentedMasterControlModel = $0
+                },
+                onUnlockWithDuration: {
+                    presentedMasterControlDirection = .unlock
+                    presentedMasterControlModel = $0
+                },
                 onRetry: {
                     guard let operation = pendingMasterLockOperation else { return }
                     Task { await confirmMasterLockOperation(operation) }

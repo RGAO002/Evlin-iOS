@@ -177,6 +177,7 @@ final class ActionExecutor: @unchecked Sendable {
     private let parentUnlockOverrideStore: ParentUnlockOverrideStore
     private let parentUnlockOverrideNow: () -> Date
     private let parentUnlockOverrideProjection: () async throws -> Void
+    private let parentTimedLockMutationOverride: ((Bool) async -> Bool)?
     private let parentMasterLockMutationOverride: (() async -> Bool)?
     private let parentMasterUnlockMutationOverride: (() async -> Bool)?
 
@@ -217,6 +218,7 @@ final class ActionExecutor: @unchecked Sendable {
         parentUnlockOverrideProjection: @escaping () async throws -> Void = {
             try await ParentUnlockOverrideProjectionApplication.reapplyCurrentRestrictions()
         },
+        parentTimedLockMutation: ((Bool) async -> Bool)? = nil,
         parentMasterLockMutation: (() async -> Bool)? = nil,
         parentMasterUnlockMutation: (() async -> Bool)? = nil,
         beforeUnshieldSourceMutation: @escaping () -> Void = {},
@@ -236,6 +238,7 @@ final class ActionExecutor: @unchecked Sendable {
         self.parentUnlockOverrideStore = parentUnlockOverrideStore
         self.parentUnlockOverrideNow = parentUnlockOverrideNow
         self.parentUnlockOverrideProjection = parentUnlockOverrideProjection
+        self.parentTimedLockMutationOverride = parentTimedLockMutation
         self.parentMasterLockMutationOverride = parentMasterLockMutation
         self.parentMasterUnlockMutationOverride = parentMasterUnlockMutation
         self.beforeUnshieldSourceMutation = beforeUnshieldSourceMutation
@@ -337,7 +340,7 @@ final class ActionExecutor: @unchecked Sendable {
             return .failed(.execution("earned_time_config must not reach ActionExecutor"))
         case .meteringRearm:
             return .failed(.execution("metering_rearm must not reach ActionExecutor"))
-        case .parentUnlockOverride, .parentUnlockOverrideCancel:
+        case .parentUnlockOverride, .parentLockOverride, .parentUnlockOverrideCancel:
             guard let expectedChildID = identity.expectedChildID,
                   identity.isCurrent
             else { return Self.staleIdentityResult }
@@ -347,13 +350,22 @@ final class ActionExecutor: @unchecked Sendable {
                     expectedOwner: expectedChildID,
                     now: parentUnlockOverrideNow(),
                     store: parentUnlockOverrideStore,
+                    setTimedParentLock: { locked, childID, commandID in
+                        guard await DefaultGroupLockApplier.setTimedParentLock(
+                            locked,
+                            childID: childID,
+                            commandID: commandID
+                        ) else {
+                            throw ParentUnlockOverrideCommandApplicationError.projectionFailed
+                        }
+                    },
                     project: parentUnlockOverrideProjection
                 )
                 guard identity.isCurrent else { return Self.staleIdentityResult }
                 switch disposition {
                 case .applied, .replayed:
                     return .confirmedExact(
-                        verb: .unshieldAll,
+                        verb: cmd.action == .parentLockOverride ? .shield : .unshieldAll,
                         displayName: cmd.action == .parentUnlockOverrideCancel
                             ? "Parent override cancelled"
                             : "Parent override",
@@ -381,6 +393,22 @@ final class ActionExecutor: @unchecked Sendable {
                     store: parentUnlockOverrideStore
                 )
                 if let locked = prepared.desiredLocked {
+                    let timedSourceCleared: Bool
+                    if prepared.clearsTimedParentLock,
+                       let override = self.parentTimedLockMutationOverride {
+                        timedSourceCleared = await override(false)
+                    } else if prepared.clearsTimedParentLock {
+                        timedSourceCleared = await DefaultGroupLockApplier.setTimedParentLock(
+                            false,
+                            childID: expectedChildID,
+                            commandID: cmd.id
+                        )
+                    } else {
+                        timedSourceCleared = true
+                    }
+                    guard timedSourceCleared else {
+                        throw ExecuteError.persistenceFailed
+                    }
                     let persisted: Bool
                     if locked, let override = self.parentMasterLockMutationOverride {
                         persisted = await override()

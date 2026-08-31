@@ -326,6 +326,11 @@ enum AppLimitRecoveryTrigger {
             expectedOwner: owner,
             scheduler: DeviceActivityCenterScheduler()
         ) {
+            _ = await DefaultGroupLockApplier.setTimedParentLock(
+                false,
+                childID: owner,
+                commandID: UUID()
+            )
             await ActiveLockStore.shared.reapplyCurrentRestrictions()
         }
     }
@@ -981,6 +986,15 @@ final class CommandPoller {
             expectedOwner: expectedOwner,
             now: now,
             store: store,
+            setTimedParentLock: { locked, childID, commandID in
+                guard await DefaultGroupLockApplier.setTimedParentLock(
+                    locked,
+                    childID: childID,
+                    commandID: commandID
+                ) else {
+                    throw ParentUnlockOverrideCommandApplicationError.projectionFailed
+                }
+            },
             project: {
                 // Persisted expiry must be armed before the projection removes
                 // any current source of enforcement.
@@ -1033,7 +1047,9 @@ final class CommandPoller {
 
         let cmd = Self.lockCommand(from: poll)
 
-        if cmd.action == .parentUnlockOverride || cmd.action == .parentUnlockOverrideCancel {
+        if cmd.action == .parentUnlockOverride
+            || cmd.action == .parentLockOverride
+            || cmd.action == .parentUnlockOverrideCancel {
             do {
                 let disposition = try await Self.applyParentUnlockOverride(
                     command: cmd,

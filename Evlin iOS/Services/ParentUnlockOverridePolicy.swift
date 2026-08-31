@@ -21,6 +21,9 @@ nonisolated enum ParentUnlockOverridePolicy {
         else {
             return Projection(shields: shields, blocks: blocks)
         }
+        guard !snapshot.desiredLocked else {
+            return Projection(shields: shields, blocks: blocks)
+        }
 
         let suppressedSources = shieldSources(for: snapshot.scopes)
         var projectedShields: [String: ShieldRecord] = [:]
@@ -108,6 +111,8 @@ nonisolated enum ParentUnlockOverrideAck {
             return "unshield"
         case .parentUnlockOverride:
             return "unshield_all"
+        case .parentLockOverride:
+            return "shield"
         case .parentUnlockOverrideCancel:
             return "reconcile"
         default:
@@ -122,6 +127,7 @@ nonisolated enum ParentUnlockOverrideCommandApplication {
         expectedOwner: UUID,
         now: Date,
         store: ParentUnlockOverrideStore = .shared,
+        setTimedParentLock: (Bool, UUID, UUID) async throws -> Void,
         project: () async throws -> Void
     ) async throws -> ParentUnlockOverrideDisposition {
         let disposition = try store.ingest(
@@ -131,6 +137,11 @@ nonisolated enum ParentUnlockOverrideCommandApplication {
         )
         switch disposition {
         case .applied, .replayed:
+            try await setTimedParentLock(
+                envelope.desiredLocked && !envelope.cancelled,
+                expectedOwner,
+                envelope.operationID
+            )
             try await project()
         case .superseded, .rejectedIdentity:
             break
@@ -143,13 +154,16 @@ nonisolated enum ParentUnlockOverrideCommandApplication {
         expectedOwner: UUID,
         now: Date,
         store: ParentUnlockOverrideStore = .shared,
+        setTimedParentLock: (Bool, UUID, UUID) async throws -> Void,
         project: () async throws -> Void
     ) async throws -> ParentUnlockOverrideDisposition {
         guard let envelope = command.parentUnlockOverride,
               command.target.targetChildID == nil
                 || command.target.targetChildID == expectedOwner,
-              (command.action == .parentUnlockOverride && !envelope.cancelled)
+              ((command.action == .parentUnlockOverride && !envelope.desiredLocked && !envelope.cancelled)
+                || (command.action == .parentLockOverride && envelope.desiredLocked && !envelope.cancelled)
                 || (command.action == .parentUnlockOverrideCancel && envelope.cancelled)
+              )
         else {
             throw ParentUnlockOverrideCommandApplicationError.malformedCommand
         }
@@ -158,6 +172,7 @@ nonisolated enum ParentUnlockOverrideCommandApplication {
             expectedOwner: expectedOwner,
             now: now,
             store: store,
+            setTimedParentLock: setTimedParentLock,
             project: project
         )
     }
@@ -170,6 +185,7 @@ nonisolated enum ParentUnlockOverrideNSEApplication {
         now: Date = Date(),
         store: ParentUnlockOverrideStore = .shared,
         expiryScheduler: (any DeviceActivityScheduling)? = nil,
+        setTimedParentLock: (Bool, UUID, UUID) async throws -> Void,
         project: () async throws -> Void
     ) async throws -> ParentUnlockOverrideDisposition {
         try await ParentUnlockOverrideCommandApplication.apply(
@@ -177,6 +193,7 @@ nonisolated enum ParentUnlockOverrideNSEApplication {
             expectedOwner: expectedOwner,
             now: now,
             store: store,
+            setTimedParentLock: setTimedParentLock,
             project: {
                 if let expiryScheduler {
                     _ = try await ParentUnlockOverrideExpiry.reconcile(
@@ -196,6 +213,7 @@ nonisolated enum ParentMasterControlCommandApplication {
     struct PreparedMutation: Equatable {
         let disposition: ParentUnlockOverrideDisposition
         let desiredLocked: Bool?
+        let clearsTimedParentLock: Bool
     }
 
     static func prepare(
@@ -220,15 +238,19 @@ nonisolated enum ParentMasterControlCommandApplication {
             now: now
         )
         let desiredLocked: Bool?
+        let clearsTimedParentLock: Bool
         switch disposition {
         case .applied, .replayed:
             desiredLocked = command.action == .parentMasterLock
+            clearsTimedParentLock = true
         case .superseded, .rejectedIdentity:
             desiredLocked = nil
+            clearsTimedParentLock = false
         }
         return PreparedMutation(
             disposition: disposition,
-            desiredLocked: desiredLocked
+            desiredLocked: desiredLocked,
+            clearsTimedParentLock: clearsTimedParentLock
         )
     }
 }

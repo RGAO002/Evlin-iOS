@@ -1,14 +1,26 @@
 import SwiftUI
 
-struct EvlinV2MasterUnlockSheet: View {
+enum EvlinV2MasterControlDirection: Equatable {
+    case lock
+    case unlock
+
+    var verb: String { self == .lock ? "Lock" : "Unlock" }
+    var icon: String { self == .lock ? "lock.fill" : "lock.open.fill" }
+    var color: Color {
+        self == .lock ? EvlinV2ProfileTokens.accent : EvlinV2ProfileTokens.danger
+    }
+}
+
+struct EvlinV2MasterControlSheet: View {
     let childName: String
+    let direction: EvlinV2MasterControlDirection
     let model: MasterUnlockSheetModel
     let usageTodayMinutes: Int
-    let onConfirm: (MasterUnlockDuration) -> Void
+    let onTimedConfirm: (MasterUnlockDuration) -> Void
+    let onPermanentConfirm: () -> Void
     let onCancel: () -> Void
 
     @State private var selected: MasterUnlockDuration = .minutes(15)
-
     private let options: [MasterUnlockDuration] = [
         .minutes(15), .minutes(30), .minutes(60), .untilTomorrow,
     ]
@@ -18,29 +30,26 @@ struct EvlinV2MasterUnlockSheet: View {
             VStack(spacing: 0) {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
-                        Text("Choose how long \(childName)'s apps stay unlocked. Screen time still counts toward today's pool.")
+                        Text(intro)
                             .font(EvlinV2ProfileTokens.font(14, weight: .medium))
                             .foregroundStyle(EvlinV2ProfileTokens.textMuted)
+                            .fixedSize(horizontal: false, vertical: true)
 
-                        HStack(spacing: 10) {
-                            Image(systemName: "clock.fill").foregroundStyle(EvlinV2ProfileTokens.accent)
-                            Text("\(format(usageTodayMinutes)) used today")
-                                .font(EvlinV2ProfileTokens.font(15, weight: .bold))
-                        }
-                        .padding(14)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(EvlinV2ProfileTokens.surfaceMuted)
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        Label("\(format(usageTodayMinutes)) used today", systemImage: "clock.fill")
+                            .font(EvlinV2ProfileTokens.font(15, weight: .bold))
+                            .foregroundStyle(EvlinV2ProfileTokens.primary)
+                            .padding(14)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(EvlinV2ProfileTokens.surfaceMuted)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
-                        Text("UNLOCK FOR")
+                        Text("\(direction.verb.uppercased()) FOR")
                             .font(EvlinV2ProfileTokens.font(11, weight: .bold))
                             .foregroundStyle(EvlinV2ProfileTokens.textMuted)
 
                         LazyVGrid(columns: [.init(.flexible()), .init(.flexible())], spacing: 9) {
                             ForEach(options, id: \.label) { option in
-                                Button {
-                                    selected = option
-                                } label: {
+                                Button { selected = option } label: {
                                     Text(option.label)
                                         .font(EvlinV2ProfileTokens.font(13, weight: .bold))
                                         .foregroundStyle(selected == option ? .white : EvlinV2ProfileTokens.primary)
@@ -53,7 +62,7 @@ struct EvlinV2MasterUnlockSheet: View {
                             }
                         }
 
-                        restrictionSummary
+                        if direction == .unlock { restrictionSummary }
                     }
                     .padding(20)
                 }
@@ -62,7 +71,7 @@ struct EvlinV2MasterUnlockSheet: View {
                 Divider()
                 actionButtons
             }
-            .navigationTitle("Unlock \(childName)'s apps?")
+            .navigationTitle("\(direction.verb) \(childName)'s apps?")
             .navigationBarTitleDisplayMode(.inline)
         }
         .presentationDetents([.large])
@@ -71,19 +80,29 @@ struct EvlinV2MasterUnlockSheet: View {
         .interactiveDismissDisabled()
     }
 
+    private var intro: String {
+        direction == .lock
+            ? "Choose how long the selected apps stay locked. When the time ends, each device returns to the state it would have had without this lock."
+            : "Choose how long the apps stay unlocked. Screen time still counts toward today's pool."
+    }
+
     private var actionButtons: some View {
         VStack(spacing: 8) {
-            Button {
-                onConfirm(selected)
-            } label: {
-                Text("Unlock for \(selected.label)")
+            Button { onTimedConfirm(selected) } label: {
+                Label("\(direction.verb) for \(selected.label)", systemImage: direction.icon)
                     .font(EvlinV2ProfileTokens.font(15, weight: .bold))
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity, minHeight: 52)
-                    .background(RoundedRectangle(cornerRadius: 14).fill(EvlinV2ProfileTokens.accent))
+                    .background(RoundedRectangle(cornerRadius: 14).fill(direction.color))
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Unlock apps for \(selected.label)")
+
+            if direction == .lock || model.hasParentManualLock {
+                Button(direction == .lock ? "Until I unlock" : "Remove parent lock", action: onPermanentConfirm)
+                    .font(EvlinV2ProfileTokens.font(14, weight: .semibold))
+                    .foregroundStyle(EvlinV2ProfileTokens.primary)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+            }
 
             Button("Cancel", action: onCancel)
                 .font(EvlinV2ProfileTokens.font(14, weight: .semibold))
@@ -99,13 +118,10 @@ struct EvlinV2MasterUnlockSheet: View {
     private var restrictionSummary: some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(model.devices, id: \.deviceID) { device in
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: "iphone").foregroundStyle(EvlinV2ProfileTokens.textMuted)
-                    Text(summary(for: device))
-                        .font(EvlinV2ProfileTokens.font(12, weight: .medium))
-                        .foregroundStyle(EvlinV2ProfileTokens.primary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                Label(summary(for: device), systemImage: "iphone")
+                    .font(EvlinV2ProfileTokens.font(12, weight: .medium))
+                    .foregroundStyle(EvlinV2ProfileTokens.primary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(14)
@@ -119,7 +135,7 @@ struct EvlinV2MasterUnlockSheet: View {
         if device.earnedExhausted { reasons.append("today's pool is used") }
         if device.deviceLimitActive { reasons.append("device limit") }
         if !device.limitedAppIDs.isEmpty || !device.limitedLegacyScopeIDs.isEmpty { reasons.append("app limits") }
-        if device.manualAllApps { reasons.append("manual lock") }
+        if device.manualAllApps { reasons.append("parent lock") }
         return reasons.isEmpty
             ? "\(device.deviceName) will be unlocked."
             : "\(device.deviceName): temporarily overrides \(reasons.joined(separator: ", "))."

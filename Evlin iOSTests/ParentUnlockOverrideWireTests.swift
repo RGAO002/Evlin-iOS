@@ -36,6 +36,7 @@ final class ParentUnlockOverrideWireTests: XCTestCase {
             ("parent_master_lock", .parentMasterLock),
             ("parent_master_unlock", .parentMasterUnlock),
             ("parent_unlock_override", .parentUnlockOverride),
+            ("parent_lock_override", .parentLockOverride),
             ("parent_unlock_override_cancel", .parentUnlockOverrideCancel),
         ]
 
@@ -89,11 +90,13 @@ final class ParentUnlockOverrideWireTests: XCTestCase {
         XCTAssertEqual(response.receipts.map(\.deliveryState), [.waiting])
         XCTAssertEqual(response.snapshot.snapshotDigest, "digest-18")
         XCTAssertEqual(response.snapshot.overrideRevision, 18)
+        XCTAssertEqual(response.snapshot.overrideDesiredLocked, true)
         XCTAssertEqual(response.snapshot.devices.first?.limitedAppIDs.count, 1)
     }
 
     private func commandPayload(action: String) -> Data {
-        Data(
+        let desiredLocked = action == "parent_lock_override" ? "true" : "false"
+        return Data(
             """
             {
               "command_id": "DDDDDDDD-0000-0000-0000-000000000004",
@@ -112,6 +115,7 @@ final class ParentUnlockOverrideWireTests: XCTestCase {
                 "started_at": "2026-04-26T14:00:00+00:00",
                 "expires_at": "2026-04-26T15:00:00+00:00",
                 "operation_id": "CCCCCCCC-0000-0000-0000-000000000004",
+                "desired_locked": \(desiredLocked),
                 "scopes": [
                   "manual",
                   "earned_time",
@@ -146,6 +150,7 @@ final class ParentUnlockOverrideWireTests: XCTestCase {
                 "snapshot_digest": "digest-18",
                 "override_revision": 18,
                 "override_expires_at": "2026-04-26T15:00:00Z",
+                "override_desired_locked": true,
                 "devices": [
                   {
                     "child_device_id": "AAAAAAAA-0000-0000-0000-000000000001",

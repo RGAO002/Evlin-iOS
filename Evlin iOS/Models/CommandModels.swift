@@ -19,6 +19,7 @@ enum CommandAction: String, Codable, Sendable {
     case parentMasterLock = "parent_master_lock"
     case parentMasterUnlock = "parent_master_unlock"
     case parentUnlockOverride = "parent_unlock_override"
+    case parentLockOverride = "parent_lock_override"
     case parentUnlockOverrideCancel = "parent_unlock_override_cancel"
     case unknown = "unknown"
 }

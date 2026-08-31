@@ -520,6 +520,15 @@ enum NSELockApplier {
                     now: Date()
                 )
                 if let locked = prepared.desiredLocked {
+                    if prepared.clearsTimedParentLock {
+                        guard await DefaultGroupLockApplier.setTimedParentLock(
+                            false,
+                            childID: fetchedDeviceID,
+                            commandID: cmd.id
+                        ) else {
+                            throw ParentUnlockOverrideCommandApplicationError.malformedCommand
+                        }
+                    }
                     guard await DefaultGroupLockApplier.setManualLock(
                         locked,
                         childID: fetchedDeviceID,
@@ -545,13 +554,24 @@ enum NSELockApplier {
             }
         }
 
-        if cmd.action == .parentUnlockOverride || cmd.action == .parentUnlockOverrideCancel {
+        if cmd.action == .parentUnlockOverride
+            || cmd.action == .parentLockOverride
+            || cmd.action == .parentUnlockOverrideCancel {
             guard let fetchedDeviceID else { return nil }
             do {
                 let disposition = try await ParentUnlockOverrideNSEApplication.apply(
                     command: cmd,
                     expectedOwner: fetchedDeviceID,
                     expiryScheduler: DeviceActivityCenterScheduler(),
+                    setTimedParentLock: { locked, childID, commandID in
+                        guard await DefaultGroupLockApplier.setTimedParentLock(
+                            locked,
+                            childID: childID,
+                            commandID: commandID
+                        ) else {
+                            throw ParentUnlockOverrideCommandApplicationError.projectionFailed
+                        }
+                    },
                     project: {
                         try await ParentUnlockOverrideProjectionApplication
                             .reapplyCurrentRestrictions()
@@ -645,6 +665,7 @@ enum NSELockApplier {
         case .parentMasterLock,
              .parentMasterUnlock,
              .parentUnlockOverride,
+             .parentLockOverride,
              .parentUnlockOverrideCancel,
              .unknown:
             return nil

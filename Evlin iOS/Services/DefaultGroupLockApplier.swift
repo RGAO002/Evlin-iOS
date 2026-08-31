@@ -45,9 +45,44 @@ enum DefaultGroupLockApplier {
         commandID: UUID,
         locked: Bool
     ) -> [String: ShieldRecord] {
+        reconcilingSource(
+            .manual,
+            in: records,
+            selection: selection,
+            childID: childID,
+            commandID: commandID,
+            locked: locked
+        )
+    }
+
+    static func reconcilingTimedParentLock(
+        in records: [String: ShieldRecord],
+        selection: FamilyActivitySelection,
+        childID: UUID,
+        commandID: UUID,
+        locked: Bool
+    ) -> [String: ShieldRecord] {
+        reconcilingSource(
+            .parentTimedLock,
+            in: records,
+            selection: selection,
+            childID: childID,
+            commandID: commandID,
+            locked: locked
+        )
+    }
+
+    private static func reconcilingSource(
+        _ source: ShieldSource,
+        in records: [String: ShieldRecord],
+        selection: FamilyActivitySelection,
+        childID: UUID,
+        commandID: UUID,
+        locked: Bool
+    ) -> [String: ShieldRecord] {
         let key = DefaultLockGroup.shared.recordKey
         guard locked else {
-            return ShieldSourceLogic.removingSource(.manual, fromRecordKey: key, in: records)
+            return ShieldSourceLogic.removingSource(source, fromRecordKey: key, in: records)
         }
 
         var result = records
@@ -55,7 +90,7 @@ enum DefaultGroupLockApplier {
             existing.appTokens = selection.applicationTokens
             existing.categoryTokens = selection.categoryTokens
             existing.webDomainTokens = selection.webDomainTokens
-            existing.sources.insert(.manual)
+            existing.sources.insert(source)
             existing.lastCommandID = commandID
             existing.displayName = DefaultLockGroup.shared.name
             existing.targetChildID = childID
@@ -68,6 +103,7 @@ enum DefaultGroupLockApplier {
                 childID: childID
             )
             created.lastCommandID = commandID
+            created.sources = [source]
             result[key] = created
         }
         return result
@@ -91,6 +127,20 @@ enum DefaultGroupLockApplier {
         commandID: UUID
     ) async -> Bool {
         await ActiveLockStore.shared.setDefaultGroupManualLock(
+            locked,
+            selection: selection,
+            childID: childID,
+            commandID: commandID
+        )
+    }
+
+    static func setTimedParentLock(
+        _ locked: Bool,
+        selection: FamilyActivitySelection = DefaultLockGroupStore.load(),
+        childID: UUID,
+        commandID: UUID
+    ) async -> Bool {
+        await ActiveLockStore.shared.setDefaultGroupTimedParentLock(
             locked,
             selection: selection,
             childID: childID,

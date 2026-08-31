@@ -82,9 +82,24 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                 now: now,
                 expectedOwner: owner
               ),
-              let shields = loadShields()
+              let shields = clearTimedParentLockSource()
         else { return }
         recomputeAndApplyShields(shields)
+    }
+
+    private func clearTimedParentLockSource() -> [String: ShieldRecord]? {
+        ActiveLockPersistenceLock.shared.withLock {
+            guard let current = loadShields() else { return nil }
+            let updated = ShieldSourceLogic.removingSource(
+                .parentTimedLock,
+                fromRecordKey: DefaultLockGroup.shared.recordKey,
+                in: current
+            )
+            guard let data = encodeShields(updated) else { return nil }
+            defaults?.set(data, forKey: shieldsKey)
+            guard defaults?.data(forKey: shieldsKey) == data else { return nil }
+            return updated
+        } ?? nil
     }
 
     override func intervalDidStart(for activity: DeviceActivityName) {
@@ -265,7 +280,7 @@ class DeviceActivityMonitorExtension: DeviceActivityMonitor {
                 expectedOwner: owner
             )
             if case .expired? = result,
-               let shields = loadShields() {
+               let shields = clearTimedParentLockSource() {
                 recomputeAndApplyShields(shields)
             }
             return

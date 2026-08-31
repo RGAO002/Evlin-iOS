@@ -15,6 +15,7 @@ nonisolated struct ParentUnlockOverrideEnvelope: Codable, Equatable, Sendable {
     let startedAt: Date
     let expiresAt: Date
     let operationID: UUID
+    let desiredLocked: Bool
     let scopes: Set<ParentUnlockOverrideScope>
     let cancelled: Bool
 
@@ -25,6 +26,7 @@ nonisolated struct ParentUnlockOverrideEnvelope: Codable, Equatable, Sendable {
         startedAt: Date,
         expiresAt: Date,
         operationID: UUID,
+        desiredLocked: Bool = false,
         scopes: Set<ParentUnlockOverrideScope>,
         cancelled: Bool
     ) {
@@ -34,6 +36,7 @@ nonisolated struct ParentUnlockOverrideEnvelope: Codable, Equatable, Sendable {
         self.startedAt = startedAt
         self.expiresAt = expiresAt
         self.operationID = operationID
+        self.desiredLocked = desiredLocked
         self.scopes = scopes
         self.cancelled = cancelled
     }
@@ -45,6 +48,7 @@ nonisolated struct ParentUnlockOverrideEnvelope: Codable, Equatable, Sendable {
         case startedAt = "started_at"
         case expiresAt = "expires_at"
         case operationID = "operation_id"
+        case desiredLocked = "desired_locked"
         case scopes
         case cancelled
     }
@@ -57,6 +61,7 @@ nonisolated struct ParentUnlockOverrideEnvelope: Codable, Equatable, Sendable {
         startedAt = try Self.decodeDate(from: container, forKey: .startedAt)
         expiresAt = try Self.decodeDate(from: container, forKey: .expiresAt)
         operationID = try container.decode(UUID.self, forKey: .operationID)
+        desiredLocked = try container.decodeIfPresent(Bool.self, forKey: .desiredLocked) ?? false
         scopes = try container.decode(Set<ParentUnlockOverrideScope>.self, forKey: .scopes)
         cancelled = try container.decode(Bool.self, forKey: .cancelled)
 
@@ -84,6 +89,7 @@ nonisolated struct ParentUnlockOverrideEnvelope: Codable, Equatable, Sendable {
         try container.encode(Self.dateFormatter.string(from: startedAt), forKey: .startedAt)
         try container.encode(Self.dateFormatter.string(from: expiresAt), forKey: .expiresAt)
         try container.encode(operationID, forKey: .operationID)
+        try container.encode(desiredLocked, forKey: .desiredLocked)
         try container.encode(scopes, forKey: .scopes)
         try container.encode(cancelled, forKey: .cancelled)
     }
@@ -128,6 +134,7 @@ nonisolated struct ParentUnlockOverrideSnapshot: Codable, Equatable, Sendable {
     var startedAt: Date { envelope.startedAt }
     var expiresAt: Date { envelope.expiresAt }
     var operationID: UUID { envelope.operationID }
+    var desiredLocked: Bool { envelope.desiredLocked }
     var scopes: Set<ParentUnlockOverrideScope> { envelope.scopes }
 
     func isActive(at now: Date) -> Bool {

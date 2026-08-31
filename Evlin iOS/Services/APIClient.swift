@@ -741,6 +741,7 @@ struct ParentChildLockProjectionDTO: Codable, Equatable, Sendable {
     let snapshotDigest: String
     let overrideRevision: Int64
     let overrideExpiresAt: String?
+    var overrideDesiredLocked: Bool? = nil
     let devices: [ParentDeviceLockProjectionDTO]
 
     private enum CodingKeys: String, CodingKey {
@@ -748,6 +749,7 @@ struct ParentChildLockProjectionDTO: Codable, Equatable, Sendable {
         case snapshotDigest = "snapshot_digest"
         case overrideRevision = "override_revision"
         case overrideExpiresAt = "override_expires_at"
+        case overrideDesiredLocked = "override_desired_locked"
         case devices
     }
 }
@@ -2420,6 +2422,17 @@ extension APIClient {
     ) async throws -> ParentChildControlResponseDTO {
         try await authedJSON(
             path: "/parent/children/\(childProfileID.uuidString)/unlock-override",
+            method: "POST",
+            jsonBody: try JSONEncoder().encode(request)
+        )
+    }
+
+    func submitLockOverride(
+        childProfileID: UUID,
+        request: ParentUnlockOverrideRequestDTO
+    ) async throws -> ParentChildControlResponseDTO {
+        try await authedJSON(
+            path: "/parent/children/\(childProfileID.uuidString)/lock-override",
             method: "POST",
             jsonBody: try JSONEncoder().encode(request)
         )

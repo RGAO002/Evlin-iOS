@@ -67,6 +67,19 @@ final class MasterLockProjectionTests: XCTestCase {
         XCTAssertEqual(sheet.expectedDeviceIDs, [phoneID, tabletID])
         XCTAssertEqual(sheet.devices.map(\.deviceName), ["Phone", "Tablet"])
         XCTAssertTrue(try XCTUnwrap(sheet.devices.first).earnedExhausted)
+        XCTAssertFalse(sheet.hasParentManualLock)
+    }
+
+    func testUnlockSheetExposesPermanentRemovalOnlyWhenParentManualLockExists() {
+        let automaticOnly = MasterUnlockSheetModel(projection: makeProjection(devices: [
+            makeDevice(id: phoneID, name: "Phone", taskIncomplete: true),
+        ]))
+        let withManual = MasterUnlockSheetModel(projection: makeProjection(devices: [
+            makeDevice(id: phoneID, name: "Phone", manualAllApps: true),
+        ]))
+
+        XCTAssertFalse(automaticOnly.hasParentManualLock)
+        XCTAssertTrue(withManual.hasParentManualLock)
     }
 
     func testMixedDevicesShowsChoiceSheet() {
@@ -95,7 +108,7 @@ final class MasterLockProjectionTests: XCTestCase {
 
         XCTAssertEqual(
             MasterLockPresentation.reduce(projection: projection),
-            .overrideActive(expiresAt: expiresAt)
+            .overrideActive(desiredLocked: false, expiresAt: expiresAt)
         )
     }
 

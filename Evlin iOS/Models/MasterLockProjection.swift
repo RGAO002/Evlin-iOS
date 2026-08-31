@@ -35,6 +35,7 @@ nonisolated struct MasterLockProjection: Equatable, Sendable {
     let snapshotDigest: String
     let overrideRevision: Int64
     let overrideExpiresAt: Date?
+    let overrideDesiredLocked: Bool?
     let devices: [MasterLockDeviceProjection]
 
     var expectedDeviceIDs: [UUID] {
@@ -51,7 +52,7 @@ nonisolated struct MasterLockProjection: Equatable, Sendable {
         else {
             return fallbackLocked
         }
-        return false
+        return overrideDesiredLocked == true
     }
 
     func matchesConfirmation(of operation: MasterLockOperation) -> Bool {
@@ -65,12 +66,14 @@ nonisolated struct MasterLockProjection: Equatable, Sendable {
         snapshotDigest: String,
         overrideRevision: Int64,
         overrideExpiresAt: Date?,
+        overrideDesiredLocked: Bool? = nil,
         devices: [MasterLockDeviceProjection]
     ) {
         self.childProfileID = childProfileID
         self.snapshotDigest = snapshotDigest
         self.overrideRevision = overrideRevision
         self.overrideExpiresAt = overrideExpiresAt
+        self.overrideDesiredLocked = overrideDesiredLocked
         self.devices = devices
     }
 
@@ -82,6 +85,7 @@ nonisolated struct MasterLockProjection: Equatable, Sendable {
         snapshotDigest = dto.snapshotDigest
         overrideRevision = dto.overrideRevision
         overrideExpiresAt = try MasterLockServerDate.parseIfPresent(dto.overrideExpiresAt)
+        overrideDesiredLocked = dto.overrideDesiredLocked
         devices = dto.devices.map { device in
             MasterLockDeviceProjection(
                 childDeviceID: device.childDeviceID,
@@ -128,6 +132,10 @@ nonisolated struct MasterUnlockSheetModel: Equatable, Sendable {
 
     var hasAutomaticRestrictions: Bool {
         devices.contains(where: \.hasAutomaticRestrictions)
+    }
+
+    var hasParentManualLock: Bool {
+        devices.contains(where: \.manualAllApps)
     }
 
     init(projection: MasterLockProjection) {

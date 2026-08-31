@@ -123,6 +123,67 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
         XCTAssertEqual(projected.blocks, originalBlocks)
     }
 
+    func testTimedLockExpiryPreservesPreexistingPermanentManualOwnership() {
+        let key = DefaultLockGroup.shared.recordKey
+        let existing = makeShield(
+            key: key,
+            tier: .savedList,
+            sources: [.manual]
+        )
+
+        let locked = DefaultGroupLockApplier.reconcilingTimedParentLock(
+            in: [key: existing],
+            selection: FamilyActivitySelection(),
+            childID: ownerID,
+            commandID: UUID(),
+            locked: true
+        )
+        XCTAssertEqual(locked[key]?.sources, [.manual, .parentTimedLock])
+
+        let expired = DefaultGroupLockApplier.reconcilingTimedParentLock(
+            in: locked,
+            selection: FamilyActivitySelection(),
+            childID: ownerID,
+            commandID: UUID(),
+            locked: false
+        )
+        XCTAssertEqual(expired[key]?.sources, [.manual])
+    }
+
+    func testTimedLockExpiryDeletesTemporaryOnlyRecord() {
+        let key = DefaultLockGroup.shared.recordKey
+        let locked = DefaultGroupLockApplier.reconcilingTimedParentLock(
+            in: [:],
+            selection: FamilyActivitySelection(),
+            childID: ownerID,
+            commandID: UUID(),
+            locked: true
+        )
+
+        XCTAssertEqual(locked[key]?.sources, [.parentTimedLock])
+
+        let expired = DefaultGroupLockApplier.reconcilingTimedParentLock(
+            in: locked,
+            selection: FamilyActivitySelection(),
+            childID: ownerID,
+            commandID: UUID(),
+            locked: false
+        )
+        XCTAssertNil(expired[key])
+    }
+
+    func testTimedLockDoesNotRunUnlockSuppressionProjection() {
+        let shield = makeShield(key: "manual", tier: .savedList, sources: [.manual])
+        let projected = ParentUnlockOverridePolicy.project(
+            shields: [shield.recordKey: shield],
+            blocks: [:],
+            snapshot: activeSnapshot(desiredLocked: true),
+            reflectionActive: false
+        )
+
+        XCTAssertEqual(projected.shields[shield.recordKey], shield)
+    }
+
     func testOverrideFiltersEachScopeIndependently() {
         let key = "mixed"
         let record = makeShield(
@@ -208,7 +269,8 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
             envelope: envelope(),
             expectedOwner: ownerID,
             now: now,
-            store: harness.store
+            store: harness.store,
+            setTimedParentLock: { _, _, _ in }
         ) {
             projectionObservedPersistedSnapshot = try harness.store.read(
                 expectedOwner: self.ownerID
@@ -255,7 +317,8 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
             command: overrideCommand(action: .parentUnlockOverride),
             expectedOwner: ownerID,
             now: now,
-            store: harness.store
+            store: harness.store,
+            setTimedParentLock: { _, _, _ in }
         ) {
             projectedRevision = try harness.store.read(
                 expectedOwner: self.ownerID
@@ -276,7 +339,8 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
             expectedOwner: ownerID,
             now: now,
             store: harness.store,
-            expiryScheduler: scheduler
+            expiryScheduler: scheduler,
+            setTimedParentLock: { _, _, _ in }
         ) {
             scheduler.recordProjection()
         }
@@ -368,6 +432,48 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
     }
 
     @MainActor
+    func testPermanentMasterControlClearsPriorTimedParentLockSource() async throws {
+        let harness = try makeOverrideHarness()
+        _ = try harness.store.ingest(
+            envelope(revision: 1, desiredLocked: true),
+            expectedOwner: ownerID,
+            now: now
+        )
+
+        let prepared = try ParentMasterControlCommandApplication.prepare(
+            command: masterCommand(action: .parentMasterUnlock, revision: 2),
+            expectedOwner: ownerID,
+            now: now,
+            store: harness.store
+        )
+
+        XCTAssertEqual(prepared.disposition, .applied)
+        XCTAssertEqual(prepared.desiredLocked, false)
+        XCTAssertTrue(prepared.clearsTimedParentLock)
+    }
+
+    @MainActor
+    func testStalePermanentMasterControlDoesNotClearTimedParentLockSource() async throws {
+        let harness = try makeOverrideHarness()
+        _ = try harness.store.ingest(
+            envelope(revision: 3, desiredLocked: true),
+            expectedOwner: ownerID,
+            now: now
+        )
+
+        let prepared = try ParentMasterControlCommandApplication.prepare(
+            command: masterCommand(action: .parentMasterUnlock, revision: 2),
+            expectedOwner: ownerID,
+            now: now,
+            store: harness.store
+        )
+
+        XCTAssertEqual(prepared.disposition, .superseded(currentRevision: 3))
+        XCTAssertNil(prepared.desiredLocked)
+        XCTAssertFalse(prepared.clearsTimedParentLock)
+    }
+
+    @MainActor
     func testStaleMasterCommandCannotMutateLocalEnforcement() async throws {
         let harness = try makeOverrideHarness()
         _ = try harness.store.ingest(
@@ -419,6 +525,34 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
         XCTAssertEqual(mutations, [true])
     }
 
+    @MainActor
+    func testActionExecutorClearsTimedSourceBeforePermanentMasterMutation() async throws {
+        let harness = try makeOverrideHarness()
+        var effects: [String] = []
+        let executor = ActionExecutor(
+            activityScheduler: LockSchedulerSpy(),
+            authorizationStatusProvider: { .approved },
+            parentUnlockOverrideStore: harness.store,
+            parentUnlockOverrideNow: { self.now },
+            parentTimedLockMutation: { locked in
+                effects.append("timed:\(locked)")
+                return true
+            },
+            parentMasterUnlockMutation: {
+                effects.append("manual:false")
+                return true
+            }
+        )
+
+        _ = await executor.execute(
+            masterCommand(action: .parentMasterUnlock, revision: 2),
+            expectedChildID: ownerID,
+            identityIsCurrent: { $0 == self.ownerID }
+        )
+
+        XCTAssertEqual(effects, ["timed:false", "manual:false"])
+    }
+
     func testOverrideAckVerbsFitBackendContract() {
         XCTAssertEqual(
             ParentUnlockOverrideAck.verb(for: .parentMasterLock),
@@ -433,6 +567,10 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
             "unshield_all"
         )
         XCTAssertEqual(
+            ParentUnlockOverrideAck.verb(for: .parentLockOverride),
+            "shield"
+        )
+        XCTAssertEqual(
             ParentUnlockOverrideAck.verb(for: .parentUnlockOverrideCancel),
             "reconcile"
         )
@@ -440,6 +578,7 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
             CommandAction.parentMasterLock,
             .parentMasterUnlock,
             .parentUnlockOverride,
+            .parentLockOverride,
             .parentUnlockOverrideCancel,
         ] {
             XCTAssertLessThanOrEqual(ParentUnlockOverrideAck.verb(for: action).count, 16)
@@ -485,15 +624,17 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
             .taskPause,
             .deviceLimit,
             .perAppLimit,
-        ]
+        ],
+        desiredLocked: Bool = false
     ) -> ParentUnlockOverrideSnapshot {
         ParentUnlockOverrideSnapshot(
-            envelope: envelope(scopes: scopes),
+            envelope: envelope(scopes: scopes, desiredLocked: desiredLocked),
             status: .active
         )
     }
 
     private func envelope(
+        revision: Int64 = 1,
         scopes: Set<ParentUnlockOverrideScope> = [
             .manual,
             .earnedTime,
@@ -501,15 +642,17 @@ final class ParentUnlockOverrideEnforcementTests: XCTestCase {
             .deviceLimit,
             .perAppLimit,
         ],
-        cancelled: Bool = false
+        cancelled: Bool = false,
+        desiredLocked: Bool = false
     ) -> ParentUnlockOverrideEnvelope {
         ParentUnlockOverrideEnvelope(
-            revision: 1,
+            revision: revision,
             childDeviceID: ownerID,
             usageDate: "2026-04-26",
             startedAt: now,
             expiresAt: now.addingTimeInterval(3_600),
             operationID: UUID(uuidString: "DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD")!,
+            desiredLocked: desiredLocked,
             scopes: scopes,
             cancelled: cancelled
         )

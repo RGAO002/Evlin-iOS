@@ -482,7 +482,7 @@ nonisolated enum MasterLockPresentation: Equatable, Sendable {
     case unlockDirect
     case unlockWithDuration(MasterUnlockSheetModel)
     case mixed(MasterLockMixedModel)
-    case overrideActive(expiresAt: Date)
+    case overrideActive(desiredLocked: Bool, expiresAt: Date)
     case delivery(MasterLockDeliveryModel)
 
     static func reduce(
@@ -511,7 +511,10 @@ nonisolated enum MasterLockPresentation: Equatable, Sendable {
         }
 
         if let expiresAt = projection.overrideExpiresAt {
-            return .overrideActive(expiresAt: expiresAt)
+            return .overrideActive(
+                desiredLocked: projection.overrideDesiredLocked ?? false,
+                expiresAt: expiresAt
+            )
         }
 
         let restrictedCount = projection.devices.filter(\.hasManagedRestrictions).count
